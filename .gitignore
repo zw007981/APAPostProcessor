@@ -1,0 +1,12 @@
+Testing/
+build/
+build_asan/
+__pycache__/
+.VSCodeCounter/
+log/
+src/generated/
+
+docs/
+data/
+
+.favorites.json

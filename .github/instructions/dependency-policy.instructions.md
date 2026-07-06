@@ -1,0 +1,1 @@
+../../.agents/instructions/dependency-policy.md

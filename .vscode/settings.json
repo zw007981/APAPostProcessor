@@ -1,0 +1,16 @@
+{
+	"C_Cpp.default.compileCommands": "${workspaceFolder}/build/Debug/compile_commands.json",
+	"C_Cpp.default.cppStandard": "c++17",
+	"cpp-check-lint.cppcheck.--std_c++=": "c++17",
+	"cpp-check-lint.cppcheck.-I ": [
+		"src",
+		"build/Debug",
+		"third_party/quill/include"
+	],
+	"cpp-check-lint.cppcheck.--suppress=": [
+		"unmatchedSuppression",
+		"missingIncludeSystem",
+		"preprocessorErrorDirective:${workspaceFolder}/build/Debug/apa_post_process.pb.h",
+		"toomanyconfigs"
+	]
+}

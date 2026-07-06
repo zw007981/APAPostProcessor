@@ -1,0 +1,75 @@
+{
+	"version": "0.2.0",
+	"configurations": [
+		{
+			"name": "Launch - apa_post_processor_debug",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder}/build/Debug/apa_post_processor",
+			"args": [],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}/build/Debug",
+			"environment": [],
+			"externalConsole": false,
+			"MIMode": "gdb",
+			"setupCommands": [
+				{
+					"description": "Enable pretty-printing for gdb",
+					"text": "-enable-pretty-printing",
+					"ignoreFailures": true
+				}
+			]
+		},
+		{
+			"name": "Launch - apa_post_processor_release",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder}/build/Release/apa_post_processor",
+			"args": [],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}/build/Release",
+			"environment": [],
+			"externalConsole": false,
+			"MIMode": "gdb",
+			"setupCommands": [
+				{
+					"description": "Enable pretty-printing for gdb",
+					"text": "-enable-pretty-printing",
+					"ignoreFailures": true
+				}
+			]
+		},
+		{
+			"name": "Launch - test_apa_post_processor",
+			"type": "cppdbg",
+			"request": "launch",
+			"program": "${workspaceFolder}/build/Debug/test_apa_post_processor",
+			"args": [
+				"--gtest_color=yes"
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}/build/Debug",
+			"environment": [],
+			"externalConsole": false,
+			"MIMode": "gdb",
+			"setupCommands": [
+				{
+					"description": "Enable pretty-printing for gdb",
+					"text": "-enable-pretty-printing",
+					"ignoreFailures": true
+				}
+			]
+		}
+	],
+	"compounds": [
+		{
+			"name": "Launch - all three executables",
+			"configurations": [
+				"Launch - apa_post_processor_debug",
+				"Launch - apa_post_processor_release",
+				"Launch - test_apa_post_processor"
+			],
+			"stopAll": true
+		}
+	]
+}
