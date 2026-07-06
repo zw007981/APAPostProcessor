@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package apa.post_processor;
+
+// ==========================================
+// 1. 基础几何与状态 (Geometry)
+// ==========================================
+message Position {
+    double x = 1;
+    double y = 2;
+}
+
+message Pose {
+    double x = 1;
+    double y = 2;
+    // 航向角 (rad)
+    double theta = 3;
+}
+
+// ==========================================
+// 2. 车辆参数 (Vehicle)
+// ==========================================
+message VehicleParams {
+    // 车辆长度 (m)
+    double length = 1;
+    // 车辆宽度 (m)
+    double width = 2;
+    // 轴距 (m)
+    double wheelbase = 3;
+    // 最大方向盘转角/前轮偏角 (rad)
+    double max_steer_angle = 4;
+    // 后轴到后保险杠的距离 (m)
+    double rear_overhang = 5;
+    // 最大纵向加速度 (m/s^2)
+    optional double max_accel = 6;
+    // 最大纵向减速度 (m/s^2)
+    optional double max_decel = 7;
+    // 前轮最大偏角速度 (rad/s)
+    optional double max_steer_rate = 8;
+}
+
+// ==========================================
+// 3. 环境栅格地图 (Map)
+// ==========================================
+message GridMap {
+    // 栅格边长/分辨率 (m/pixel)
+    double resolution = 1;
+    // 地图宽度 (像素列数)
+    int32 width = 2;
+    // 地图高度 (像素行数)
+    int32 height = 3;
+    // 栅格原点位置，即第 0 行第 0 列栅格的中心
+    Position origin = 4;
+    // 栅格中心位置
+    repeated Position cells = 5;
+}
+
+// ==========================================
+// 4. 轨迹与机动段 (Trajectory)
+// ==========================================
+enum Direction {
+    // 未知/未推断 (Request 输入时默认)
+    UNKNOWN = 0;
+    // 前进
+    FORWARD = 1;
+    // 后退
+    BACKWARD = 2;
+    // 钟摆泊车等特殊场景下的原地转向
+    PIVOT = 3;
+}
+
+message Maneuver {
+    // 方向标识
+    Direction direction = 1;
+    // 位姿序列
+    repeated Pose points = 2;
+}
+
+message Path {
+    // 位姿序列
+    repeated Pose points = 1;
+}
+
+// ==========================================
+// 5. 顶层接口：优化请求与响应 (Service)
+// ==========================================
+// 优化器输入 Request (对应回放注入的现场数据 JSON)
+message OptimizeRequest {
+    // 前端 A* 给出的初始路径
+    Path initial_path = 1;
+    // 栅格地图
+    GridMap environment = 2;
+    // 车辆参数
+    VehicleParams vehicle = 3;
+}
+
+// 优化器输出 Response
+message OptimizeResponse {
+    // 优化是否成功收敛
+    bool success = 1;
+    // 调试/错误信息
+    string message = 2;
+    // 优化后的平滑路径
+    Path optimized_path = 3;
+    // 优化后的机动段序列
+    repeated Maneuver maneuvers = 4;
+    // 优化耗时统计 (ms)
+    double optimization_time_ms = 5;
+}
