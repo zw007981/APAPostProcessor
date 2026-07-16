@@ -212,17 +212,6 @@ if(benchmark_FOUND)
     endif()
 endif()
 
-# OSQP 验证 Demo：通过 OsqpSolver Pimpl 包装类求解，验证隔离方案有效
-# 链接 apa_core_lib 而非直接链接 osqpstatic，因为 OsqpSolver 实现在 core lib 中
-add_executable(apa_osqp_demo ${CMAKE_CURRENT_SOURCE_DIR}/tool/osqp_demo.cpp)
-target_link_libraries(apa_osqp_demo PRIVATE apa_core_lib stc_SQP_core_lib)
-message(STATUS "OSQP demo target created: apa_osqp_demo")
-
-# LBFGSpp 验证 Demo：Rosenbrock 函数无约束优化，验证 header-only 头文件可用
-add_executable(apa_lbfgspp_demo ${CMAKE_CURRENT_SOURCE_DIR}/tool/lbfgspp_demo.cpp)
-target_link_libraries(apa_lbfgspp_demo PRIVATE lbfgspp)
-message(STATUS "LBFGSpp demo target created: apa_lbfgspp_demo")
-
 # ==========================================
 # 5. Ninja 动态并发池优化 (Ninja Pool Hack)
 # ==========================================

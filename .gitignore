@@ -5,8 +5,10 @@ __pycache__/
 .VSCodeCounter/
 log/
 src/generated/
+build_debug/
 
 docs/
-data/
+milestones/
+quality-audits/
 
 .favorites.json

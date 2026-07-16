@@ -11,7 +11,7 @@
 
 **AgenticScaffold** 是一个可复制、可迁移的**样板仓库**：通过标准化的上下文路由、分层治理规则及开发 SOP，让任意一个 Agent（无论使用哪家厂商的工具）进入仓库后都能快速、准确地获取"该读什么、该遵守什么规则、该按什么流程做事"，把 Agent 的产出稳定在一个可预期、可审查、可复现的轨道上，以**准确、稳定、高效**完成复杂工程任务为最高目标。
 
-## 2. 解决思路（设计哲学）
+## 2. 解决思路
 
 - **分层隔离，职责单一**：路由层（`AGENTS.md`）只做索引，不重复正文；规则层（`.agents/`）分"极简红线触发器"（`rules.md`）与"完整规则正文"（`instructions/`）两级，避免一次性把所有规则灌给 Agent 撑爆上下文；记忆层（`docs/`）承载随项目演进持续更新的"活记忆"；适配层（`.github/`、`CLAUDE.md`、`.kimirules`、`.codegeexrules`）只负责把同一份规则"翻译"给不同工具各自的加载机制。
 - **唯一权威源 + 软链接复用**：任何规则/流程模板只在 `.agents/` 下维护一份物理文件，其余工具专属入口都以软链接指向它（如 `.github/instructions/cpp.instructions.md -> .agents/instructions/cpp-style.md`），从物理上杜绝"改了一处忘了改另一处"的规则漂移。
@@ -344,32 +344,37 @@ sequenceDiagram
 
 宏观审查沿用 🚨 阻断 / ⚠️ 严重 / 📝 建议 的三级分类，但审查维度换成跨 Milestone 视角的五项：架构一致性、接口契约完整性、跨模块重复与耦合、全局构建与测试健康度、技术债务收敛情况（具体定义见 [.agents/prompts/global-quality-audit.md](.agents/prompts/global-quality-audit.md)）。
 
+> 与 Milestone 开发流程类似，`audit-{N}` 的编号不需要人工在对话中手动指定：新起一轮校验时，Agent 自动取 `docs/quality-audits/` 下已有最大编号 + 1；续接处理/复核一次已经发起的校验时，Agent 自动定位编号最大的现有目录。只有当人工明确要求"重新开始新一轮"或"针对更早的历史 audit 目录"时，才需要显式指定编号（详见 [.agents/prompts/global-quality-audit.md](.agents/prompts/global-quality-audit.md) 的"编号确定规则"）。
+
 **给 Review Agent 的示例开场（第一阶段，新开一个会话）**：
 
 ```
 请阅读 AGENTS.md，然后套用 .agents/prompts/global-quality-audit.md 对整个代码库做一次全局质量校验。
 本次覆盖范围：docs/milestones.md 中所有已标记「已完成」的 Milestone。
 触发原因：这批 Milestone 完成的 xxx 已经收尾，需要一次跨 Milestone 的整体体检。
-请新建 docs/quality-audits/audit-001/，写清 scope.md 与 review-log.md 的 Round 0 结论。
 ```
 
 **若有 🚨/⚠️，给 Dev Agent 的示例开场（第二阶段，另开一个会话）**：
 
 ```
-请阅读 AGENTS.md 与 docs/quality-audits/audit-001/scope.md，然后套用 .agents/prompts/global-quality-audit.md 处理 review-log.md 最新一轮意见。这次修复可能跨越多个 Milestone 涉及的文件，请按问题实际影响范围处理，不要局限于某一个Milestone。
+请阅读 AGENTS.md，然后套用 .agents/prompts/global-quality-audit.md 处理最新一次全局质量校验 review-log.md 最新一轮意见。这次修复可能跨越多个 Milestone 涉及的文件，请按问题实际影响范围处理，不要局限于某一个Milestone。
 ```
 
 **处理完成后，回到 Review Agent 会话请求复核**：
 
 ```
-Dev Agent 已处理完毕，请查看 docs/quality-audits/audit-001/review-log.md 最新一轮回应，套用 global-quality-audit.md 再次执行宏观复核。
+Dev Agent 已处理完毕，请查看最新一次全局质量校验 review-log.md 最新一轮回应，套用 global-quality-audit.md 再次执行宏观复核。
 ```
 
-**收敛后（🚨=0 且 ⚠️=0）**：在 `scope.md` 顶部登记"本次全局质量校验已通过，日期：xxx"即可，不需要、也不应该执行 `milestone-close.md`——这不是某个 Milestone 的收尾动作，不影响 `docs/milestones.md` 中任何一个 Milestone 的状态。
+**收敛后（🚨=0 且 ⚠️=0）**：
+
+```
+在 scope.md 顶部登记"本次全局质量校验已通过，日期：xxx"即可，不需要、也不应该执行 `milestone-close.md`——这不是某个 Milestone 的收尾动作，不影响 `docs/milestones.md` 中任何一个 Milestone 的状态。
+```
 
 ### 4.6 规模化：可选的阶段归档（大多数项目不需要）
 
-本节针对**长生命周期、多人团队**的场景，比如一个 10 人团队持续维护 4 年的 repo：第一年主力开发阶段 Milestone 可能细到按周拆分，累积几十上百个；后续维护阶段可能改为按月拆分，数量大幅减少。这种情况下 `docs/milestones.md` 的一张扁平大表会读不动。
+本节针对**长生命周期、多人团队**的场景，比如一个 10 人团队持续维护 4 年的 repo：第一年主力开发阶段 Milestone 可能细到按天拆分，累积几十上百个；后续维护阶段可能改为按周拆分，数量大幅减少。这种情况下 `docs/milestones.md` 的一张扁平大表会读不动。
 
 **默认情况下不需要处理这个问题**：如果项目规模有限（比如一个几十个 Milestone 后就基本稳定的工具库），`docs/milestones.md` + `docs/milestones/milestone-NNN/` 的扁平结构可以一直用到项目结束，不需要引入下面的机制。
 
