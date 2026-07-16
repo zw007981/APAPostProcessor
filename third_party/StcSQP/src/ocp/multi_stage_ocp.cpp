@@ -159,9 +159,11 @@ bool MultiStageOCP::validate(std::string* reason) const {
         }
         for (const auto& constraint : segment.constraints) {
             if (!constraint) {
-                continue;
+                set_reason("segment contains null constraint");
+                return false;
             }
-            if (constraint->ng() <= 0) {
+            const int ng = constraint->ng();
+            if (ng <= 0) {
                 set_reason("constraint dimension ng <= 0; add no constraint instead");
                 return false;
             }

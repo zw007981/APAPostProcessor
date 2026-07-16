@@ -68,7 +68,7 @@ public:
         Cx.setZero(1, nx_);
         Cu.setZero(1, nu_);
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         auto copy = std::make_shared<RecordingConstraint>(nx_, nu_);
         copy->recorded_params_ = recorded_params_;
@@ -111,7 +111,7 @@ public:
         Cx.setZero(1, nx_);
         Cu.setZero(1, nu_);
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         return std::make_shared<ThrowingEvaluationConstraint>(nx_, nu_);
     }
@@ -870,8 +870,7 @@ TEST(ProblemUpdaterIntegration, StageParametersFlowIntoConvexCorridorConstraint)
     segment.x_max = Vector::Constant(nx, 10.0);
     segment.u_min = Vector::Constant(nu, -1.0);
     segment.u_max = Vector::Constant(nu, 1.0);
-    segment.constraints.push_back(
-        std::make_shared<ConvexCorridorConstraint>(Vector::Zero(ProblemUpdater::kParameterDim), nu));
+    segment.constraints.push_back(std::make_shared<ConvexCorridorConstraint>(Vector::Zero(ProblemUpdater::kParameterDim), nu));
     ocp.addSegment(segment);
 
     Trajectory init_guess;
@@ -887,8 +886,7 @@ TEST(ProblemUpdaterIntegration, StageParametersFlowIntoConvexCorridorConstraint)
     config.top_k = 10;
     ProblemUpdater updater(config);
 
-    auto corridor =
-        std::dynamic_pointer_cast<ConvexCorridorConstraint>(segment.constraints[0]);
+    auto* corridor = dynamic_cast<const ConvexCorridorConstraint*>(segment.constraints[0].get());
     ASSERT_NE(corridor, nullptr);
 
     // 场景 A：宽松半空间（x <= 100），无违反
@@ -941,10 +939,8 @@ TEST(ProblemUpdaterIntegration, SqpSolverAcceptsStageParameters)
     segment.x_max = Vector::Constant(nx, 10.0);
     segment.u_min = Vector::Constant(nu, -1.0);
     segment.u_max = Vector::Constant(nu, 1.0);
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1);
-    segment.constraints.push_back(
-        std::make_shared<ConvexCorridorConstraint>(Vector::Zero(ProblemUpdater::kParameterDim), nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1);
+    segment.constraints.push_back(std::make_shared<ConvexCorridorConstraint>(Vector::Zero(ProblemUpdater::kParameterDim), nu));
     ocp.addSegment(segment);
 
     Trajectory init_guess;
@@ -997,10 +993,9 @@ TEST(ProblemUpdaterIntegration, SqpInjectsDifferentParametersPerStep)
     segment.x_max = Vector::Constant(nx, 10.0);
     segment.u_min = Vector::Constant(nu, -1.0);
     segment.u_max = Vector::Constant(nu, 1.0);
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1);
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1);
     auto recording = std::make_shared<RecordingConstraint>(nx, nu);
-    segment.constraints.push_back(recording);
+    segment.constraints.emplace_back(recording);
     ocp.addSegment(segment);
 
     Trajectory init_guess;
@@ -1077,19 +1072,18 @@ TEST(ProblemUpdaterIntegration, MultiSegmentInjectionUsesStepInSegment)
         segment.x_max = Vector::Constant(nx, 10.0);
         segment.u_min = Vector::Constant(nu, -1.0);
         segment.u_max = Vector::Constant(nu, 1.0);
-        segment.cost = std::make_shared<QuadraticTrackingCost>(
-            Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1);
+        segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1);
         return segment;
     };
 
     StageSegment seg1 = makeSegment(N1);
     auto recording1 = std::make_shared<RecordingConstraint>(nx, nu);
-    seg1.constraints.push_back(recording1);
+    seg1.constraints.emplace_back(recording1);
     ocp.addSegment(seg1);
 
     StageSegment seg2 = makeSegment(N2);
     auto recording2 = std::make_shared<RecordingConstraint>(nx, nu);
-    seg2.constraints.push_back(recording2);
+    seg2.constraints.emplace_back(recording2);
     ocp.addSegment(seg2);
 
     Trajectory init_guess;
@@ -1166,8 +1160,7 @@ TEST(ProblemUpdaterIntegration, TightCorridorMakesSqpInfeasible)
     segment.x_max = Vector::Constant(nx, 10.0);
     segment.u_min = Vector::Constant(nu, -1.0);
     segment.u_max = Vector::Constant(nu, 1.0);
-    segment.constraints.push_back(
-        std::make_shared<ConvexCorridorConstraint>(Vector::Zero(ProblemUpdater::kParameterDim), nu));
+    segment.constraints.push_back(std::make_shared<ConvexCorridorConstraint>(Vector::Zero(ProblemUpdater::kParameterDim), nu));
     ocp.addSegment(segment);
 
     Trajectory init_guess;

@@ -63,9 +63,7 @@ inline int computeOcpNgMax(const MultiStageOCP& ocp)
     for (const auto& segment : ocp.segments()) {
         int ng_seg = 0;
         for (const auto& constraint : segment.constraints) {
-            if (constraint) {
-                ng_seg += constraint->ng();
-            }
+            ng_seg += constraint ? constraint->ng() : 0;
         }
         ng_max = std::max(ng_max, ng_seg);
     }

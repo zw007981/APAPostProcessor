@@ -32,6 +32,14 @@ SQPSolver::SQPSolver(std::unique_ptr<QPSolver> qp_solver)
 {
 }
 
+void SQPSolver::setExternalQPData(std::unique_ptr<QPData> qp_data) {
+    external_qp_data_ = std::move(qp_data);
+}
+
+std::unique_ptr<QPData> SQPSolver::takeQPData() {
+    return std::move(qp_data_);
+}
+
 bool SQPSolver::solve(const MultiStageOCP& ocp,
     const Trajectory& initial_guess, Trajectory& solution)
 {
@@ -39,6 +47,10 @@ bool SQPSolver::solve(const MultiStageOCP& ocp,
     iter_count_ = 0;
     rti_downgraded_ = false;
     converged_ = false;
+
+    // 清理 OMP 约束克隆池：每次 solve() 重新克隆，避免前一次求解遗留的
+    // 约束状态（如迭代走廊的内部迭代器）在第二次 solve 中产生不一致行为。
+    thread_constraint_clones_.clear();
 
     std::string reason;
     if (!validateProblem(ocp, initial_guess, &reason)) {
@@ -77,21 +89,42 @@ bool SQPSolver::solve(const MultiStageOCP& ocp,
     for (const auto& segment : ocp.segments()) {
         int ng_seg = 0;
         for (const auto& constraint : segment.constraints) {
-            if (constraint) {
-                ng_seg += constraint->ng();
-            }
+            ng_seg += constraint ? constraint->ng() : 0;
         }
         ng_max = std::max(ng_max, ng_seg);
     }
 
-    qp_data_ = std::make_unique<QPData>(N, nx, nu, ng_max);
-    qp_solution_.resize(N, nx, nu);
+    // 若外部已注入 QPData 且维度匹配，则复用；否则内部新建。
+    if (external_qp_data_) {
+        if (external_qp_data_->N == N && external_qp_data_->nx == nx &&
+            external_qp_data_->nu == nu &&
+            external_qp_data_->ng_max == ng_max) {
+            qp_data_ = std::move(external_qp_data_);
+            qp_data_->reset();
+        } else {
+            LOG_WARN("External QPData dimension mismatch, falling back to new allocation");
+            external_qp_data_.reset();
+            qp_data_ = std::make_unique<QPData>(N, nx, nu, ng_max);
+        }
+    } else {
+        qp_data_ = std::make_unique<QPData>(N, nx, nu, ng_max);
+    }
+    const int qp_slack_dim = qp_solver_ ? qp_solver_->slackDim() : 0;
+    qp_solution_.resize(N, nx, nu, qp_slack_dim);
     mutable_g_.resize(ng_max);
     zero_u_.resize(nu);
     zero_u_.setZero();
 
-    // 注意：clone 在 solve 入口基于当前约束生成；若上层在两次 solve 之间更新了约束参数，
-    //      下一次 solve 会重新 clone，保证参数不陈旧。
+    // 若底层 QP 求解器支持软约束且用户已配置，则把软约束配置透传给 QPData。
+    // HPIPM 求解器在 solve() 内会校验 ns、idxs 与 ng_max 的合法性。
+    if (qp_slack_dim > 0 &&
+        options_.soft_constraint_config.ns == qp_slack_dim) {
+        qp_data_->soft_config = std::make_unique<SoftConstraintConfig>(
+            options_.soft_constraint_config);
+    }
+
+    // 注意：每线程 clone 副本在 solve 入口基于当前约束/代价生成；若上层在两次 solve 之间
+    //      更新了约束参数，下一次 solve 会重新 clone，保证参数不陈旧。
     const bool use_omp_this_solve = [this, N]() {
 #ifdef _OPENMP
         return options_.use_omp && N >= options_.omp_parallel_threshold;
@@ -106,20 +139,26 @@ bool SQPSolver::solve(const MultiStageOCP& ocp,
         max_threads = omp_get_max_threads();
 #endif
         thread_constraint_clones_.resize(max_threads);
+        thread_cost_clones_.resize(max_threads);
         const int num_segments = static_cast<int>(ocp.segments().size());
         for (int t = 0; t < max_threads; ++t) {
             thread_constraint_clones_[t].resize(num_segments);
+            thread_cost_clones_[t].resize(num_segments);
             for (int seg_idx = 0; seg_idx < num_segments; ++seg_idx) {
                 const auto& segment = ocp.segments()[seg_idx];
-                thread_constraint_clones_[t][seg_idx].clear();
-                thread_constraint_clones_[t][seg_idx].reserve(segment.constraints.size());
-                for (const auto& c : segment.constraints) {
-                    thread_constraint_clones_[t][seg_idx].push_back(c ? c->clone() : nullptr);
+                for (const auto& constraint : segment.constraints) {
+                    if (constraint) {
+                        thread_constraint_clones_[t][seg_idx].push_back(constraint->clone());
+                    }
+                }
+                if (segment.cost) {
+                    thread_cost_clones_[t][seg_idx] = segment.cost->clone();
                 }
             }
         }
     } else {
         thread_constraint_clones_.clear();
+        thread_cost_clones_.clear();
     }
 
     if (use_rti_this_solve) {
@@ -136,6 +175,7 @@ bool SQPSolver::solve(const MultiStageOCP& ocp,
 
     // Full SQP 模式：迭代至收敛或 max_iter。
     // 未收敛时仍把 current_traj_ 作为 last iterate 写入 solution 并返回 false。
+
     for (iter_count_ = 0; iter_count_ < options_.max_iter; ++iter_count_) {
         if (!iterate()) {
             LOG_ERROR("SQP iteration failed at iteration ", iter_count_);
@@ -331,8 +371,8 @@ bool SQPSolver::linearize()
         return true;
     }
 
-    // 并行路径：每个线程持有独立的 Constraint 副本（clone），避免 CasADiFunction 工作区竞争。
-    // 约束 clone 池已在 solve() 入口预分配，本处直接按线程索引取用。
+    // 并行路径：每个线程持有独立的 Constraint clone 副本，避免 CasADiFunction 工作区竞争。
+    // 约束克隆池已在 solve() 入口预分配，本处直接按线程索引取用。
     bool has_error = false;
     int fail_global_k = std::numeric_limits<int>::max();
 #pragma omp parallel reduction(|| : has_error) reduction(min : fail_global_k)
@@ -477,16 +517,104 @@ bool SQPSolver::assembleQP()
         return false;
     }
     const int N = qp_data_->N;
+
+    // 构建扁平化的步描述符，便于后续按 global_k 直接并行分发
+    struct AssembleStep {
+        int segment_idx = 0;
+        int step_in_segment = 0;
+        int global_k = 0;
+    };
+    std::vector<AssembleStep> steps;
+    steps.reserve(N);
     int global_k = 0;
-    for (const auto& segment : ocp_->segments()) {
+    for (int seg_idx = 0; seg_idx < static_cast<int>(ocp_->segments().size()); ++seg_idx) {
+        const auto& segment = ocp_->segments()[seg_idx];
         for (int i = 0; i < segment.N; ++i) {
-            const Vector& x = current_traj_.x[global_k];
-            const Vector& u = current_traj_.u[global_k];
-            if (!assembleCost(global_k, segment, x, u)) {
+            steps.push_back({ seg_idx, i, global_k });
+            ++global_k;
+        }
+    }
+
+    const bool use_omp = [this, N]() {
+#ifdef _OPENMP
+        return options_.use_omp && N >= options_.omp_parallel_threshold;
+#else
+        (void)N;
+        return false;
+#endif
+    }();
+
+    if (!use_omp) {
+        // 串行路径：使用成员 scratch buffer 与原始 CostTerm 指针
+        for (const auto& step : steps) {
+            const auto& segment = ocp_->segments()[step.segment_idx];
+            const Vector& x = current_traj_.x[step.global_k];
+            const Vector& u = current_traj_.u[step.global_k];
+            if (!assembleCost(step.global_k, segment, x, u)) {
                 return false;
             }
-            assembleBounds(global_k, segment, x, u);
-            ++global_k;
+            assembleBounds(step.global_k, segment, x, u);
+        }
+    } else {
+        // 并行路径：每个线程持有独立的 CostTerm clone 副本。
+        // cost 克隆池已在 solve() 入口预分配，本处直接按线程索引取用。
+        // assembleBounds 只做简单 box bound 计算，不在本次并行化范围内，仍串行处理。
+        bool has_error = false;
+        int fail_global_k = std::numeric_limits<int>::max();
+#pragma omp parallel reduction(|| : has_error) reduction(min : fail_global_k)
+        {
+            const int thread_id = [this]() {
+#ifdef _OPENMP
+                return omp_get_thread_num();
+#else
+                return 0;
+#endif
+            }();
+            const bool pool_ok = (thread_id < static_cast<int>(thread_cost_clones_.size()));
+            Vector local_q(qp_data_->nx);
+            Vector local_r(qp_data_->nu);
+            Matrix local_Q(qp_data_->nx, qp_data_->nx);
+            Matrix local_R(qp_data_->nu, qp_data_->nu);
+            Matrix local_S(qp_data_->nu, qp_data_->nx);
+
+#pragma omp for schedule(static)
+            for (int i = 0; i < static_cast<int>(steps.size()); ++i) {
+                const auto& step = steps[i];
+                if (!pool_ok) {
+                    has_error = true;
+                    fail_global_k = std::min(fail_global_k, step.global_k);
+                    continue;
+                }
+                const CostTerm* local_cost = nullptr;
+                if (step.segment_idx < static_cast<int>(thread_cost_clones_[thread_id].size())) {
+                    local_cost = thread_cost_clones_[thread_id][step.segment_idx].get();
+                }
+                const Vector& x = current_traj_.x[step.global_k];
+                const Vector& u = current_traj_.u[step.global_k];
+                try {
+                    if (local_cost == nullptr ||
+                        !assembleCostImpl(step.global_k, *local_cost, x, u, local_q, local_r,
+                            local_Q, local_R, local_S)) {
+                        has_error = true;
+                        fail_global_k = std::min(fail_global_k, step.global_k);
+                    }
+                } catch (const std::exception& e) {
+                    (void)e;
+                    has_error = true;
+                    fail_global_k = std::min(fail_global_k, step.global_k);
+                }
+            }
+        }
+        if (has_error) {
+            if (fail_global_k != std::numeric_limits<int>::max()) {
+                LOG_ERROR("assembleQP failed in OpenMP parallel path at global_k=", fail_global_k);
+            }
+            return false;
+        }
+        for (const auto& step : steps) {
+            const auto& segment = ocp_->segments()[step.segment_idx];
+            assembleBounds(step.global_k, segment, current_traj_.x[step.global_k],
+                current_traj_.u[step.global_k]);
         }
     }
 
@@ -532,50 +660,94 @@ bool SQPSolver::assembleQP()
 bool SQPSolver::assembleCost(int global_k, const StageSegment& segment,
     const Vector& x, const Vector& u)
 {
+    if (segment.cost) {
+        return assembleCostImpl(global_k, *segment.cost, x, u, cost_q_, cost_r_,
+            cost_Q_, cost_R_, cost_S_);
+    }
+    // 无代价时施加小正则化，保持 QP 良态；与 segment.cost == nullptr 语义一致。
     const int nx = qp_data_->nx;
     const int nu = qp_data_->nu;
     const bool is_terminal = (global_k == qp_data_->N);
-    if (segment.cost) {
-        // 使用成员 scratch buffer，避免每次调用临时分配
-        try {
-            segment.cost->gradient(x, u, cost_q_, cost_r_);
-            segment.cost->hessian(x, u, cost_Q_, cost_R_, cost_S_);
-        } catch (const std::exception& e) {
-            LOG_ERROR("assembleCost cost callback threw exception at step ", global_k, ": ", e.what());
-            return false;
-        }
-        // 防御性校验：维度与有限性
-        if (cost_q_.size() != nx || cost_Q_.rows() != nx || cost_Q_.cols() != nx ||
-            (!is_terminal && (cost_r_.size() != nu || cost_R_.rows() != nu ||
-                                 cost_R_.cols() != nu || cost_S_.rows() != nu ||
-                                 cost_S_.cols() != nx))) {
-            LOG_ERROR("assembleCost received invalid dimension output at step ", global_k);
-            return false;
-        }
-        if (!cost_q_.allFinite() || !cost_Q_.allFinite() ||
-            (!is_terminal &&
-                (!cost_r_.allFinite() || !cost_R_.allFinite() || !cost_S_.allFinite()))) {
-            LOG_ERROR("assembleCost received non-finite values at step ", global_k);
-            return false;
-        }
-        qp_data_->q[global_k] = cost_q_;
-        qp_data_->Q[global_k] = cost_Q_;
+    qp_data_->q[global_k].setZero();
+    qp_data_->Q[global_k].setIdentity();
+    qp_data_->Q[global_k] *= options_.reg_min;
+    if (!is_terminal) {
+        qp_data_->r[global_k].setZero();
+        qp_data_->R[global_k].setIdentity();
+        qp_data_->R[global_k] *= options_.reg_min;
+        qp_data_->S[global_k].setZero();
+    }
+    return true;
+}
+
+bool SQPSolver::assembleCostImpl(int global_k, const CostTerm& cost_term,
+    const Vector& x, const Vector& u, Vector& cost_q, Vector& cost_r, Matrix& cost_Q,
+    Matrix& cost_R, Matrix& cost_S)
+{
+    const int nx = qp_data_->nx;
+    const int nu = qp_data_->nu;
+    const bool is_terminal = (global_k == qp_data_->N);
+
+    // 对根代价项调用组合求值接口，消除分别调用 gradient/hessian 造成的重复 ESDF 查询。
+    cost_q.setZero(nx);
+    cost_Q.setZero(nx, nx);
+    if (!is_terminal) {
+        cost_r.setZero(nu);
+        cost_R.setZero(nu, nu);
+        cost_S.setZero(nu, nx);
+    }
+
+    double term_cost = 0.0;
+    Vector term_q(nx);
+    Vector term_r(nu);
+    Matrix term_Q(nx, nx);
+    Matrix term_R(nu, nu);
+    Matrix term_S(nu, nx);
+    try {
+        cost_term.evaluateGradientAndHessian(x, u, term_cost, term_q, term_r,
+            term_Q, term_R, term_S);
+    } catch (const std::exception& e) {
+        LOG_ERROR("assembleCost cost callback threw exception at step ", global_k, ": ", e.what());
+        return false;
+    }
+    // 防御性校验：维度与有限性
+    if (term_q.size() != nx || term_Q.rows() != nx || term_Q.cols() != nx ||
+        (!is_terminal && (term_r.size() != nu || term_R.rows() != nu ||
+                             term_R.cols() != nu || term_S.rows() != nu ||
+                             term_S.cols() != nx))) {
+        LOG_ERROR("assembleCost received invalid dimension output at step ", global_k);
+        return false;
+    }
+    if (!term_q.allFinite() || !term_Q.allFinite() ||
+        (!is_terminal &&
+            (!term_r.allFinite() || !term_R.allFinite() ||
+                !term_S.allFinite()))) {
+        LOG_ERROR("assembleCost received non-finite values at step ", global_k);
+        return false;
+    }
+    cost_q = term_q;
+    cost_Q = term_Q;
+    if (!is_terminal) {
+        cost_r = term_r;
+        cost_R = term_R;
+        cost_S = term_S;
+    }
+
+    // 全局 Hessian 正则化（默认 0.0，不改变既有行为）：无条件叠加到本 stage 的
+    // Q/R 对角上，抑制早期迭代因线性化误差导致的过大步长，详见头文件字段注释。
+    if (options_.hessian_regularization > 0.0) {
+        cost_Q.diagonal().array() += options_.hessian_regularization;
         if (!is_terminal) {
-            qp_data_->r[global_k] = cost_r_;
-            qp_data_->R[global_k] = cost_R_;
-            qp_data_->S[global_k] = cost_S_;
+            cost_R.diagonal().array() += options_.hessian_regularization;
         }
-    } else {
-        // 无代价时施加小正则化，保持 QP 良态
-        qp_data_->q[global_k].setZero();
-        qp_data_->Q[global_k].setIdentity();
-        qp_data_->Q[global_k] *= options_.reg_min;
-        if (!is_terminal) {
-            qp_data_->r[global_k].setZero();
-            qp_data_->R[global_k].setIdentity();
-            qp_data_->R[global_k] *= options_.reg_min;
-            qp_data_->S[global_k].setZero();
-        }
+    }
+
+    qp_data_->q[global_k] = cost_q;
+    qp_data_->Q[global_k] = cost_Q;
+    if (!is_terminal) {
+        qp_data_->r[global_k] = cost_r;
+        qp_data_->R[global_k] = cost_R;
+        qp_data_->S[global_k] = cost_S;
     }
     return true;
 }
@@ -594,7 +766,8 @@ void SQPSolver::assembleBounds(int global_k, const StageSegment& segment,
 bool SQPSolver::evaluateConstraintValue(const Constraint& constraint, const Vector& x,
     const Vector& u, const Vector& p, int global_k, bool in_parallel, Vector& g) const
 {
-    g.resize(constraint.ng());
+    const int ng = constraint.ng();
+    g.resize(ng);
     try {
         constraint.evaluate(x, u, p, g);
     } catch (const std::exception& e) {
@@ -603,7 +776,7 @@ bool SQPSolver::evaluateConstraintValue(const Constraint& constraint, const Vect
         }
         return false;
     }
-    if (g.size() != constraint.ng() || !g.allFinite()) {
+    if (g.size() != ng || !g.allFinite()) {
         if (!in_parallel) {
             LOG_ERROR("constraint evaluation received invalid output at step ", global_k);
         }
@@ -647,6 +820,11 @@ bool SQPSolver::solveQP()
 {
     if (qp_solver_ == nullptr || qp_data_ == nullptr) {
         return false;
+    }
+    // Full SQP 从第二次迭代开始，使用上一次成功 QP 解作为 HPIPM IPM 热启动；
+    // RTI 模式或首次迭代不设置，避免无意义初值或单步模式被污染。
+    if (!rti_mode_active_ && options_.use_qp_warm_start && iter_count_ > 0) {
+        qp_solver_->setWarmStart(qp_solution_);
     }
     const QPSolverStatus status = qp_solver_->solve(*qp_data_, qp_solution_);
     if (status != QPSolverStatus::SUCCESS) {
@@ -698,10 +876,8 @@ double SQPSolver::computeConstraintViolation(const Trajectory& traj) const
             // 一般约束正部
             const Vector& p_viol = getStageParameter(segment, i);
             for (const auto& constraint : segment.constraints) {
-                if (!constraint) {
-                    continue;
-                }
-                if (!evaluateConstraintValue(*constraint, x, u, p_viol, global_k,
+                if (!constraint ||
+                    !evaluateConstraintValue(*constraint, x, u, p_viol, global_k,
                         /*in_parallel=*/false, mutable_g_)) {
                     return std::numeric_limits<double>::infinity();
                 }
@@ -727,41 +903,43 @@ double SQPSolver::computeMerit(const Trajectory& traj) const
     double cost_sum = 0.0;
     int global_k = 0;
     for (const auto& segment : ocp_->segments()) {
+        if (!segment.cost) {
+            continue;
+        }
         for (int i = 0; i < segment.N; ++i) {
-            if (segment.cost) {
-                double stage_cost = 0.0;
-                try {
-                    segment.cost->evaluate(traj.x[global_k], traj.u[global_k], stage_cost);
-                } catch (const std::exception& e) {
-                    LOG_ERROR("computeMerit at step", global_k, " cost callback threw exception: ", e.what());
-                    return std::numeric_limits<double>::infinity();
-                }
-                if (!std::isfinite(stage_cost)) {
-                    LOG_ERROR("computeMerit at step ", global_k, " received non-finite cost");
-                    return std::numeric_limits<double>::infinity();
-                }
-                cost_sum += stage_cost;
+            double stage_cost = 0.0;
+            try {
+                segment.cost->evaluate(traj.x[global_k], traj.u[global_k], stage_cost);
+            } catch (const std::exception& e) {
+                LOG_ERROR("computeMerit at step", global_k, " cost callback threw exception: ", e.what());
+                return std::numeric_limits<double>::infinity();
             }
+            if (!std::isfinite(stage_cost)) {
+                LOG_ERROR("computeMerit at step ", global_k, " received non-finite cost");
+                return std::numeric_limits<double>::infinity();
+            }
+            cost_sum += stage_cost;
             ++global_k;
         }
     }
     // 终端代价
     if (!ocp_->segments().empty()) {
         const auto& last_segment = ocp_->segments().back();
-        if (last_segment.cost) {
-            double terminal_cost = 0.0;
-            try {
-                last_segment.cost->evaluate(traj.x[global_k], zero_u_, terminal_cost);
-            } catch (const std::exception& e) {
-                LOG_ERROR("computeMerit terminal cost callback threw exception:", e.what());
-                return std::numeric_limits<double>::infinity();
-            }
-            if (!std::isfinite(terminal_cost)) {
-                LOG_ERROR("computeMerit received non-finite terminal cost");
-                return std::numeric_limits<double>::infinity();
-            }
-            cost_sum += terminal_cost;
+        if (!last_segment.cost) {
+            return cost_sum + options_.merit_penalty * computeConstraintViolation(traj);
         }
+        double terminal_cost = 0.0;
+        try {
+            last_segment.cost->evaluate(traj.x[global_k], zero_u_, terminal_cost);
+        } catch (const std::exception& e) {
+            LOG_ERROR("computeMerit terminal cost callback threw exception:", e.what());
+            return std::numeric_limits<double>::infinity();
+        }
+        if (!std::isfinite(terminal_cost)) {
+            LOG_ERROR("computeMerit received non-finite terminal cost");
+            return std::numeric_limits<double>::infinity();
+        }
+        cost_sum += terminal_cost;
     }
     return cost_sum + options_.merit_penalty * computeConstraintViolation(traj);
 }
@@ -952,10 +1130,8 @@ bool SQPSolver::checkConvergence()
         for (int i = 0; i < segment.N; ++i) {
             const Vector& p_conv = getStageParameter(segment, i);
             for (const auto& constraint : segment.constraints) {
-                if (!constraint) {
-                    continue;
-                }
-                if (!evaluateConstraintValue(*constraint, current_traj_.x[global_k],
+                if (!constraint ||
+                    !evaluateConstraintValue(*constraint, current_traj_.x[global_k],
                         current_traj_.u[global_k], p_conv, global_k, /*in_parallel=*/false,
                         mutable_g_)) {
                     return false;

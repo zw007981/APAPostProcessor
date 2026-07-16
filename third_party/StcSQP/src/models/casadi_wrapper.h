@@ -26,9 +26,10 @@ namespace casadi {
         CasADiFunction(FunctionPointer func, WorkSizeFunction work_func, int n_in, int n_out);
         // 默认析构；iw_/w_ 由 vector 自动释放，无需额外清理。
         ~CasADiFunction() = default;
-        // 禁止拷贝：func_/work_func_ 可共享，但 iw_/w_ 共享会导致多线程竞争。
-        CasADiFunction(const CasADiFunction&) = delete;
-        CasADiFunction& operator=(const CasADiFunction&) = delete;
+        // 拷贝构造：func_/work_func_ 可共享，iw_/w_ 重新分配独立缓冲区，
+        // 因此副本与原实例可并发调用（多线程场景仍建议通过独立副本访问）。
+        CasADiFunction(const CasADiFunction&);
+        CasADiFunction& operator=(const CasADiFunction&);
         // 移动构造：转移 iw_/w_ 所有权，避免重新查询工作区大小。
         CasADiFunction(CasADiFunction&&) noexcept;
         // 移动赋值：转移 iw_/w_ 所有权。

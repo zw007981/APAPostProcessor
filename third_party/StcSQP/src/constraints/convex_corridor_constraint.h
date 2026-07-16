@@ -27,7 +27,7 @@ public:
         Matrix& Cx, Matrix& Cu) const override;
     // 返回控制维度
     int nu() const { return nu_; }
-    std::shared_ptr<Constraint> clone() const override;
+    std::shared_ptr<Constraint> clone() const;
 
 protected:
     // 检查输入 x/u 的维度是否符合预期

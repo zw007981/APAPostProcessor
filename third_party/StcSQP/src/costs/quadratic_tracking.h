@@ -18,6 +18,8 @@ public:
     void gradient(const Vector& x, const Vector& u, Vector& q, Vector& r) const override;
     // 计算 Hessian：Q = d²L/dx² in R^(nx x nx), R = d²L/du² in R^(nu x nu), S = d²L/(du dx) in R^(nu x nx)
     void hessian(const Vector& x, const Vector& u, Matrix& Q, Matrix& R, Matrix& S) const override;
+    // 创建独立副本；本类无内部可变状态，纯拷贝构造即可
+    std::shared_ptr<CostTerm> clone() const;
     // 返回参考状态
     const Vector& xRef() const { return x_ref_; }
     // 返回状态偏差权重矩阵

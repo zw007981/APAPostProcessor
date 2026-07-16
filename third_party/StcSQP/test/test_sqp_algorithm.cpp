@@ -9,9 +9,12 @@
 
 #include <gtest/gtest.h>
 
+#include "circle_obstacle_esdf_map.h"
 #include "constraints/box_constraint.h"
 #include "constraints/constraint.hpp"
 #include "util/constants.h"
+#include "costs/circle_footprint_esdf_penalty_cost.h"
+#include "costs/composite_cost.h"
 #include "costs/cost_term.hpp"
 #include "costs/quadratic_tracking.h"
 #include "models/bicycle_model_kappa.h"
@@ -84,7 +87,7 @@ public:
         Cu.setZero(1, u.size());
         Cu(0, control_index_) = 1.0;
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         return std::make_shared<ControlUpperBoundConstraint>(control_index_, limit_);
     }
@@ -743,8 +746,7 @@ TEST(SQPAlgorithm, ControlConstraintCuIsEnforced)
     StageSegment segment = makeDoubleIntegratorSegment(N, dt, A, B, x_ref, Q, R,
         x_min, x_max, u_min, u_max);
     // 加入一般控制约束 u(0) <= -0.5，依赖 Cu 而非 box bound
-    segment.constraints.push_back(
-        std::make_shared<ControlUpperBoundConstraint>(0, -0.5));
+    segment.constraints.push_back(std::make_shared<ControlUpperBoundConstraint>(0, -0.5));
     MultiStageOCP ocp;
     ocp.addSegment(segment);
 
@@ -783,8 +785,7 @@ TEST(SQPAlgorithm, VSignIsPassedToDynamicsLinearization)
     MultiStageOCP ocp;
     StageSegment segment;
     segment.dynamics = dynamics;
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = -1.0;
@@ -905,8 +906,7 @@ TEST(SQPAlgorithm, RejectsInvalidDynamicsLinearizationOutput)
         MultiStageOCP ocp;
         StageSegment segment;
         segment.dynamics = std::make_shared<BadOutputDynamics>(nx, nu, mode);
-        segment.cost = std::make_shared<QuadraticTrackingCost>(
-            Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+        segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
         segment.N = N;
         segment.dt = 0.1;
         segment.v_sign = 1.0;
@@ -942,8 +942,7 @@ TEST(SQPAlgorithm, RejectsInvalidInitialGuessFiniteValues)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1019,8 +1018,7 @@ TEST(SQPAlgorithm, RejectsInvalidDynamicsInConvergenceCheck)
     MultiStageOCP ocp;
     StageSegment segment;
     segment.dynamics = std::make_shared<BadAtConvergenceDynamics>(nx, nu);
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1053,8 +1051,7 @@ TEST(SQPAlgorithm, LineSearchRejectsWorseningDeltaInRTI)
     // B=0：控制不影响状态，避免真实 QP 解与 mock delta 冲突
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1153,8 +1150,7 @@ TEST(SQPAlgorithm, RespectsBoundaryStateBoundIntersection)
     MultiStageOCP ocp;
     StageSegment seg1;
     seg1.dynamics = std::make_shared<DoubleIntegrator>(A, B);
-    seg1.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    seg1.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     seg1.N = N1;
     seg1.dt = dt;
     seg1.v_sign = 1.0;
@@ -1166,8 +1162,7 @@ TEST(SQPAlgorithm, RespectsBoundaryStateBoundIntersection)
 
     StageSegment seg2;
     seg2.dynamics = std::make_shared<DoubleIntegrator>(A, B);
-    seg2.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    seg2.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     seg2.N = N2;
     seg2.dt = dt;
     seg2.v_sign = 1.0;
@@ -1235,8 +1230,7 @@ TEST(SQPAlgorithm, RejectsThrowingDynamicsInLinearization)
     MultiStageOCP ocp;
     StageSegment segment;
     segment.dynamics = std::make_shared<ThrowingDynamics>(nx, nu);
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1280,8 +1274,7 @@ TEST(SQPAlgorithm, RejectsThrowingCostInAssembleCost)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<ThrowingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<ThrowingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1320,7 +1313,7 @@ public:
         (void)Cu;
         throw std::runtime_error("ThrowingConstraint: deliberate exception");
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         return std::make_shared<ThrowingConstraint>();
     }
@@ -1336,8 +1329,7 @@ TEST(SQPAlgorithm, RejectsThrowingConstraintInAssembleConstraints)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.constraints.push_back(std::make_shared<ThrowingConstraint>());
     segment.N = N;
     segment.dt = 0.1;
@@ -1380,8 +1372,7 @@ TEST(SQPAlgorithm, RejectsNaNCostInMerit)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<NaNCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<NaNCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1411,8 +1402,7 @@ TEST(SQPAlgorithm, LineSearchRejectsNonDescentDeltaInFullSQP)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1466,8 +1456,7 @@ TEST(SQPAlgorithm, FullSQPAcceptsNonDescentDeltaWhenLineSearchDisabled)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1523,8 +1512,7 @@ TEST(SQPAlgorithm, RejectsInvalidSolverOptions)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1576,8 +1564,7 @@ TEST(SQPAlgorithm, RTIRejectsNonFiniteMerit)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<NaNCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<NaNCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1608,8 +1595,7 @@ TEST(SQPAlgorithm, RejectsLineSearchAlphaMinGreaterThanOne)
     StageSegment segment;
     segment.dynamics = std::make_shared<DoubleIntegrator>(
         Matrix::Identity(nx, nx), Matrix::Zero(nx, nu));
-    segment.cost = std::make_shared<QuadraticTrackingCost>(
-        Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
+    segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx), Matrix::Identity(nu, nu));
     segment.N = N;
     segment.dt = 0.1;
     segment.v_sign = 1.0;
@@ -1726,7 +1712,7 @@ public:
         Cx.resize(0, 0);
         Cu.resize(0, 0);
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         return std::make_shared<NegativeNgConstraint>();
     }
@@ -1751,7 +1737,7 @@ public:
         Cx.resize(0, 0);
         Cu.resize(0, 0);
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         return std::make_shared<ZeroNgConstraint>();
     }
@@ -1768,8 +1754,7 @@ TEST(MultiStageOCP, RejectsNonPositiveConstraintDimension)
         StageSegment segment;
         segment.dynamics = std::make_shared<DoubleIntegrator>(
             Matrix::Identity(2, 2), Matrix::Zero(2, 1));
-        segment.cost = std::make_shared<QuadraticTrackingCost>(
-            Vector::Zero(2), Matrix::Identity(2, 2), Matrix::Identity(1, 1));
+        segment.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(2), Matrix::Identity(2, 2), Matrix::Identity(1, 1));
         segment.N = 2;
         segment.dt = 0.1;
         segment.v_sign = 1.0;
@@ -1777,7 +1762,7 @@ TEST(MultiStageOCP, RejectsNonPositiveConstraintDimension)
         segment.x_max = Vector::Constant(2, 1e3);
         segment.u_min = Vector::Constant(1, -1e3);
         segment.u_max = Vector::Constant(1, 1e3);
-        segment.constraints.push_back(constraint);
+        segment.constraints.emplace_back(constraint);
         ocp.addSegment(segment);
         return ocp;
     };
@@ -1814,8 +1799,7 @@ TEST(SQPAlgorithm, ParallelLinearizeMatchesSerial) {
     MultiStageOCP ocp = makeDoubleIntegratorOCP(N, dt, Matrix::Identity(nx, nx),
         dt * Matrix::Identity(nx, nu), x_ref, Q, R, x_min, x_max, u_min, u_max);
     // 加入一个需要 clone 的一般约束，确保并行路径会创建独立工作区
-    ocp.segments()[0].constraints.push_back(
-        std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
+    ocp.segments()[0].constraints.push_back(std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
 
     Trajectory init = makeZeroTrajectory(N, nx, nu);
     Trajectory sol_serial, sol_parallel;
@@ -1833,6 +1817,80 @@ TEST(SQPAlgorithm, ParallelLinearizeMatchesSerial) {
         SQPSolver solver(std::move(qp_solver));
         solver.options().use_omp = true;
         solver.options().omp_parallel_threshold = 10;
+        ASSERT_TRUE(solver.solve(ocp, init, sol_parallel));
+    }
+
+    for (int k = 0; k <= N; ++k) {
+        EXPECT_LT((sol_parallel.x[k] - sol_serial.x[k]).norm(), 1e-10)
+            << "x mismatch at stage " << k;
+    }
+    for (int k = 0; k < N; ++k) {
+        EXPECT_LT((sol_parallel.u[k] - sol_serial.u[k]).norm(), 1e-10)
+            << "u mismatch at stage " << k;
+    }
+}
+
+// 测试目的：验证 OpenMP 并行 assembleQP/assembleCost 与串行路径在含
+// CircleFootprintEsdfPenaltyCost 的场景下结果一致。
+// 流程：构造 N 超过 omp_parallel_threshold、使用 CompositeCost（跟踪代价 + ESDF 软惩罚）
+//      的 OCP，分别用 use_omp=true/false 求解同一问题，比较两条轨迹。
+// 预期效果：两者均成功，状态/控制 L2 误差 < 1e-10。
+TEST(SQPAlgorithm, ParallelAssembleQPMatchesSerialWithEsdfPenaltyCost)
+{
+    const int N = 60, nx = 3, nu = 3;
+    const double dt = 0.1;
+    MultiStageOCP ocp;
+    StageSegment seg;
+    seg.dynamics = std::make_shared<DoubleIntegrator>(Matrix::Identity(nx, nx),
+        dt * Matrix::Identity(nx, nu));
+    seg.N = N;
+    seg.dt = dt;
+    seg.v_sign = 1.0;
+    seg.x_min = Vector::Constant(nx, -1e4);
+    seg.x_max = Vector::Constant(nx, 1e4);
+    seg.u_min = Vector::Constant(nu, -1e4);
+    seg.u_max = Vector::Constant(nu, 1e4);
+
+    CircleObstacleEsdfMap map;
+    map.addObstacle(Eigen::Vector2d(1.5, 0.0), 0.8);
+    std::vector<Eigen::Vector2d> circles;
+    circles.emplace_back(0.0, 0.0);
+    {
+        std::vector<std::shared_ptr<CostTerm>> terms;
+        terms.push_back(std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx),
+            Matrix::Identity(nx, nx) * 1e-2, Matrix::Identity(nu, nu) * 1e-2, /*theta_idx=*/2));
+        terms.push_back(std::make_shared<CircleFootprintEsdfPenaltyCost>(circles,
+            /*circle_radius=*/0.2, /*safety_margin=*/0.05, map, /*penalty_weight=*/1e2));
+        seg.cost = std::make_shared<CompositeCost>(std::move(terms));
+    }
+    ocp.addSegment(seg);
+
+    Trajectory init;
+    init.resize(N, nx, nu);
+    for (int k = 0; k <= N; ++k) {
+        init.x[k] << static_cast<double>(k) * dt, 0.0, 0.0;
+    }
+    for (int k = 0; k < N; ++k) {
+        init.u[k] << 1.0, 0.0, 0.0;
+    }
+
+    Trajectory sol_serial, sol_parallel;
+    {
+        auto qp_solver = std::make_unique<HPIPMQPSolver>(N, nx, nu, nx, nu, 0, 0, -1);
+        qp_solver->setTolerance(1e-4);
+        SQPSolver solver(std::move(qp_solver));
+        solver.options().use_omp = false;
+        solver.options().omp_parallel_threshold = 10;
+        solver.options().use_line_search = false;
+        ASSERT_TRUE(solver.solve(ocp, init, sol_serial));
+    }
+    {
+        auto qp_solver = std::make_unique<HPIPMQPSolver>(N, nx, nu, nx, nu, 0, 0, -1);
+        qp_solver->setTolerance(1e-4);
+        SQPSolver solver(std::move(qp_solver));
+        solver.options().use_omp = true;
+        solver.options().omp_parallel_threshold = 10;
+        solver.options().use_line_search = false;
         ASSERT_TRUE(solver.solve(ocp, init, sol_parallel));
     }
 

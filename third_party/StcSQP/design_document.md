@@ -2,6 +2,8 @@
 
 **设计哲学**：SQP 引擎必须是**纯粹的数值优化器**，对物理世界"一无所知"。它只认识固定维度的矩阵 $A, B, C, d$ 和梯度 $q, r$。所有业务逻辑（障碍物筛选、车辆几何、地图语义）通过**通用参数向量 `p`** 注入，由外部业务层负责。
 
+> **Milestone 018 评估说明**：本文档第 3.4/3.5/3.6 节及以下多处以虚函数多态 / `clone()` 描述 `Constraint`/`CostTerm` 接口，这是当前代码的现状。Milestone 018 曾评估将其迁移到 closed-set `std::variant` 的去虚拟化方案，但 `third_party/StcSQP/bench/bench_performance_profiling.cpp` 的 Release 端到端 benchmark 未观测到可解释的收益；最终结论为**不合并**，已将相关实验代码从工作树移除，保留本文档描述的虚函数基线。评估详情见主仓库 `docs/milestones/milestone-018/review-log.md`，回退动作详见 `docs/quality-audits/audit-002/review-log.md`。
+
 ---
 
 ## 1. 架构总览
@@ -294,7 +296,52 @@ public:
 } // namespace stc_SQP
 ```
 
-### 3.5 QP 数据（对齐内存池 + 偏移量填充 + 软约束）
+### 3.5 代价项接口（组合求值 + 线程克隆）
+
+```cpp
+// costs/cost_term.hpp
+#pragma once
+#include <memory>
+#include "core/types.h"
+
+namespace stc_SQP {
+
+class CostTerm {
+public:
+    virtual ~CostTerm() = default;
+
+    // 标量代价 cost = L(x, u)
+    virtual void evaluate(const Vector& x, const Vector& u, double& cost) const = 0;
+
+    // 梯度：q = dL/dx, r = dL/du
+    virtual void gradient(const Vector& x, const Vector& u,
+        Vector& q, Vector& r) const = 0;
+
+    // Hessian：Q = d²L/dx², R = d²L/du², S = d²L/(du dx)
+    virtual void hessian(const Vector& x, const Vector& u,
+        Matrix& Q, Matrix& R, Matrix& S) const = 0;
+
+    // 一次调用同时得到 cost/梯度/Hessian；默认实现转发到上述三个方法。
+    // 对内部持有昂贵计算（如 ESDF 地图查询）的代价，覆写此方法可消除重复计算。
+    virtual void evaluateGradientAndHessian(const Vector& x, const Vector& u,
+        double& cost, Vector& q, Vector& r,
+        Matrix& Q, Matrix& R, Matrix& S) const
+    {
+        evaluate(x, u, cost);
+        gradient(x, u, q, r);
+        hessian(x, u, Q, R, S);
+    }
+
+    // 创建独立副本，供多线程并行 assembleQP/assembleCost 使用。
+    // 含非拥有引用（如 EsdfMapInterface）的代价只需拷贝引用本身，
+    // 不需要深拷贝地图数据（与 Constraint::clone() 约定一致）。
+    virtual std::shared_ptr<CostTerm> clone() const = 0;
+};
+
+} // namespace stc_SQP
+```
+
+### 3.6 QP 数据（对齐内存池 + 偏移量填充 + 软约束）
 
 ```cpp
 // qp/qp_data.hpp
@@ -486,7 +533,7 @@ void QPData::reset() {
 } // namespace stc_SQP
 ```
 
-### 3.6 QP 求解器状态（失败兜底）
+### 3.7 QP 求解器状态（失败兜底）
 
 ```cpp
 // qp/qp_solver.hpp
@@ -509,19 +556,20 @@ class QPSolver {
 public:
     virtual ~QPSolver() = default;
     virtual QPSolverStatus solve(const QPData& qp_data, QPSolution& qp_sol) = 0;
-    virtual void set_tolerance(double tol) = 0;
-    virtual void set_warm_start(const QPSolution& qp_sol) = 0;
+    virtual void setTolerance(double tol) = 0;
+    // 设置下一次 solve() 的热启动初值；具体求解器可选择是否实现
+    virtual void setWarmStart(const QPSolution& qp_sol) = 0;
 };
 
 } // namespace stc_SQP
 ```
 
-### 3.7 HPIPM 求解器（Partial Condensing + 软约束）
+### 3.8 HPIPM 求解器（Partial Condensing + 软约束 + 跨迭代热启动）
 
 ```cpp
-// qp/hpipm_solver.hpp
+// qp/hpipm_solver.h
 #pragma once
-#include "qp_solver.hpp"
+#include "qp_solver.h"
 
 namespace stc_SQP {
 
@@ -532,13 +580,10 @@ public:
     // cond_N = 0 表示 Full Condensing（尚未实现）
     // 【Agent 注意】cond_N 是宏观步数，不是块大小！
     // 例如 N=100, block_size=10, 则 cond_N = 10
-    // 当前仅支持 cond_N = -1 或 cond_N = N（等价于无 condensing），
-    // Full/Partial Condensing 的完整实现尚未实现。
-    // 注意：HPIPM 当前版本对 ns>0 且 0<cond_N<N 的 Partial Condensing 组合会返回
-    // MAX_ITER，因此 HPIPMQPSolver 在此组合下自动回退到无凝聚路径（cond_N=N），
-    // 保证软约束求解的正确性；真正 Partial Condensing 仅对 ns=0 生效。
-    HPIPMQPSolver(int N, int nx, int nu, int nbx, int nbu, int ng, 
-                  int ns, int cond_N = -1);
+    // 当前支持 cond_N = -1（无凝聚）以及 0 < cond_N < N（Partial Condensing，仅当 ns=0 时启用）；
+    // ns > 0 时自动回退到无凝聚路径，保证软约束求解正确性。
+    HPIPMQPSolver(int N, int nx, int nu, int nbx, int nbu, int ng,
+        int ns, int cond_N = -1);
     ~HPIPMQPSolver();
 
     HPIPMQPSolver(const HPIPMQPSolver&) = delete;
@@ -546,20 +591,34 @@ public:
 
     // 软约束通过 qp_data.soft_config 传入，solve() 内部校验并设置
     QPSolverStatus solve(const QPData& qp_data, QPSolution& qp_sol) override;
-    void set_tolerance(double tol) override;
-    void set_warm_start(const QPSolution& qp_sol) override;
+    void setTolerance(double tol) override;
+    // 设置下一次 solve() 的 IPM 热启动 primal 初值；维度不匹配时内部自动清空缓存，退化为冷启动
+    void setWarmStart(const QPSolution& qp_sol) override;
+    // 读取上一次 solve() 的 HPIPM IPM 内部迭代次数
+    int lastIterations() const;
+    // 读取自构造以来所有成功 solve() 的 IPM 内部迭代次数累计值
+    int totalIterations() const;
+
+protected:
+    QPSolverStatus mapHpipmStatus(int status) const;
 
 private:
     struct Impl;
     std::unique_ptr<Impl> pimpl_;
-    
-    QPSolverStatus map_hpim_status(int status) const;
 };
 
 } // namespace stc_SQP
 ```
 
-### 3.8 CasADi 包装器（预分配工作区 + 线程克隆）
+**热启动说明（Milestone 017）**：
+- `setWarmStart()` 将传入的 `QPSolution`（含 `x`/`u`/`s`）写入 HPIPM 内部 `qp_sol`；
+- `solve()` 在每次调用入口先重置 `warm_start` 标志为 0，仅在缓存有效且维度匹配时开启为 1，避免 stale 标志污染；
+- 求解成功后用本次解自动更新缓存，求解失败或不可行时强制清空缓存；
+- Partial Condensing 路径下，原始 OCP 解先写入 `qp_sol`，再通过 `d_part_cond_qp_cond_sol` 凝聚到 `cond_qp_sol` 作为热启动初值；
+- 当前 `QPSolution` 不携带对偶变量，因此仅实现 primal-only 热启动（HPIPM warm_start 模式 1）；
+- `lastIterations()`/`totalIterations()` 通过 HPIPM C API `d_ocp_qp_solver_get_iter` / `d_ocp_qp_ipm_get_iter` 读取，用于 benchmark 数据驱动决策。
+
+### 3.9 CasADi 包装器（预分配工作区 + 线程克隆）
 
 ```cpp
 // src/models/casadi_wrapper.h
@@ -600,7 +659,7 @@ private:
 } // namespace stc_SQP
 ```
 
-### 3.9 SQP 主求解器（RTI 降级 + 策略模式）
+### 3.10 SQP 主求解器（RTI 降级 + 策略模式 + assembleQP 并行）
 
 ```cpp
 // sqp/sqp_algorithm.hpp
@@ -638,6 +697,9 @@ struct SQPSolverOptions {
     double line_search_c = 1e-4;
     // merit function L1 罚重
     double merit_penalty = 1e4;
+    // 是否在 Full SQP 循环中跨迭代复用上一次 QP 解作为 HPIPM IPM 热启动；
+    // RTI 单步模式不受此开关影响（无上一次迭代可复用）。默认 false。
+    bool use_qp_warm_start = false;
 };
 
 class SQPSolver {
@@ -696,6 +758,8 @@ protected:
     Matrix lin_A_, lin_B_;
     std::vector<std::vector<std::vector<std::shared_ptr<Constraint>>>>
         thread_constraint_clones_;
+    // 与 thread_constraint_clones_ 对称的 cost 克隆池，供 assembleQP/assembleCost 并行路径使用
+    std::vector<std::vector<std::shared_ptr<CostTerm>>> thread_cost_clones_;
     bool rti_mode_active_ = false;
     bool rti_downgraded_ = false;
     bool converged_ = false;
@@ -709,7 +773,7 @@ protected:
 按自身逻辑配置 `cond_N`、`use_omp`、迭代次数等参数后调用 `SQPSolver::solve()`。
 这一反向避免了 `SQPSolver` 依赖策略抽象，简化了对象生命周期，与 5.1 的策略接口仍然兼容。
 
-### 3.10 业务层：ProblemUpdater（完备性断言）
+### 3.11 业务层：ProblemUpdater（完备性断言）
 
 ```cpp
 // examples/parking/problem_updater.hpp

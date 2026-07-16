@@ -19,6 +19,27 @@ namespace casadi {
 
     CasADiFunction& CasADiFunction::operator=(CasADiFunction&&) noexcept = default;
 
+    CasADiFunction::CasADiFunction(const CasADiFunction& other)
+        : func_(other.func_)
+        , work_func_(other.work_func_)
+        , n_in_(other.n_in_)
+        , n_out_(other.n_out_)
+    {
+        queryWorkSizes();
+    }
+
+    CasADiFunction& CasADiFunction::operator=(const CasADiFunction& other)
+    {
+        if (this != &other) {
+            func_ = other.func_;
+            work_func_ = other.work_func_;
+            n_in_ = other.n_in_;
+            n_out_ = other.n_out_;
+            queryWorkSizes();
+        }
+        return *this;
+    }
+
     void CasADiFunction::queryWorkSizes()
     {
         long long sz_arg = 0;

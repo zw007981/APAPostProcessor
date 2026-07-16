@@ -27,7 +27,9 @@ public:
     }
     // 是否支持 HPIPM 软约束（默认不支持）
     virtual bool supportsSlack() const { return false; }
-    // 实现类必须深拷贝所有内部状态；对含 CasADiFunction 的约束，clone 必须重新分配独立工作区。
+    // 创建独立副本，供多线程并行 linearize 使用。
+    // 含非拥有引用或 CasADi 工作区等可变内部状态的子类必须深拷贝对应状态，
+    // 保证副本在不同线程中独立求值。
     virtual std::shared_ptr<Constraint> clone() const = 0;
 };
 } // namespace stc_SQP

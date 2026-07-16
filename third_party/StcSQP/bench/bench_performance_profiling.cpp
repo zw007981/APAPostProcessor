@@ -19,10 +19,15 @@
 
 #include "constraints/constraint.hpp"
 #include "constraints/convex_corridor_constraint.h"
+#include "costs/circle_footprint_esdf_penalty_cost.h"
+#include "costs/composite_cost.h"
 #include "costs/quadratic_tracking.h"
+#include "core/vehicle_geometry.h"
+#include "examples/parking/circle_obstacle_esdf_map.h"
 #include "generated/corridor.h"
 #include "math/math_util.hpp"
 #include "models/bicycle_model_delta.h"
+#include "models/dynamical_system.h"
 #include "models/dynamical_system.h"
 #include "ocp/multi_stage_ocp.h"
 #include "problem_updater.h"
@@ -66,7 +71,6 @@ public:
     {
         return std::make_shared<ControlUpperBoundConstraint>(control_index_, u_max_);
     }
-
 private:
     int control_index_ = 0;
     double u_max_ = 0.0;
@@ -212,7 +216,7 @@ bool trajectoriesClose(const Trajectory& a, const Trajectory& b, double tol)
 }
 
 // ===================== 基准辅助：data3.json 真实泊车初始路径加载 =====================
-struct PathPoint {
+struct TrajectoryPoint {
     double x = 0.0;
     double y = 0.0;
     double theta = 0.0;
@@ -245,7 +249,7 @@ std::optional<double> extractJsonNumber(const std::string& line, const std::stri
     return std::nullopt;
 }
 
-std::vector<PathPoint> loadData3InitialPath()
+std::vector<TrajectoryPoint> loadData3InitialPath()
 {
     // 基准可执行文件位于 build/Release，项目 data 目录位于 ../../data
     const std::string path = executableDirectory() + "/data/data3.json";
@@ -255,7 +259,7 @@ std::vector<PathPoint> loadData3InitialPath()
         return {};
     }
 
-    std::vector<PathPoint> points;
+    std::vector<TrajectoryPoint> points;
     std::string line;
     std::optional<double> cur_x, cur_y, cur_theta;
     while (std::getline(file, line)) {
@@ -294,7 +298,7 @@ public:
     }
 };
 
-MultiStageOCP buildData3TrackingOCP(const std::vector<PathPoint>& points)
+MultiStageOCP buildData3TrackingOCP(const std::vector<TrajectoryPoint>& points)
 {
     const int N = static_cast<int>(points.size()) - 1;
     const int nx = 3;
@@ -322,7 +326,7 @@ MultiStageOCP buildData3TrackingOCP(const std::vector<PathPoint>& points)
     return ocp;
 }
 
-Trajectory makeData3InitialGuess(const std::vector<PathPoint>& points)
+Trajectory makeData3InitialGuess(const std::vector<TrajectoryPoint>& points)
 {
     const int N = static_cast<int>(points.size()) - 1;
     const int nx = 3;
@@ -376,8 +380,7 @@ static void BM_SerialNoCondensing_LqrN10000(benchmark::State& state)
     const int N = 10000;
     const double dt = 0.1;
     MultiStageOCP ocp = makeLongLqrOcp(N, dt);
-    ocp.segments()[0].constraints.push_back(
-        std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
+    ocp.segments()[0].constraints.push_back(std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
     const int nx = ocp.nx(), nu = ocp.nu();
     Trajectory init_guess = makeInitialGuess(N, nx, nu);
     init_guess.x[0] << 5.0, 0.0;
@@ -404,8 +407,7 @@ static void BM_OpenMPPartialCondensing_LqrN10000(benchmark::State& state)
     const int N = 10000;
     const double dt = 0.1;
     MultiStageOCP ocp = makeLongLqrOcp(N, dt);
-    ocp.segments()[0].constraints.push_back(
-        std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
+    ocp.segments()[0].constraints.push_back(std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
     const int nx = ocp.nx(), nu = ocp.nu();
     Trajectory init_guess = makeInitialGuess(N, nx, nu);
     init_guess.x[0] << 5.0, 0.0;
@@ -703,7 +705,7 @@ struct PathRun {
     double v_sign = 1.0;
 };
 
-std::vector<PathRun> splitPathByDirection(const std::vector<PathPoint>& points)
+std::vector<PathRun> splitPathByDirection(const std::vector<TrajectoryPoint>& points)
 {
     std::vector<PathRun> runs;
     double prev_sign = 0.0;
@@ -747,7 +749,7 @@ struct RealScenario {
     Trajectory init_guess;
 };
 
-RealScenario buildData3RealMultiSegmentScenario(const std::vector<PathPoint>& points_in,
+RealScenario buildData3RealMultiSegmentScenario(const std::vector<TrajectoryPoint>& points_in,
     int max_steps_per_run = -1, int max_runs = -1)
 {
     // 将路径重新表达为以起点为原点的局部坐标系（标准工程实践：真实部署系统总是在
@@ -756,7 +758,7 @@ RealScenario buildData3RealMultiSegmentScenario(const std::vector<PathPoint>& po
     // 【调试记录】曾直接使用 data3.json 的原始全局坐标（约 -150,-10），发现即便单个
     // 真实弯道段（N 低至 25）配合完全无约束的走廊，HPIPM 仍会在第 0 次 QP 求解即
     // 返回 MAX_ITER；改为局部坐标后同一场景稳定收敛。这是本框架当前实现对绝对坐标
-    std::vector<PathPoint> points = points_in;
+    std::vector<TrajectoryPoint> points = points_in;
     const double origin_x = points_in.front().x, origin_y = points_in.front().y;
     for (auto& p : points) {
         p.x -= origin_x;
@@ -866,7 +868,7 @@ RealScenario buildData3RealMultiSegmentScenario(const std::vector<PathPoint>& po
 // 在满足以上条件后，完整真实场景（N=493，9 段真实换挡）可稳定收敛，但耗时约
 // 快"与"真实业务问题需要多少次迭代才能收敛"是两个独立的性能维度，后者尚未优化。
 void RunData3RealScenarioBenchmark(benchmark::State& state, int max_steps_per_run,
-    int max_runs = -1, bool use_partial_condensing = true)
+    int max_runs = -1, bool use_partial_condensing = true, bool use_qp_warm_start = false)
 {
     const auto points = loadData3InitialPath();
     if (points.empty()) {
@@ -898,12 +900,14 @@ void RunData3RealScenarioBenchmark(benchmark::State& state, int max_steps_per_ru
     const int cond_N = use_partial_condensing ? (N + 10 - 1) / 10 : -1;
     auto qp_solver = std::make_unique<HPIPMQPSolver>(
         N, ocp.nx(), ocp.nu(), ocp.nx(), ocp.nu(), CORRIDOR_G_DIM, 0, cond_N);
+    HPIPMQPSolver* hpipm_raw = qp_solver.get();
     qp_solver->setTolerance(1e-4);
     SQPSolver solver(std::move(qp_solver));
     solver.options().use_omp = true;
     solver.options().omp_parallel_threshold = 50;
     solver.options().use_line_search = false;
     solver.options().max_iter = 50;
+    solver.options().use_qp_warm_start = use_qp_warm_start;
     // 存在换挡点时 SQPSolver 会自动局部降级为 Full SQP，此处无需显式设置 use_rti。
 
     Trajectory warmup_sol;
@@ -914,12 +918,15 @@ void RunData3RealScenarioBenchmark(benchmark::State& state, int max_steps_per_ru
 
     for (auto _ : state) {
         Trajectory sol;
+        const int total_iter_before = hpipm_raw->totalIterations();
         const bool ok = solver.solve(ocp, scenario.init_guess, sol);
         benchmark::DoNotOptimize(sol);
         if (!ok) {
             state.SkipWithError("Real scenario solve failed");
             break;
         }
+        state.counters["last_ipm_iter"] = hpipm_raw->lastIterations();
+        state.counters["total_ipm_iter"] = hpipm_raw->totalIterations() - total_iter_before;
     }
 }
 
@@ -930,6 +937,16 @@ static void BM_Data3RealScenario_MultiSegmentBicycleCorridor(benchmark::State& s
     RunData3RealScenarioBenchmark(state, /*max_steps_per_run=*/-1);
 }
 BENCHMARK(BM_Data3RealScenario_MultiSegmentBicycleCorridor)->Unit(benchmark::kMillisecond);
+
+// 与上一场景完全等价，但开启 Full SQP 跨迭代 QP 热启动，用于对比热启动对总求解耗时
+// 与最终 IPM 迭代次数的影响。默认关闭，是否启用由 benchmark 数据驱动决定。
+static void BM_Data3RealScenario_MultiSegmentBicycleCorridor_WarmStart(benchmark::State& state)
+{
+    RunData3RealScenarioBenchmark(state, /*max_steps_per_run=*/-1, /*max_runs=*/-1,
+        /*use_partial_condensing=*/true, /*use_qp_warm_start=*/true);
+}
+BENCHMARK(BM_Data3RealScenario_MultiSegmentBicycleCorridor_WarmStart)
+    ->Unit(benchmark::kMillisecond);
 
 // 单个真实弯道段（data3.json 第一段，截断至 N=25）+ ConvexCorridorConstraint + HPIPM，
 // 在"完整 493 步"与"短 N 集成测试"之间提供一个中等规模的真实性能锚点。
@@ -946,8 +963,7 @@ static void BM_PartialCondensingNonDivisibleN53(benchmark::State& state)
     const int N = 53;
     const double dt = 0.1;
     MultiStageOCP ocp = makeLongLqrOcp(N, dt);
-    ocp.segments()[0].constraints.push_back(
-        std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
+    ocp.segments()[0].constraints.push_back(std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
     const int nx = ocp.nx(), nu = ocp.nu();
     Trajectory init_guess = makeInitialGuess(N, nx, nu);
     init_guess.x[0] << 5.0, 0.0;
@@ -1100,3 +1116,251 @@ static void BM_ManualHierarchicalStrategy_MultiSegment(benchmark::State& state)
     }
 }
 BENCHMARK(BM_ManualHierarchicalStrategy_MultiSegment)->Unit(benchmark::kMillisecond);
+
+// ===================== 基准：含 CircleFootprintEsdfPenaltyCost 的单次 assembleQP 调用 =====================
+// 目的：隔离度量组合求值接口 + OpenMP 并行化对 assembleQP 自身的加速收益。
+// 通过派生类暴露 protected 的 linearize()/assembleQP()，先完成一次 solve() 预热与 linearize()，
+// 再在稳态循环中反复调用 assembleQP()（该函数是幂等的，只覆盖 q/Q/r/R/S 与 bounds）。
+class ExposedSQPSolver : public SQPSolver {
+public:
+    explicit ExposedSQPSolver(std::unique_ptr<QPSolver> qp_solver)
+        : SQPSolver(std::move(qp_solver))
+    {
+    }
+    using SQPSolver::linearize;
+    using SQPSolver::assembleQP;
+};
+
+std::vector<Eigen::Vector2d> makeVehicleCircleCenters(int num_circles)
+{
+    std::vector<Eigen::Vector2d> centers;
+    const double length = vehicle_geometry::kLf + vehicle_geometry::kLr;
+    const double radius = vehicle_geometry::kWidth / 2.0;
+    const double start = -vehicle_geometry::kLr + radius;
+    const double end = vehicle_geometry::kLf - radius;
+    const double step = (num_circles > 1) ? (end - start) / (num_circles - 1) : 0.0;
+    for (int i = 0; i < num_circles; ++i) {
+        centers.emplace_back(start + i * step, 0.0);
+    }
+    return centers;
+}
+
+CircleObstacleEsdfMap makeBenchmarkEsdfMap()
+{
+    CircleObstacleEsdfMap map;
+    // 障碍物贴近车辆路径，使部分圆触发安全裕度违反，从而真实 exercising ESDF 查询分支
+    map.addObstacle(Eigen::Vector2d(5.0, 0.5), 1.0);
+    map.addObstacle(Eigen::Vector2d(10.0, 0.5), 0.8);
+    return map;
+}
+
+MultiStageOCP makeEsdfPenaltyOcp(int N, const EsdfMapInterface& map)
+{
+    const int nx = 3, nu = 3;
+    const double dt = 0.1;
+    StageSegment seg;
+    // 使用简单的 3D 路径积分器，使初始猜测 trivially 动力学一致，焦点放在 cost 装配开销上
+    seg.dynamics = std::make_shared<PathIntegrator>();
+    {
+        std::vector<std::shared_ptr<CostTerm>> terms;
+        terms.push_back(std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx),
+            Matrix::Identity(nx, nx) * 1e-2, Matrix::Identity(nu, nu) * 1e-2, /*theta_idx=*/2));
+        terms.push_back(std::make_shared<CircleFootprintEsdfPenaltyCost>(makeVehicleCircleCenters(5),
+            /*circle_radius=*/0.45, /*safety_margin=*/0.05, map, /*penalty_weight=*/1e3));
+        seg.cost = std::make_shared<CompositeCost>(std::move(terms));
+    }
+    seg.N = N;
+    seg.dt = dt;
+    seg.v_sign = 1.0;
+    seg.x_min = Vector::Constant(nx, -1e4);
+    seg.x_max = Vector::Constant(nx, 1e4);
+    seg.u_min = Vector::Constant(nu, -1e4);
+    seg.u_max = Vector::Constant(nu, 1e4);
+    MultiStageOCP ocp;
+    ocp.addSegment(seg);
+    return ocp;
+}
+
+Trajectory makeEsdfPenaltyInitialGuess(int N)
+{
+    const int nx = 3, nu = 3;
+    const double dt = 0.1;
+    Trajectory traj;
+    traj.resize(N, nx, nu);
+    // 沿 x 轴匀速前进的 trivially 动力学一致猜测
+    for (int k = 0; k <= N; ++k) {
+        traj.x[k] << static_cast<double>(k) * dt, 0.0, 0.0;
+    }
+    for (int k = 0; k < N; ++k) {
+        traj.u[k] << 1.0, 0.0, 0.0;
+    }
+    return traj;
+}
+
+// 基线代价：强制 evaluateGradientAndHessian 退化为分别调用 evaluate/gradient/hessian，
+// 用于在控制其他变量不变的情况下，单独度量组合求值接口消除重复 ESDF 查询的收益。
+class CircleFootprintEsdfPenaltyCostBaseline : public CircleFootprintEsdfPenaltyCost {
+public:
+    CircleFootprintEsdfPenaltyCostBaseline(std::vector<Eigen::Vector2d> circle_local_positions,
+        double circle_radius, double safety_margin, const EsdfMapInterface& map,
+        double penalty_weight)
+        : CircleFootprintEsdfPenaltyCost(std::move(circle_local_positions), circle_radius,
+              safety_margin, map, penalty_weight)
+    {
+    }
+    void evaluateGradientAndHessian(const Vector& x, const Vector& u, double& cost, Vector& q,
+        Vector& r, Matrix& Q, Matrix& R, Matrix& S) const override
+    {
+        evaluate(x, u, cost);
+        gradient(x, u, q, r);
+        hessian(x, u, Q, R, S);
+    }
+};
+
+MultiStageOCP makeEsdfPenaltyOcpWithCost(int N, const EsdfMapInterface& map,
+    std::shared_ptr<CostTerm> penalty_cost)
+{
+    const int nx = 3, nu = 3;
+    const double dt = 0.1;
+    StageSegment seg;
+    seg.dynamics = std::make_shared<PathIntegrator>();
+    {
+        std::vector<std::shared_ptr<CostTerm>> terms;
+        terms.push_back(std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx),
+            Matrix::Identity(nx, nx) * 1e-2, Matrix::Identity(nu, nu) * 1e-2, /*theta_idx=*/2));
+        terms.push_back(penalty_cost);
+        seg.cost = std::make_shared<CompositeCost>(std::move(terms));
+    }
+    seg.N = N;
+    seg.dt = dt;
+    seg.v_sign = 1.0;
+    seg.x_min = Vector::Constant(nx, -1e4);
+    seg.x_max = Vector::Constant(nx, 1e4);
+    seg.u_min = Vector::Constant(nu, -1e4);
+    seg.u_max = Vector::Constant(nu, 1e4);
+    MultiStageOCP ocp;
+    ocp.addSegment(seg);
+    return ocp;
+}
+
+static void BM_AssembleQp_EsdfPenaltyCost(benchmark::State& state)
+{
+    const int N = 200;
+    const auto map = makeBenchmarkEsdfMap();
+    auto penalty = std::make_shared<CircleFootprintEsdfPenaltyCost>(makeVehicleCircleCenters(5),
+        /*circle_radius=*/0.45, /*safety_margin=*/0.05, map, /*penalty_weight=*/1e3);
+    const auto ocp = makeEsdfPenaltyOcpWithCost(N, map, penalty);
+    auto init_guess = makeEsdfPenaltyInitialGuess(N);
+
+    const int cond_N = (N + 10 - 1) / 10;
+    auto qp_solver = std::make_unique<HPIPMQPSolver>(N, 3, 3, 3, 3, 0, 0, cond_N);
+    qp_solver->setTolerance(1e-4);
+    ExposedSQPSolver solver(std::move(qp_solver));
+    solver.options().use_omp = true;
+    solver.options().omp_parallel_threshold = 50;
+    solver.options().use_line_search = false;
+    solver.options().max_iter = 10;
+
+    Trajectory sol;
+    if (!solver.solve(ocp, init_guess, sol)) {
+        state.SkipWithError("ESDF penalty warm-up solve failed");
+        return;
+    }
+    if (!solver.linearize()) {
+        state.SkipWithError("ESDF penalty linearize failed");
+        return;
+    }
+
+    for (auto _ : state) {
+        if (!solver.assembleQP()) {
+            state.SkipWithError("ESDF penalty assembleQP failed");
+            break;
+        }
+    }
+}
+BENCHMARK(BM_AssembleQp_EsdfPenaltyCost)->Unit(benchmark::kMicrosecond);
+
+static void BM_AssembleQp_EsdfPenaltyCost_Serial(benchmark::State& state)
+{
+    const int N = 200;
+    const auto map = makeBenchmarkEsdfMap();
+    auto penalty = std::make_shared<CircleFootprintEsdfPenaltyCost>(makeVehicleCircleCenters(5),
+        /*circle_radius=*/0.45, /*safety_margin=*/0.05, map, /*penalty_weight=*/1e3);
+    const auto ocp = makeEsdfPenaltyOcpWithCost(N, map, penalty);
+    auto init_guess = makeEsdfPenaltyInitialGuess(N);
+
+    const int cond_N = (N + 10 - 1) / 10;
+    auto qp_solver = std::make_unique<HPIPMQPSolver>(N, 3, 3, 3, 3, 0, 0, cond_N);
+    qp_solver->setTolerance(1e-4);
+    ExposedSQPSolver solver(std::move(qp_solver));
+    solver.options().use_omp = false;
+    solver.options().use_line_search = false;
+    solver.options().max_iter = 10;
+
+    Trajectory sol;
+    if (!solver.solve(ocp, init_guess, sol)) {
+        state.SkipWithError("ESDF penalty warm-up solve failed");
+        return;
+    }
+    if (!solver.linearize()) {
+        state.SkipWithError("ESDF penalty linearize failed");
+        return;
+    }
+
+    for (auto _ : state) {
+        if (!solver.assembleQP()) {
+            state.SkipWithError("ESDF penalty assembleQP failed");
+            break;
+        }
+    }
+}
+BENCHMARK(BM_AssembleQp_EsdfPenaltyCost_Serial)->Unit(benchmark::kMicrosecond);
+
+static void BM_AssembleQp_EsdfPenaltyCost_SerialBaseline(benchmark::State& state)
+{
+    const int N = 200;
+    const auto map = makeBenchmarkEsdfMap();
+    auto penalty = std::make_shared<CircleFootprintEsdfPenaltyCostBaseline>(
+        makeVehicleCircleCenters(5), /*circle_radius=*/0.45, /*safety_margin=*/0.05, map,
+        /*penalty_weight=*/1e3);
+    const auto ocp = makeEsdfPenaltyOcpWithCost(N, map, penalty);
+    auto init_guess = makeEsdfPenaltyInitialGuess(N);
+
+    const int cond_N = (N + 10 - 1) / 10;
+    auto qp_solver = std::make_unique<HPIPMQPSolver>(N, 3, 3, 3, 3, 0, 0, cond_N);
+    qp_solver->setTolerance(1e-4);
+    ExposedSQPSolver solver(std::move(qp_solver));
+    solver.options().use_omp = false;
+    solver.options().use_line_search = false;
+    solver.options().max_iter = 10;
+
+    Trajectory sol;
+    if (!solver.solve(ocp, init_guess, sol)) {
+        state.SkipWithError("ESDF penalty baseline warm-up solve failed");
+        return;
+    }
+    if (!solver.linearize()) {
+        state.SkipWithError("ESDF penalty baseline linearize failed");
+        return;
+    }
+
+    for (auto _ : state) {
+        if (!solver.assembleQP()) {
+            state.SkipWithError("ESDF penalty baseline assembleQP failed");
+            break;
+        }
+    }
+}
+BENCHMARK(BM_AssembleQp_EsdfPenaltyCost_SerialBaseline)->Unit(benchmark::kMicrosecond);
+
+// ===================== 基准：-march=native 端到端对比 =====================
+// 说明：-march=native 是编译期选项，无法在同一二进制中运行时切换。
+// 本基准与 BM_Data3RealScenario_MultiSegmentBicycleCorridor 完全等价，仅名称含 MarchNative，
+// 用于在启用 -march=native 的构建中记录数据；基线数据需在关闭该选项的构建中运行同名
+// BM_Data3RealScenario_MultiSegmentBicycleCorridor 获取，对比结果记录于 review-log.md。
+static void BM_Data3RealScenario_MultiSegmentBicycleCorridor_MarchNative(benchmark::State& state)
+{
+    RunData3RealScenarioBenchmark(state, /*max_steps_per_run=*/-1);
+}
+BENCHMARK(BM_Data3RealScenario_MultiSegmentBicycleCorridor_MarchNative)
+    ->Unit(benchmark::kMillisecond);

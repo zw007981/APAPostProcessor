@@ -198,8 +198,7 @@ TEST(ParkingScenario, ActiveEsdfObstacleKeepsSafeDistanceAfterSolve)
     seg.x_max = Vector::Constant(nx, 1e3);
     seg.u_min = Vector::Constant(nu, -2.0);
     seg.u_max = Vector::Constant(nu, 2.0);
-    seg.cost = std::make_shared<QuadraticTrackingCost>(
-        init_guess.x[N], Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
+    seg.cost = std::make_shared<QuadraticTrackingCost>(init_guess.x[N], Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
     seg.constraints.push_back(std::make_shared<EsdfDistanceConstraint>(margin));
 
     MultiStageOCP ocp;
@@ -261,8 +260,7 @@ TEST(ParkingScenario, TripleGearShiftSolvesWithHpipm)
         seg.x_max(3) = (v_sign > 0.0) ? v_max : 0.0;
         seg.u_min = Vector::Constant(nu, -2.0);
         seg.u_max = Vector::Constant(nu, 2.0);
-        seg.cost = std::make_shared<QuadraticTrackingCost>(
-            Vector::Zero(nx), Matrix::Identity(nx, nx) * 1e-2,
+        seg.cost = std::make_shared<QuadraticTrackingCost>(Vector::Zero(nx), Matrix::Identity(nx, nx) * 1e-2,
             Matrix::Identity(nu, nu) * 1e-2, /*theta_idx=*/2);
         seg.constraints.push_back(std::make_shared<ConvexCorridorConstraint>(nu));
         return seg;
@@ -382,8 +380,7 @@ TEST(ParkingScenario, PivotSegmentSteeringConvergesWithThreeSegments)
         Q(2, 2) = 10.0;
         Q(3, 3) = 0.1;
         Q(4, 4) = 0.1;
-        seg.cost = std::make_shared<QuadraticTrackingCost>(
-            x_ref, Q, Matrix::Identity(nu, nu) * 1e-2, /*theta_idx=*/2);
+        seg.cost = std::make_shared<QuadraticTrackingCost>(x_ref, Q, Matrix::Identity(nu, nu) * 1e-2, /*theta_idx=*/2);
         return seg;
     };
 

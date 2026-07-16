@@ -88,4 +88,9 @@ Vector QuadraticTrackingCost::computeStateError(const Vector& x) const
     }
     return dx;
 }
+
+std::shared_ptr<CostTerm> QuadraticTrackingCost::clone() const
+{
+    return std::make_shared<QuadraticTrackingCost>(x_ref_, Q_, R_, theta_idx_);
+}
 } // namespace stc_SQP

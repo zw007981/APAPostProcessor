@@ -29,8 +29,7 @@ StageSegment makeForwardSegment(int N)
     seg.u_max = Vector::Constant(nu, 2.0);
     Vector x_ref(nx);
     x_ref << 10.0, 0.0, 0.0, 1.0, 0.0;
-    seg.cost = std::make_shared<QuadraticTrackingCost>(
-        x_ref, Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
+    seg.cost = std::make_shared<QuadraticTrackingCost>(x_ref, Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
     return seg;
 }
 
@@ -141,8 +140,7 @@ TEST(EsdfProblemUpdaterIntegration, SqpSolvesWithEsdfConstraintAwayFromObstacle)
     seg.x_max = Vector::Constant(nx, 1e3);
     seg.u_min = Vector::Constant(nu, -2.0);
     seg.u_max = Vector::Constant(nu, 2.0);
-    seg.cost = std::make_shared<QuadraticTrackingCost>(
-        init_guess.x[N], Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
+    seg.cost = std::make_shared<QuadraticTrackingCost>(init_guess.x[N], Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
     seg.constraints.push_back(std::make_shared<EsdfDistanceConstraint>(0.3));
 
     MultiStageOCP ocp;
@@ -337,8 +335,7 @@ TEST(EsdfProblemUpdaterIntegration, SqpSolvesWithActiveObstacle)
     seg.x_max = Vector::Constant(nx, 1e3);
     seg.u_min = Vector::Constant(nu, -2.0);
     seg.u_max = Vector::Constant(nu, 2.0);
-    seg.cost = std::make_shared<QuadraticTrackingCost>(
-        init_guess.x[N], Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
+    seg.cost = std::make_shared<QuadraticTrackingCost>(init_guess.x[N], Matrix::Identity(nx, nx), Matrix::Identity(nu, nu) * 0.1, /*theta_idx=*/2);
     seg.constraints.push_back(std::make_shared<EsdfDistanceConstraint>(0.2));
 
     MultiStageOCP ocp;

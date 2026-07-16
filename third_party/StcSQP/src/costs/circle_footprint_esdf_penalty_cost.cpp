@@ -113,6 +113,38 @@ void CircleFootprintEsdfPenaltyCost::hessian(const Vector& x, const Vector& u, M
     S = Matrix::Zero(u.size(), x.size());
 }
 
+void CircleFootprintEsdfPenaltyCost::evaluateGradientAndHessian(const Vector& x, const Vector& u,
+    double& cost, Vector& q, Vector& r, Matrix& Q, Matrix& R, Matrix& S) const
+{
+    validateInputDimensions(x, u);
+    std::vector<double> violations;
+    std::vector<Eigen::Vector3d> violation_grads;
+    computeViolations(x, violations, violation_grads);
+    cost = 0.0;
+    q = Vector::Zero(x.size());
+    Q = Matrix::Zero(x.size(), x.size());
+    for (std::size_t k = 0; k < violations.size(); ++k) {
+        const double violation = violations[k];
+        if (violation <= 0.0) {
+            continue;
+        }
+        cost += 0.5 * penalty_weight_ * violation * violation;
+        const Eigen::Vector3d& grad = violation_grads[k];
+        q.head<3>() += penalty_weight_ * violation * grad;
+        // Gauss-Newton 近似 Hessian
+        Q.topLeftCorner<3, 3>() += penalty_weight_ * (grad * grad.transpose());
+    }
+    r = Vector::Zero(u.size());
+    R = Matrix::Zero(u.size(), u.size());
+    S = Matrix::Zero(u.size(), x.size());
+}
+
+std::shared_ptr<CostTerm> CircleFootprintEsdfPenaltyCost::clone() const
+{
+    return std::make_shared<CircleFootprintEsdfPenaltyCost>(
+        circle_local_positions_, circle_radius_, safety_margin_, map_, penalty_weight_);
+}
+
 void CircleFootprintEsdfPenaltyCost::validateInputDimensions(const Vector& x, const Vector& u) const
 {
     (void)u;

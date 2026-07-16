@@ -21,7 +21,8 @@ namespace stc_SQP {
 struct StageSegment {
     // 该段使用的动力学模型
     std::shared_ptr<DynamicalSystem> dynamics;
-    // 该段使用的代价项（包含 stage 与 terminal）
+    // 该段使用的代价项（包含 stage 与 terminal）。
+    // 使用 CompositeCost 树形组合多项代价；整体 cost 为根节点 evaluate/gradient/hessian。
     std::shared_ptr<CostTerm> cost;
     // 该段附加的一般约束（不含 box bound；box bound 通过 x_min/x_max/u_min/u_max 表达）
     std::vector<std::shared_ptr<Constraint>> constraints;

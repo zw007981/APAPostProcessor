@@ -67,18 +67,23 @@ protected:
 
 } // namespace stc_SQP
 
+#undef LOG_TRACE
 #define LOG_TRACE(...) \
     ::stc_SQP::Logger::Log(::stc_SQP::LogLevel::TRACE, \
         ::stc_SQP::Logger::BuildMessage(__VA_ARGS__))
+#undef LOG_DEBUG
 #define LOG_DEBUG(...) \
     ::stc_SQP::Logger::Log(::stc_SQP::LogLevel::DEBUG, \
         ::stc_SQP::Logger::BuildMessage(__VA_ARGS__))
+#undef LOG_INFO
 #define LOG_INFO(...) \
     ::stc_SQP::Logger::Log(::stc_SQP::LogLevel::INFO, \
         ::stc_SQP::Logger::BuildMessage(__VA_ARGS__))
+#undef LOG_WARN
 #define LOG_WARN(...) \
     ::stc_SQP::Logger::Log(::stc_SQP::LogLevel::WARN, \
         ::stc_SQP::Logger::BuildMessage(__VA_ARGS__))
+#undef LOG_ERROR
 #define LOG_ERROR(...) \
     ::stc_SQP::Logger::Log(::stc_SQP::LogLevel::ERROR, \
         ::stc_SQP::Logger::BuildMessage(__VA_ARGS__))

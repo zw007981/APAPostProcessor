@@ -18,7 +18,7 @@ public:
     // 计算 Jacobian：Cx = dg/dx, Cu = dg/du
     void jacobian(const Vector& x, const Vector& u, const Vector& p, Matrix& Cx,
         Matrix& Cu) const override;
-    std::shared_ptr<Constraint> clone() const override;
+    std::shared_ptr<Constraint> clone() const;
     // 返回状态约束的下界
     const Vector& xMin() const { return x_min_; }
     // 返回状态约束的上界

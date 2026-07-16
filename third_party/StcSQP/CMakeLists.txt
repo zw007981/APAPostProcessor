@@ -167,6 +167,12 @@ if(HPIPM_AVAILABLE)
     target_link_libraries(stc_SQP_core_lib PUBLIC hpipm blasfeo)
 endif()
 
+# x86 平台启用 -march=native 以使用 AVX2/FMA 等指令，与 Eigen 32 字节对齐配合释放 SIMD 潜能
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
+    target_compile_options(stc_SQP_core_lib PUBLIC -march=native)
+    message(STATUS "Enabling -march=native for stc_SQP_core_lib x86_64 SIMD optimizations.")
+endif()
+
 # ==========================================
 # 3. 生成最终可执行文件
 # ==========================================

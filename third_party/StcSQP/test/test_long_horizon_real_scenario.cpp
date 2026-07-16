@@ -25,7 +25,7 @@
 using namespace stc_SQP;
 
 namespace {
-struct PathPoint {
+struct TrajectoryPoint {
     double x = 0.0;
     double y = 0.0;
     double theta = 0.0;
@@ -64,7 +64,7 @@ std::optional<double> extractJsonNumber(const std::string& line, const std::stri
     return std::nullopt;
 }
 
-std::vector<PathPoint> loadData3InitialPath()
+std::vector<TrajectoryPoint> loadData3InitialPath()
 {
     const std::string path = executableDirectory() + "/../../data/data3.json";
     std::ifstream file(path);
@@ -73,7 +73,7 @@ std::vector<PathPoint> loadData3InitialPath()
         return {};
     }
 
-    std::vector<PathPoint> points;
+    std::vector<TrajectoryPoint> points;
     std::string line;
     std::optional<double> cur_x, cur_y, cur_theta;
     while (std::getline(file, line)) {
@@ -92,7 +92,7 @@ std::vector<PathPoint> loadData3InitialPath()
     return points;
 }
 
-std::vector<PathRun> splitPathByDirection(const std::vector<PathPoint>& points)
+std::vector<PathRun> splitPathByDirection(const std::vector<TrajectoryPoint>& points)
 {
     std::vector<PathRun> runs;
     double prev_sign = 0.0;
@@ -117,10 +117,10 @@ struct RealScenario {
     Trajectory init_guess;
 };
 
-RealScenario buildData3RealMultiSegmentScenario(const std::vector<PathPoint>& points_in,
+RealScenario buildData3RealMultiSegmentScenario(const std::vector<TrajectoryPoint>& points_in,
     int max_steps_per_run = -1, int max_runs = -1)
 {
-    std::vector<PathPoint> points = points_in;
+    std::vector<TrajectoryPoint> points = points_in;
     const double origin_x = points_in.front().x, origin_y = points_in.front().y;
     for (auto& p : points) {
         p.x -= origin_x;
@@ -211,7 +211,10 @@ double computeTotalStageCost(const MultiStageOCP& ocp, const Trajectory& traj)
     double total = 0.0;
     int global_k = 0;
     for (const auto& segment : ocp.segments()) {
-        const auto* cost = dynamic_cast<const QuadraticTrackingCost*>(segment.cost.get());
+        const QuadraticTrackingCost* cost = nullptr;
+        if (segment.cost) {
+            cost = dynamic_cast<const QuadraticTrackingCost*>(segment.cost.get());
+        }
         if (!cost) {
             continue;
         }

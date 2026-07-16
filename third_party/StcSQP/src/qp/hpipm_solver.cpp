@@ -135,6 +135,73 @@ struct HPIPMQPSolver::Impl {
     std::vector<double> zu;
     // HPIPM 软约束 reverse map（未软化位置为 -1）
     std::vector<int> idxs_rev;
+    // ====================================================
+    // 跨迭代热启动缓存（Milestone 017）
+    // ====================================================
+    // 上一次求解成功得到的 primal 解；由 setWarmStart() 写入或 solve() 成功后自动更新
+    QPSolution warm_start_cache_;
+    // 当前缓存是否可用；维度不匹配或求解失败时必须置为 false
+    bool has_warm_start_ = false;
+    // 上一次 solve() 的 HPIPM IPM 内部迭代次数
+    int last_iter_ = 0;
+    // 自构造以来所有成功 solve() 的 IPM 内部迭代次数累计值
+    int total_iter_ = 0;
+    // 清空热启动缓存，避免脏解污染下一次求解
+    void clearWarmStartCache()
+    {
+        warm_start_cache_.x.clear();
+        warm_start_cache_.u.clear();
+        warm_start_cache_.s.clear();
+        has_warm_start_ = false;
+    }
+    // 校验缓存维度是否与当前求解器构造维度一致
+    bool isWarmStartCacheValid() const
+    {
+        if (!has_warm_start_) {
+            return false;
+        }
+        if (static_cast<int>(warm_start_cache_.x.size()) != N + 1
+            || static_cast<int>(warm_start_cache_.u.size()) != N) {
+            return false;
+        }
+        for (int k = 0; k <= N; ++k) {
+            if (warm_start_cache_.x[k].size() != nx) {
+                return false;
+            }
+        }
+        for (int k = 0; k < N; ++k) {
+            if (warm_start_cache_.u[k].size() != nu) {
+                return false;
+            }
+        }
+        if (ns > 0) {
+            if (static_cast<int>(warm_start_cache_.s.size()) != N) {
+                return false;
+            }
+            for (int k = 0; k < N; ++k) {
+                if (warm_start_cache_.s[k].size() != ns) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+    // 将缓存中的 primal 解写入 HPIPM qp_sol，供本次 IPM 作为热启动初值
+    void applyWarmStartToQpSol()
+    {
+        for (int k = 0; k <= N; ++k) {
+            d_ocp_qp_sol_set_x(k, warm_start_cache_.x[k].data(), &qp_sol);
+        }
+        for (int k = 0; k < N; ++k) {
+            d_ocp_qp_sol_set_u(k, warm_start_cache_.u[k].data(), &qp_sol);
+        }
+        if (ns > 0) {
+            for (int k = 0; k < N; ++k) {
+                // 本仓库软约束仅用作上界松弛，因此复用 su
+                d_ocp_qp_sol_set_su(k, warm_start_cache_.s[k].data(), &qp_sol);
+            }
+        }
+    }
 };
 
 HPIPMQPSolver::HPIPMQPSolver(int N, int nx, int nu, int nbx, int nbu, int ng,
@@ -309,8 +376,55 @@ void HPIPMQPSolver::setTolerance(double tol)
     pimpl_->tol = tol;
 }
 
-void HPIPMQPSolver::setWarmStart(const QPSolution&)
+void HPIPMQPSolver::setWarmStart(const QPSolution& qp_sol)
 {
+    // 维度不匹配时退化到冷启动：清空缓存，静默返回，不影响后续 solve()
+    if (static_cast<int>(qp_sol.x.size()) != pimpl_->N + 1
+        || static_cast<int>(qp_sol.u.size()) != pimpl_->N) {
+        pimpl_->clearWarmStartCache();
+        return;
+    }
+    for (int k = 0; k <= pimpl_->N; ++k) {
+        if (qp_sol.x[k].size() != pimpl_->nx) {
+            pimpl_->clearWarmStartCache();
+            return;
+        }
+    }
+    for (int k = 0; k < pimpl_->N; ++k) {
+        if (qp_sol.u[k].size() != pimpl_->nu) {
+            pimpl_->clearWarmStartCache();
+            return;
+        }
+    }
+    if (pimpl_->ns > 0) {
+        if (static_cast<int>(qp_sol.s.size()) != pimpl_->N) {
+            pimpl_->clearWarmStartCache();
+            return;
+        }
+        for (int k = 0; k < pimpl_->N; ++k) {
+            if (qp_sol.s[k].size() != pimpl_->ns) {
+                pimpl_->clearWarmStartCache();
+                return;
+            }
+        }
+    }
+    pimpl_->warm_start_cache_ = qp_sol;
+    pimpl_->has_warm_start_ = true;
+}
+
+int HPIPMQPSolver::lastIterations() const
+{
+    return pimpl_->last_iter_;
+}
+
+int HPIPMQPSolver::totalIterations() const
+{
+    return pimpl_->total_iter_;
+}
+
+int HPIPMQPSolver::slackDim() const
+{
+    return pimpl_->ns;
 }
 
 QPSolverStatus HPIPMQPSolver::mapHpipmStatus(int status) const
@@ -456,14 +570,24 @@ QPSolverStatus HPIPMQPSolver::solve(const QPData& qp_data, QPSolution& qp_sol)
     // HPIPM 内部对极接近 0 的变量仍有约 1e-7 的互补残差，因此 tol 不小于 1e-12
     double tol = std::max(pimpl_->tol, 1e-12);
     int status = 0;
+    // 每次 solve() 都先重置 warm_start 为 0，再根据是否有可用缓存决定是否开启；
+    // 这样可以避免上一次开启的 warm_start 标志遗留到本次无缓存的求解。
+    int warm_start_off = 0;
     if (!pimpl_->use_partial_condensing) {
         d_ocp_qp_solver_set_iter_max(&iter_max, &pimpl_->ws);
         d_ocp_qp_solver_set_tol_stat(&tol, &pimpl_->ws);
         d_ocp_qp_solver_set_tol_eq(&tol, &pimpl_->ws);
         d_ocp_qp_solver_set_tol_ineq(&tol, &pimpl_->ws);
         d_ocp_qp_solver_set_tol_comp(&tol, &pimpl_->ws);
+        d_ocp_qp_ipm_arg_set_warm_start(&warm_start_off, pimpl_->arg.ipm_arg);
+        if (pimpl_->isWarmStartCacheValid()) {
+            pimpl_->applyWarmStartToQpSol();
+            int warm_start_on = 1;
+            d_ocp_qp_ipm_arg_set_warm_start(&warm_start_on, pimpl_->arg.ipm_arg);
+        }
         d_ocp_qp_solver_solve(&pimpl_->qp, &pimpl_->qp_sol, &pimpl_->ws);
         d_ocp_qp_solver_get_status(&pimpl_->ws, &status);
+        d_ocp_qp_solver_get_iter(&pimpl_->ws, &pimpl_->last_iter_);
     } else {
         // Partial Condensing：凝聚 -> 求解凝聚后 QP -> 展开解
         d_ocp_qp_ipm_arg_set_iter_max(&iter_max, &pimpl_->ipm_arg);
@@ -471,17 +595,28 @@ QPSolverStatus HPIPMQPSolver::solve(const QPData& qp_data, QPSolution& qp_sol)
         d_ocp_qp_ipm_arg_set_tol_eq(&tol, &pimpl_->ipm_arg);
         d_ocp_qp_ipm_arg_set_tol_ineq(&tol, &pimpl_->ipm_arg);
         d_ocp_qp_ipm_arg_set_tol_comp(&tol, &pimpl_->ipm_arg);
+        d_ocp_qp_ipm_arg_set_warm_start(&warm_start_off, &pimpl_->ipm_arg);
         d_part_cond_qp_cond(
             &pimpl_->qp, &pimpl_->cond_qp, &pimpl_->cond_arg, &pimpl_->cond_ws);
+        if (pimpl_->isWarmStartCacheValid()) {
+            pimpl_->applyWarmStartToQpSol();
+            d_part_cond_qp_cond_sol(&pimpl_->qp, &pimpl_->cond_qp, &pimpl_->qp_sol,
+                &pimpl_->cond_qp_sol, &pimpl_->cond_arg, &pimpl_->cond_ws);
+            int warm_start_on = 1;
+            d_ocp_qp_ipm_arg_set_warm_start(&warm_start_on, &pimpl_->ipm_arg);
+        }
         d_ocp_qp_ipm_solve(
             &pimpl_->cond_qp, &pimpl_->cond_qp_sol, &pimpl_->ipm_arg, &pimpl_->ipm_ws);
         d_ocp_qp_ipm_get_status(&pimpl_->ipm_ws, &status);
+        d_ocp_qp_ipm_get_iter(&pimpl_->ipm_ws, &pimpl_->last_iter_);
         if (status == SUCCESS) {
             d_part_cond_qp_expand_sol(&pimpl_->qp, &pimpl_->cond_qp_sol, &pimpl_->qp_sol,
                 &pimpl_->cond_arg, &pimpl_->cond_ws);
         }
     }
     if (status != SUCCESS) {
+        // 求解失败时清空热启动缓存：用脏解做下一次热启动可能导致后续迭代被污染
+        pimpl_->clearWarmStartCache();
         return mapHpipmStatus(status);
     }
     // 提取解
@@ -497,6 +632,10 @@ QPSolverStatus HPIPMQPSolver::solve(const QPData& qp_data, QPSolution& qp_sol)
             d_ocp_qp_sol_get_su(k, &pimpl_->qp_sol, qp_sol.s[k].data());
         }
     }
+    // 求解成功：用本次解更新热启动缓存，供下一次 solve() 复用
+    pimpl_->warm_start_cache_ = qp_sol;
+    pimpl_->has_warm_start_ = true;
+    pimpl_->total_iter_ += pimpl_->last_iter_;
     return QPSolverStatus::SUCCESS;
 }
 } // namespace stc_SQP

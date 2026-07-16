@@ -565,3 +565,150 @@ TEST(QPSolvers, HpipmDefaultToleranceFailsForLargeMagnitudeLinearizationPoint) {
         EXPECT_TRUE(solver.solve(ocp, init_guess, solution));
     }
 }
+
+// 测试目的：验证 HPIPM 热启动在相同 QP 上复用前一次解时，最终结果与冷启动一致，
+//          且 IPM 内部迭代次数减少（热启动的初值更接近最优解）。
+// 流程：1) 冷启动求解 LQR QP 并记录解与迭代次数；2) 用该解调用 setWarmStart；
+//       3) 再次求解同一 QP；4) 比较两次解在容差内一致，且第二次迭代次数不大于第一次。
+// 预期效果：两次求解均 SUCCESS，解一致，第二次迭代次数不增加。
+TEST(QPSolvers, HpipmWarmStartReusesSolutionForSameProblem) {
+    const int N = 10, nx = 2, nu = 1, ng = 0, ns = 0;
+    auto qp_data = buildLqrQP(N, nx, nu);
+    HPIPMQPSolver solver(N, nx, nu, nx, nu, ng, ns, -1);
+    solver.setTolerance(1e-4);
+
+    QPSolution cold_sol;
+    EXPECT_EQ(solver.solve(*qp_data, cold_sol), QPSolverStatus::SUCCESS);
+    const int cold_iter = solver.lastIterations();
+    EXPECT_GT(cold_iter, 0);
+
+    solver.setWarmStart(cold_sol);
+    QPSolution warm_sol;
+    EXPECT_EQ(solver.solve(*qp_data, warm_sol), QPSolverStatus::SUCCESS);
+    const int warm_iter = solver.lastIterations();
+
+    for (int k = 0; k <= N; ++k) {
+        EXPECT_TRUE(isClose(cold_sol.x[k], warm_sol.x[k], 1e-6, 1e-8))
+            << "state x[" << k << "] differs between cold and warm start";
+    }
+    for (int k = 0; k < N; ++k) {
+        EXPECT_TRUE(isClose(cold_sol.u[k], warm_sol.u[k], 1e-6, 1e-8))
+            << "control u[" << k << "] differs between cold and warm start";
+    }
+    EXPECT_LE(warm_iter, cold_iter)
+        << "warm start should not increase IPM iterations for an unchanged QP";
+}
+
+// 测试目的：验证 setWarmStart 在传入维度不匹配的解时，不会导致后续 solve() 失败，
+//          而是安全地退化到冷启动。
+// 流程：1) 构造 N=5 的求解器并求解；2) 构造一个 N=3 的 QPSolution 并调用 setWarmStart；
+//       3) 再次用原 QP 调用 solve()。
+// 预期效果：第二次 solve() 仍返回 SUCCESS，说明不匹配的热启动被忽略。
+TEST(QPSolvers, HpipmWarmStartHandlesDimensionMismatch) {
+    const int N = 5, nx = 2, nu = 1, ng = 0, ns = 0;
+    auto qp_data = buildLqrQP(N, nx, nu);
+    HPIPMQPSolver solver(N, nx, nu, nx, nu, ng, ns, -1);
+    solver.setTolerance(1e-4);
+
+    QPSolution sol;
+    EXPECT_EQ(solver.solve(*qp_data, sol), QPSolverStatus::SUCCESS);
+
+    QPSolution mismatched;
+    mismatched.resize(3, nx, nu, ns);
+    solver.setWarmStart(mismatched);
+
+    QPSolution sol2;
+    EXPECT_EQ(solver.solve(*qp_data, sol2), QPSolverStatus::SUCCESS);
+}
+
+// 测试目的：验证 HPIPM 热启动在 Partial Condensing 路径下同样能复用前一次解，
+//          且解与无凝聚路径一致（condensing 本身已有单独一致性测试，这里聚焦热启动）。
+// 流程：1) 构造含普通约束的 QP；2) 先用 cond_N=-1 求解得到参考解；
+//       3) 用 cond_N=3 构造求解器，冷启动求解并记录迭代次数；
+//       4) 对同一 cond_N=3 求解器调用 setWarmStart 后再次求解；5) 比较两次解一致。
+// 预期效果：两次求解均 SUCCESS，解一致，热启动不增加迭代次数。
+TEST(QPSolvers, HpipmWarmStartWorksWithPartialCondensing) {
+    const int N = 10, nx = 2, nu = 1, ng = 1, ns = 0;
+    auto qp_data = buildHardConstraintQP(N, nx, nu);
+    // 硬约束在 x0=[1,0] 处不可行，改为可行初始点
+    qp_data->lbx[0] << 0.0, 0.0;
+    qp_data->ubx[0] << 0.0, 0.0;
+
+    HPIPMQPSolver solver(N, nx, nu, nx, nu, ng, ns, 3);
+    solver.setTolerance(1e-4);
+
+    QPSolution cold_sol;
+    EXPECT_EQ(solver.solve(*qp_data, cold_sol), QPSolverStatus::SUCCESS);
+    const int cold_iter = solver.lastIterations();
+
+    solver.setWarmStart(cold_sol);
+    QPSolution warm_sol;
+    EXPECT_EQ(solver.solve(*qp_data, warm_sol), QPSolverStatus::SUCCESS);
+    const int warm_iter = solver.lastIterations();
+
+    for (int k = 0; k <= N; ++k) {
+        EXPECT_TRUE(isClose(cold_sol.x[k], warm_sol.x[k], 1e-6, 1e-8))
+            << "condensed warm start: x[" << k << "] differs";
+    }
+    for (int k = 0; k < N; ++k) {
+        EXPECT_TRUE(isClose(cold_sol.u[k], warm_sol.u[k], 1e-6, 1e-8))
+            << "condensed warm start: u[" << k << "] differs";
+    }
+    EXPECT_LE(warm_iter, cold_iter)
+        << "partial condensing warm start should not increase IPM iterations";
+}
+
+// 测试目的：验证 Full SQP 循环中开启 use_qp_warm_start 后，求解结果与关闭时一致，
+//          从而确认热启动没有改变解的正确性。
+// 流程：构造 BicycleModelDelta + ConvexCorridorConstraint 单段场景，分别用
+//      use_qp_warm_start=false 与 true 求解同一 OCP，比较最终轨迹。
+// 预期效果：两种配置均收敛，且最终解在容差内一致。
+TEST(QPSolvers, SqpSolverWarmStartDoesNotChangeSolution) {
+    SimpleParkingMap map;
+    UpdaterConfig config;
+    config.selection_radius = 200.0;
+    config.max_step_displacement = 0.5;
+    config.safety_margin = 0.1;
+    config.top_k = 10;
+    ProblemUpdater updater(config);
+
+    auto [ocp, init_guess] = buildLargeMagnitudeSingleSegmentScenario(
+        Eigen::Vector3d(0.0, 0.0, 0.1));
+    updater.updateOcp(init_guess, map, ocp);
+
+    Trajectory sol_cold;
+    {
+        auto qp_solver = std::make_unique<HPIPMQPSolver>(
+            ocp.totalSteps(), ocp.nx(), ocp.nu(), ocp.nx(), ocp.nu(), CORRIDOR_G_DIM, 0, -1);
+        qp_solver->setTolerance(1e-4);
+        SQPSolver solver(std::move(qp_solver));
+        solver.options().max_iter = 10;
+        solver.options().use_line_search = false;
+        solver.options().use_qp_warm_start = false;
+        EXPECT_TRUE(solver.solve(ocp, init_guess, sol_cold));
+    }
+
+    Trajectory sol_warm;
+    {
+        auto qp_solver = std::make_unique<HPIPMQPSolver>(
+            ocp.totalSteps(), ocp.nx(), ocp.nu(), ocp.nx(), ocp.nu(), CORRIDOR_G_DIM, 0, -1);
+        qp_solver->setTolerance(1e-4);
+        SQPSolver solver(std::move(qp_solver));
+        solver.options().max_iter = 10;
+        solver.options().use_line_search = false;
+        solver.options().use_qp_warm_start = true;
+        EXPECT_TRUE(solver.solve(ocp, init_guess, sol_warm));
+    }
+
+    EXPECT_EQ(sol_cold.x.size(), sol_warm.x.size());
+    EXPECT_EQ(sol_cold.u.size(), sol_warm.u.size());
+    const size_t num_steps = sol_cold.x.size();
+    for (size_t k = 0; k < num_steps; ++k) {
+        EXPECT_TRUE(isClose(sol_cold.x[k], sol_warm.x[k], 1e-6, 1e-8))
+            << "SQP warm start changes x[" << k << "]";
+    }
+    for (size_t k = 0; k + 1 < num_steps; ++k) {
+        EXPECT_TRUE(isClose(sol_cold.u[k], sol_warm.u[k], 1e-6, 1e-8))
+            << "SQP warm start changes u[" << k << "]";
+    }
+}

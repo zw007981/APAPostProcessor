@@ -36,5 +36,7 @@ public:
     virtual void setTolerance(double tol) = 0;
     // 设置热启动
     virtual void setWarmStart(const QPSolution& qp_sol) = 0;
+    // 返回求解器支持的每步软约束维度；默认 0 表示不支持软约束。
+    virtual int slackDim() const { return 0; }
 };
 } // namespace stc_SQP

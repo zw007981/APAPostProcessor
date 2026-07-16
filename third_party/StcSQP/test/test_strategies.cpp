@@ -72,7 +72,7 @@ public:
         Cu.setZero(1, u.size());
         Cu(0, control_index_) = 1.0;
     }
-    std::shared_ptr<Constraint> clone() const override
+    std::shared_ptr<Constraint> clone() const
     {
         return std::make_shared<ControlUpperBoundConstraint>(control_index_, limit_);
     }
@@ -110,8 +110,7 @@ static MultiStageOCP makeLqrOCP(int N, double dt, int nx, int nu,
     segment.u_min = u_min;
     segment.u_max = u_max;
     if (add_control_constraint) {
-        segment.constraints.push_back(
-            std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
+        segment.constraints.push_back(std::make_shared<ControlUpperBoundConstraint>(0, 0.5));
     }
 
     MultiStageOCP ocp;

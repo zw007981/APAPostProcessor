@@ -11,6 +11,7 @@
 #include "../qp/qp_data.h"
 #include "../qp/qp_solution.h"
 #include "../qp/qp_solver.h"
+#include "../qp/soft_constraint_validation.h"
 #include "../util/trajectory.h"
 
 namespace stc_SQP {
@@ -30,6 +31,12 @@ struct SQPSolverOptions {
     double reg_min = 1e-12;
     double reg_max = 1e8;
     double reg_factor = 10.0;
+    // 全局 Hessian 正则化（Levenberg-Marquardt 风格阻尼）：额外叠加到每个 stage
+    // 的 Q/R 对角上（Q += hessian_regularization * I，R 同理，终端 stage 无 R），
+    // 独立于 reg_min（reg_min 仅在 stage 完全无代价时才生效，是结构性兜底；
+    // 本字段无条件叠加到所有 stage，用于抑制早期迭代的过大步长）。
+    // 默认 0.0，不改变既有行为；仅在显式设置为正值时才收紧步长。
+    double hessian_regularization = 0.0;
     bool use_slack = true;
     double slack_penalty = 1e4;
     double merit_penalty = 1e4;
@@ -41,6 +48,12 @@ struct SQPSolverOptions {
     double line_search_rho = 0.5;
     // Armijo 常数 c（0 < c < 1）
     double line_search_c = 1e-4;
+    // 是否在 Full SQP 循环中跨迭代复用上一次 QP 解作为 HPIPM IPM 热启动；
+    // RTI 单步模式不受此开关影响（无上一次迭代可复用）。
+    bool use_qp_warm_start = false;
+    // HPIPM 原生软约束配置；仅当底层 QP 求解器支持 ns > 0 时生效。
+    // 默认 ns=0 表示不启用软约束。
+    SoftConstraintConfig soft_constraint_config;
 };
 
 // SQP 主求解器：负责外循环线性化、QP 装配与求解、线搜索与流形更新
@@ -60,6 +73,13 @@ public:
     // 若 Full SQP 达到 max_iter 仍未收敛，返回 false，但 solution 仍写入当前最新
     // 迭代轨迹（last iterate）；RTI 模式下单步 QP 成功即返回 true。
     bool solve(const MultiStageOCP& ocp, const Trajectory& initial_guess, Trajectory& solution);
+    // 注入外部预分配的 QPData，solve() 将复用而非新建。
+    // 调用方需保证 QPData 的 (N, nx, nu, ng_max) 与本次 solve 匹配；
+    // 传入 nullptr 则回退到内部新建（默认行为）。
+    void setExternalQPData(std::unique_ptr<QPData> qp_data);
+    // 取出 QPData 所有权（供对象池跨调用复用）。solve() 后调用；
+    // 取出后内部 qp_data_ 置空，下一次 solve() 若未重新注入则自动新建。
+    std::unique_ptr<QPData> takeQPData();
     // 读写求解选项
     SQPSolverOptions& options() { return options_; }
     const SQPSolverOptions& options() const { return options_; }
@@ -75,13 +95,17 @@ protected:
     bool validateProblem(const MultiStageOCP& ocp, const Trajectory& initial_guess,
         std::string* reason) const;
     // 线性化：填充 qp_data_ 的 A/B/b（动力学）与 C/D/d（一般约束）。
-    //     每线程持有独立 Constraint 副本（clone），避免 CasADi 工作区竞争。
+    //     每线程持有独立 Constraint 副本，通过 clone() 避免 CasADi 工作区竞争。
     bool linearize();
     // 装配 QP 数据：cost、box bounds（一般约束已在 linearize 中装配）
     bool assembleQP();
-    // 装配代价项到 QP；若输出维度或数值非法返回 false
+    // 装配代价项到 QP；若输出维度或数值非法返回 false（串行入口）
     bool assembleCost(int global_k, const StageSegment& segment, const Vector& x,
         const Vector& u);
+    // 装配代价项到 QP 的实际实现，允许传入外部 cost 列表与 scratch buffer（供并行路径使用）
+    bool assembleCostImpl(int global_k, const CostTerm& cost_term,
+        const Vector& x, const Vector& u, Vector& cost_q, Vector& cost_r, Matrix& cost_Q,
+        Matrix& cost_R, Matrix& cost_S);
     // 装配 box bound 到 QP（delta 语义）
     void assembleBounds(int global_k, const StageSegment& segment, const Vector& x,
         const Vector& u);
@@ -91,13 +115,13 @@ protected:
         Matrix& local_A, Matrix& local_B);
     // 统一封装的一般约束求值：含异常、维度、有限性检查。
     // 用于 computeConstraintViolation / checkConvergence 等仅需 g 的路径。
-    bool evaluateConstraintValue(const Constraint& constraint, const Vector& x, const Vector& u,
-        const Vector& p, int global_k, bool in_parallel, Vector& g) const;
+    bool evaluateConstraintValue(const Constraint& constraint, const Vector& x,
+        const Vector& u, const Vector& p, int global_k, bool in_parallel, Vector& g) const;
     // 统一封装的一般约束线性化：含异常、维度、有限性检查。
     // 用于 linearizeStep 中同时需要 g、Cx、Cu 的路径。
-    bool evaluateConstraintLinearization(const Constraint& constraint, const Vector& x,
-        const Vector& u, const Vector& p, int global_k, bool in_parallel, Vector& g, Matrix& Cx,
-        Matrix& Cu) const;
+    bool evaluateConstraintLinearization(const Constraint& constraint,
+        const Vector& x, const Vector& u, const Vector& p, int global_k, bool in_parallel,
+        Vector& g, Matrix& Cx, Matrix& Cu) const;
     // 求解 QP：严格检查 QPSolverStatus，失败时 delta_traj_ 不可用
     bool solveQP();
     bool lineSearch(double& alpha);
@@ -119,6 +143,8 @@ protected:
     std::unique_ptr<QPSolver> qp_solver_;
     // QP 数据容器
     std::unique_ptr<QPData> qp_data_;
+    // 外部注入的 QPData（solve() 入口处被移入 qp_data_），避免每次 solve 重新分配内存池
+    std::unique_ptr<QPData> external_qp_data_;
     // QP 求解结果缓存（避免每次迭代重复分配）
     QPSolution qp_solution_;
     // 求解选项
@@ -145,8 +171,11 @@ protected:
     mutable Vector mutable_g_;
     // 终端代价评估使用的零控制缓存
     Vector zero_u_;
-    // 按 solve() 预分配一次，避免每次 SQP 迭代都重复 clone 与堆分配。
+    // 按 solve() 预分配一次：每线程持有独立 Constraint clone 副本，
+    // 避免并行 linearize() 中 CasADiFunction / mutable scratch 的数据竞争。
     std::vector<std::vector<std::vector<std::shared_ptr<Constraint>>>> thread_constraint_clones_;
+    // 与 thread_constraint_clones_ 对称的 cost 克隆池，供 assembleQP/assembleCost 并行路径使用。
+    std::vector<std::vector<std::shared_ptr<CostTerm>>> thread_cost_clones_;
     // 本次 solve 是否实际按 RTI 模式执行（含换挡点降级后的 Full SQP为 false）
     bool rti_mode_active_ = false;
     // RTI 降级标记

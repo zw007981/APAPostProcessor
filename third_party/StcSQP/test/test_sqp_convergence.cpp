@@ -44,6 +44,11 @@ public:
         S = Matrix::Zero(0, x_ref_.size());
     }
 
+    std::shared_ptr<CostTerm> clone() const
+    {
+        return std::make_shared<TerminalQuadraticCost>(x_ref_, Q_);
+    }
+
 protected:
     Vector x_ref_;
     Matrix Q_;

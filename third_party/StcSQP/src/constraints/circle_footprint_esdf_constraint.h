@@ -45,7 +45,7 @@ public:
     void jacobian(const Vector& x, const Vector& u, const Vector& p, Matrix& Cx,
         Matrix& Cu) const override;
     // 创建独立副本；本约束不持有CasADi工作区等可变内部状态，clone只需拷贝构造参数
-    std::shared_ptr<Constraint> clone() const override;
+    std::shared_ptr<Constraint> clone() const;
     // 返回圆半径
     double circleRadius() const { return circle_radius_; }
     // 返回安全裕度

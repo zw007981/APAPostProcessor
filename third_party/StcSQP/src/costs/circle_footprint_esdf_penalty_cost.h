@@ -40,6 +40,12 @@ public:
     // 计算Hessian（Gauss-Newton近似，忽略ESDF场自身二阶曲率以保证半正定）：
     // Q = sum(penalty_weight * grad_i ⊗ grad_i)，R、S恒为零
     void hessian(const Vector& x, const Vector& u, Matrix& Q, Matrix& R, Matrix& S) const override;
+    // 组合求值：复用同一次 computeViolations() 调用同时产出 cost/梯度/Hessian，
+    // 避免分别调用 evaluate/gradient/hessian 造成的重复 ESDF 查询。
+    void evaluateGradientAndHessian(const Vector& x, const Vector& u, double& cost,
+        Vector& q, Vector& r, Matrix& Q, Matrix& R, Matrix& S) const override;
+    // 创建独立副本；map_ 为非拥有引用，直接拷贝引用即可
+    std::shared_ptr<CostTerm> clone() const;
 
 protected:
     // 对当前状态x逐圆计算违反量（required_clearance - distance，负值截断为0）及其对
