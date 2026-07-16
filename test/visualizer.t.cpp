@@ -8,8 +8,8 @@
 #include "util/constants.h"
 #include "util/maneuver.h"
 #include "util/path.h"
-#include "util/path_point.h"
 #include "util/pose.h"
+#include "util/trajectory_point.h"
 
 namespace apa_post_processor {
 namespace {
@@ -17,10 +17,10 @@ namespace {
 // 测试访问器：通过派生暴露 Visualizer 的 protected helper，进行纯逻辑白盒测试。
 class VisualizerTestAccess : public Visualizer {
    public:
-    using Visualizer::Visualizer;
-    using Visualizer::tryExtractPath;
-    using Visualizer::collectPathPoints;
     using Visualizer::appendDetailSeriesFromPath;
+    using Visualizer::collectPathPoints;
+    using Visualizer::tryExtractPath;
+    using Visualizer::Visualizer;
     const std::vector<DetailSeriesData>& detailSeries() const {
         return detail_series_;
     }
@@ -29,9 +29,11 @@ class VisualizerTestAccess : public Visualizer {
 void ExpectPathPointsEqual(const Path& path,
                            const std::vector<Pose>& expected_poses) {
     ASSERT_EQ(path.size(), expected_poses.size());
-    std::vector<PathPoint> points;
+    std::vector<TrajectoryPoint> points;
     points.reserve(path.size());
-    path.forEach([&points](const PathPoint& point) { points.emplace_back(point); });
+    path.forEach([&points](const TrajectoryPoint& point) {
+        points.emplace_back(point);
+    });
     for (std::size_t i = 0; i < expected_poses.size(); ++i) {
         EXPECT_NEAR(points[i].x, expected_poses[i].x, EPSILON);
         EXPECT_NEAR(points[i].y, expected_poses[i].y, EPSILON);
@@ -49,12 +51,13 @@ TEST(VisualizerTryExtractPathTest, ExtractsPath) {
     Path output;
     ASSERT_TRUE(visualizer.tryExtractPath(input, output));
 
-    ExpectPathPointsEqual(output, {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
+    ExpectPathPointsEqual(output,
+                          {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
 }
 
 TEST(VisualizerTryExtractPathTest, ExtractsManeuver) {
     const Maneuver input(
-        std::vector<PathPoint>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
+        std::vector<TrajectoryPoint>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
         Direction::FORWARD);
 
     VisualizerTestAccess visualizer;
@@ -67,7 +70,8 @@ TEST(VisualizerTryExtractPathTest, ExtractsManeuver) {
 }
 
 TEST(VisualizerTryExtractPathTest, ExtractsPathPointVector) {
-    const std::vector<PathPoint> input = {{0.0, 0.0, 0.0}, {2.0, 0.0, 0.0}};
+    const std::vector<TrajectoryPoint> input = {{0.0, 0.0, 0.0},
+                                                {2.0, 0.0, 0.0}};
 
     VisualizerTestAccess visualizer;
     Path output;
@@ -78,7 +82,7 @@ TEST(VisualizerTryExtractPathTest, ExtractsPathPointVector) {
 }
 
 TEST(VisualizerTryExtractPathTest, ExtractsSinglePathPoint) {
-    const PathPoint input{3.0, 4.0, 0.5};
+    const TrajectoryPoint input{3.0, 4.0, 0.5};
 
     VisualizerTestAccess visualizer;
     Path output;
@@ -117,7 +121,8 @@ TEST(VisualizerTryExtractPathTest, ExtractsViaPointer) {
     Path output;
     ASSERT_TRUE(visualizer.tryExtractPath(&input, output));
 
-    ExpectPathPointsEqual(output, {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
+    ExpectPathPointsEqual(output,
+                          {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
 }
 
 TEST(VisualizerTryExtractPathTest, ExtractsViaSharedPtr) {
@@ -130,7 +135,8 @@ TEST(VisualizerTryExtractPathTest, ExtractsViaSharedPtr) {
     Path output;
     ASSERT_TRUE(visualizer.tryExtractPath(input, output));
 
-    ExpectPathPointsEqual(output, {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
+    ExpectPathPointsEqual(output,
+                          {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
 }
 
 TEST(VisualizerTryExtractPathTest, ExtractsViaReferenceWrapper) {
@@ -143,7 +149,8 @@ TEST(VisualizerTryExtractPathTest, ExtractsViaReferenceWrapper) {
     Path output;
     ASSERT_TRUE(visualizer.tryExtractPath(std::ref(input), output));
 
-    ExpectPathPointsEqual(output, {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
+    ExpectPathPointsEqual(output,
+                          {Pose{0.0, 0.0, 0.0}, Pose{DELTA_DIST, 0.0, 0.0}});
 }
 
 TEST(VisualizerTryExtractPathTest, ReturnsFalseForNullPointer) {
@@ -164,14 +171,15 @@ TEST(VisualizerTryExtractPathTest, ReturnsFalseForUnsupportedType) {
     EXPECT_TRUE(output.empty());
 }
 
-TEST(VisualizerCollectPathPointsTest, ReturnsFlatSequenceSkippingDuplicateCusp) {
+TEST(VisualizerCollectPathPointsTest,
+     ReturnsFlatSequenceSkippingDuplicateCusp) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{1.0, 0.0, 0.0};
-    const PathPoint target{0.5, 0.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{1.0, 0.0, 0.0};
+    const TrajectoryPoint target{0.5, 0.0, 0.0};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
 
     VisualizerTestAccess visualizer;

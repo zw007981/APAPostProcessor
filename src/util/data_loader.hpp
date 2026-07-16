@@ -1,8 +1,9 @@
 #pragma once
 
-#include <fstream>
 #include <google/protobuf/message.h>
 #include <google/protobuf/util/json_util.h>
+
+#include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <sstream>
@@ -76,9 +77,8 @@ class DataLoader {
         const auto json_str = json_obj.dump();
         google::protobuf::util::JsonParseOptions parse_options;
         parse_options.ignore_unknown_fields = true;
-        const auto status =
-            google::protobuf::util::JsonStringToMessage(json_str, &proto_msg,
-                                                        parse_options);
+        const auto status = google::protobuf::util::JsonStringToMessage(
+            json_str, &proto_msg, parse_options);
         if (!status.ok()) {
             LOG_FMT_ERROR(
                 "Failed to convert json file {} to protobuf, reason: {}!!!",

@@ -10,10 +10,10 @@
 #include "apa_post_process.pb.h"
 
 namespace apa_post_processor {
-// 车辆参数数据结构
+// 车辆参数
 struct VehicleParams {
     VehicleParams() = default;
-    // 使用车辆参数构造VehicleParams结构体
+    // 使用物理参数构造
     VehicleParams(double length_val, double width_val, double wheelbase_val,
                   double max_steer_angle_val, double rear_overhang_val = 0.0,
                   double max_accel_val = 1.0, double max_decel_val = -1.5,
@@ -29,7 +29,7 @@ struct VehicleParams {
           max_kappa(std::abs(wheelbase_val) > EPSILON
                         ? std::tan(max_steer_angle_val) / wheelbase_val
                         : 0.0) {}
-    // 基于protobuf消息构造VehicleParams结构体
+    // 基于protobuf消息构造
     static VehicleParams FromProto(
         const ::apa::post_processor::VehicleParams& proto) {
         auto params = VehicleParams{
@@ -54,7 +54,7 @@ struct VehicleParams {
         }
         return params;
     }
-    // 把车辆参数信息转化为json格式的字符串
+    // 转化为JSON字符串
     std::string toString() const {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(PRINT_PRECISION)
@@ -69,21 +69,21 @@ struct VehicleParams {
         return oss.str();
     }
 
-    // 车辆长度 (m)
+    // 长度 (m)
     double length{0.0};
-    // 车辆宽度 (m)
+    // 宽度 (m)
     double width{0.0};
     // 轴距 (m)
     double wheelbase{0.0};
-    // 最大方向盘转角/前轮偏角 (rad)
+    // 最大前轮偏角 (rad)
     double max_steer_angle{0.0};
-    // 后轴到后保险杠的距离 (m)
+    // 后轴到后保险杠距离 (m)
     double rear_overhang{0.0};
-    // 最大纵向加速度 (m/s^2)，泊车场景取正值
+    // 最大纵向加速度 (m/s^2)
     double max_accel{1.0};
-    // 最大纵向减速度 (m/s^2)，泊车场景取负值
+    // 最大纵向减速度 (m/s^2)
     double max_decel{-1.5};
-    // 前轮最大偏角速度 (rad/s)
+    // 最大前轮偏角速度 (rad/s)
     double max_steer_rate{0.4};
     // 最大曲率
     double max_kappa{0.0};

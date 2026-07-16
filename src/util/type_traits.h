@@ -5,12 +5,12 @@
 
 namespace apa_post_processor {
 namespace util {
-// 编译期类型萃取：获取可迭代容器的元素类型（decay 后）。
+// 获取可迭代容器的元素类型
 template <typename T>
 using iterable_value_t =
     std::decay_t<decltype(*std::begin(std::declval<const std::decay_t<T>&>()))>;
 
-// 编译期类型萃取：判断类型是否为可迭代容器（支持 std::begin/std::end）。
+// 判断类型是否为可迭代容器
 template <typename T, typename = void>
 struct is_iterable : std::false_type {};
 
@@ -20,7 +20,7 @@ struct is_iterable<T,
                                decltype(std::end(std::declval<const T&>()))>>
     : std::true_type {};
 
-// is_iterable 的便捷变量模板。
+// is_iterable 变量模板
 template <typename T>
 inline constexpr bool is_iterable_v = is_iterable<T>::value;
 }  // namespace util

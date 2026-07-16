@@ -2,8 +2,7 @@
 
 #include "util/logger.h"
 
-int main(int argc, char** argv)
-{
+int main(int argc, char** argv) {
     apa_post_processor::Logger::SetLogDirectory("../log");
     apa_post_processor::Logger::SetConsoleOutputEnabled(false);
     testing::InitGoogleTest(&argc, argv);

@@ -12,17 +12,13 @@
 #include "../util/logger.h"
 
 namespace apa_post_processor {
-
 namespace {
-
-// 将 (row, col, value) 三元组追加到 CSC 矩阵的当前列。
-// 调用方需保证按列号递增、同列内行号递增的顺序追加。
+// 将 (row, col, value) 三元组追加到 CSC 矩阵的当前列
 void appendCscEntry(std::vector<double>& values, std::vector<int>& row_indices,
                     int row, double value) {
     values.push_back(value);
     row_indices.push_back(row);
 }
-
 }  // namespace
 
 SpeedProfilePlanner::SpeedProfilePlanner(
@@ -71,8 +67,7 @@ void SpeedProfilePlanner::validateInputs(
                 "non-decreasing");
         }
     }
-    // 尖点必须严格在内部，首尾点分别由 b0/bN 边界条件处理；
-    // 首点冲突会导致 QP 不可行，尾点冗余但同样不允许显式传入。
+    // 尖点必须严格在内部
     for (const auto idx : cusp_indices) {
         if (idx == 0 || idx >= n_points - 1) {
             throw std::invalid_argument(
@@ -94,14 +89,14 @@ std::vector<double> SpeedProfilePlanner::computeSpeedLimitSquared(
                                                       : config_.max_v_reverse;
         double v_ref_sq = v_ref * v_ref;
 
-        // 曲率侧向加速度约束：v^2 <= max_lateral_accel / |kappa|
+        // 曲率侧向加速度约束
         double v_kappa_sq = std::numeric_limits<double>::infinity();
         const double kappa_abs = std::abs(input.kappa[i]);
         if (kappa_abs > EPSILON) {
             v_kappa_sq = config_.max_lateral_accel / kappa_abs;
         }
 
-        // ESDF 危险度约束：距离越近，允许速度线性降低
+        // ESDF 危险度约束
         double v_esdf_sq = v_ref_sq;
         const double dist = input.min_esdf_dist[i];
         if (dist < config_.esdf_danger_margin) {
@@ -131,11 +126,7 @@ SpeedProfileResult SpeedProfilePlanner::solveQp(
     const auto b_index = [n_points](int i) { return i; };
     const auto a_index = [n_points](int i) { return n_points + i; };
 
-    // ---- 目标函数 P (CSC 上三角) 与线性项 q ----
-    // 策略：P 的每列非零元结构已知（b 列 1 个对角，a 列 1~2 个上三角条目），
-    // 因此先遍历所有变量统计 col_nnz 得到 P_p，再严格按列号递增顺序填充
-    // P_x/P_i。 这种两遍法保证 CSC 列指针正确，避免先填 a_i 列（列号
-    // n_points+i）后填 b_{i+1} 列（列号 i+1）导致的列顺序错位。
+    // 目标函数 P (CSC 上三角) 与线性项 q：两遍法保证 CSC 列指针正确
     std::vector<double> P_x;
     std::vector<int> P_i;
     std::vector<int> P_p(n + 1, 0);
@@ -189,11 +180,7 @@ SpeedProfileResult SpeedProfilePlanner::solveQp(
         appendCscEntry(P_x, P_i, a_col, a_diag);
     }
 
-    // ---- 约束矩阵 A (CSC) 与边界 l/u ----
-    // 策略：A 的每列条目来自多个不同约束（动力学、边界、尖点等），结构较分散，
-    // 因此先用 vector<vector<pair<row, val>>>
-    // 按列收集，再对每列按行号排序后输出
-    // CSC。这样只需保证同列内行号递增，无需在收集阶段维护全局列顺序。
+    // 约束矩阵 A (CSC) 与边界 l/u：按列收集后排序输出 CSC
     int row = 0;
     const int row_b0 = row++;
     const int row_bN = row++;
@@ -400,5 +387,4 @@ SpeedProfileResult SpeedProfilePlanner::plan(
     recoverVelocityAndTime(result.b, direction_signs, input.s, result);
     return result;
 }
-
 }  // namespace apa_post_processor

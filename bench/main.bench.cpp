@@ -28,13 +28,14 @@ std::vector<std::string> SplitString(const std::string& text, char delimiter) {
 }
 
 // Google Benchmark 默认会打印 mean/median/stddev/cv 并输出 items_per_second，
-// 这里只保留 mean，并把 repeats:5_mean 显示为 x5_mean，概率参数显示为 0.2/0.05。
+// 这里只保留 mean，并把 repeats:5_mean 显示为 x5_mean，概率参数显示为
+// 0.2/0.05。
 class MeanOnlyConsoleReporter : public benchmark::ConsoleReporter {
    public:
     using benchmark::ConsoleReporter::ConsoleReporter;
 
-    void ReportRuns(
-        const std::vector<benchmark::BenchmarkReporter::Run>& reports) override {
+    void ReportRuns(const std::vector<benchmark::BenchmarkReporter::Run>&
+                        reports) override {
         std::vector<benchmark::BenchmarkReporter::Run> filtered_reports;
         filtered_reports.reserve(reports.size());
         for (auto report : reports) {
@@ -43,8 +44,8 @@ class MeanOnlyConsoleReporter : public benchmark::ConsoleReporter {
                 report.aggregate_name == "mean") {
                 FormatRunName(report);
                 filtered_reports.push_back(std::move(report));
-                name_field_width_ = std::max(
-                    name_field_width_, report.benchmark_name().size());
+                name_field_width_ =
+                    std::max(name_field_width_, report.benchmark_name().size());
             }
         }
         benchmark::ConsoleReporter::ReportRuns(filtered_reports);

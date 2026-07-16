@@ -11,32 +11,36 @@
 #include <vector>
 
 #include "logger.h"
-#include "path_point.h"
+#include "trajectory_point.h"
 
 namespace apa_post_processor {
 template <typename T>
 struct UnsupportedManeuverInputType : std::false_type {};
 
-// 方向枚举类
+// 行驶方向
 enum class Direction {
-    // 未知/未推断
     UNKNOWN = 0,
-    // 前进
     FORWARD = 1,
-    // 后退
     BACKWARD = 2,
-    // 钟摆泊车等特殊场景下的原地转向
     PIVOT = 3
 };
 
-// 机动段数据结构
+// 机动段
 struct Maneuver {
     Maneuver() = default;
-    // 输入一系列PathPoint或者单个PathPoint构造Maneuver，方向只接收外部显式指定值
-    template <typename T>
+    // 显式默认拷贝/移动，防止转发引用模板构造函数劫持
+    Maneuver(const Maneuver&) = default;
+    Maneuver(Maneuver&&) = default;
+    Maneuver& operator=(const Maneuver&) = default;
+    Maneuver& operator=(Maneuver&&) = default;
+    // 输入PathPoint序列构造，方向仅接收外部指定值
+    template <
+        typename T,
+        std::enable_if_t<!std::is_same_v<std::decay_t<T>, Maneuver>, int> = 0>
     explicit Maneuver(T&& input, Direction dir = Direction::UNKNOWN) {
         using DecayedType = std::decay_t<T>;
-        if constexpr (std::is_same_v<DecayedType, std::vector<PathPoint>>) {
+        if constexpr (std::is_same_v<DecayedType,
+                                     std::vector<TrajectoryPoint>>) {
             points = std::forward<T>(input);
             if (points.empty()) {
                 LOG_ERROR(
@@ -44,7 +48,7 @@ struct Maneuver {
                 throw std::invalid_argument(
                     "Maneuver constructor received empty points vector");
             }
-        } else if constexpr (std::is_same_v<DecayedType, PathPoint>) {
+        } else if constexpr (std::is_same_v<DecayedType, TrajectoryPoint>) {
             points.emplace_back(std::forward<T>(input));
         } else {
             static_assert(
@@ -54,9 +58,9 @@ struct Maneuver {
         }
         direction = dir;
     }
-    // 此机动段包含几个节点
+    // 此段包含的节点数
     std::size_t size() const { return points.size(); }
-    // 此机动段的长度
+    // 此段的弧长
     double length() const {
         return (points.size() < 2)
                    ? 0.0
@@ -68,11 +72,15 @@ struct Maneuver {
                          });
     }
     // 迭代器接口
-    std::vector<PathPoint>::iterator begin() { return points.begin(); }
-    std::vector<PathPoint>::iterator end() { return points.end(); }
-    std::vector<PathPoint>::const_iterator begin() const { return points.begin(); }
-    std::vector<PathPoint>::const_iterator end() const { return points.end(); }
-    // 把机动段信息转化为json格式的字符串
+    std::vector<TrajectoryPoint>::iterator begin() { return points.begin(); }
+    std::vector<TrajectoryPoint>::iterator end() { return points.end(); }
+    std::vector<TrajectoryPoint>::const_iterator begin() const {
+        return points.begin();
+    }
+    std::vector<TrajectoryPoint>::const_iterator end() const {
+        return points.end();
+    }
+    // 转化为JSON字符串
     std::string toString() const {
         std::ostringstream oss;
         static constexpr const char* DIR_NAMES[] = {"UNKNOWN", "FORWARD",
@@ -90,9 +98,9 @@ struct Maneuver {
         return oss.str();
     }
 
-    // 机动段方向
+    // 行驶方向
     Direction direction{Direction::UNKNOWN};
-    // 机动段包含的路径点序列
-    std::vector<PathPoint> points;
+    // 路径点序列
+    std::vector<TrajectoryPoint> points;
 };
 }  // namespace apa_post_processor

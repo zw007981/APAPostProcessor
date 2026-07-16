@@ -1,4 +1,5 @@
 #include "core/NMPC/nmpc_solver.h"
+#include "core/post_processor.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/data_loader.hpp"
@@ -32,75 +33,52 @@ int main() {
         auto grid_map = GridMap::FromProto(optimize_request.environment());
         auto init_path = Path::FromProto(optimize_request.initial_path());
 
-        // 构建NMPC求解所需的ESDF地图与车辆圆形分解模型（outer_row_num取较小值，
-        // 确保外圆数量不超过CircleFootprintEsdfConstraint::kMaxCircles，见仓库记忆）
+        // 构建 ESDF 地图与车辆圆形分解模型
         const ESDFMap esdf_map(grid_map);
         const VehicleFootprintModel footprint_model(
             vehicle_params, /*heading_sample_num=*/233, /*inner_row_num=*/2,
             /*outer_row_num=*/2);
-        const NmpcSolver nmpc_solver(vehicle_params, footprint_model);
-        const auto nmpc_result =
-            nmpc_solver.optimizeWithPruning(init_path, esdf_map);
 
-        auto optimize_response = ::apa::post_processor::OptimizeResponse();
-        optimize_response.set_success(nmpc_result.converged);
-        optimize_response.set_optimization_time_ms(nmpc_result.solve_time_ms);
-        const auto optimized_path = NmpcSolver::ToPath(nmpc_result);
-        if (!optimized_path.empty()) {
-            optimized_path.toProto(optimize_response.mutable_optimized_path());
-            optimized_path.toProto(optimize_response.mutable_maneuvers());
-            optimize_response.set_message(
-                nmpc_result.converged
-                    ? "NMPC optimize converged"
-                    : "NMPC reached max_iter without full convergence, "
-                      "returning last iterate");
-        } else {
-            optimize_response.set_message(
-                "NMPC solve failed on the first iteration, no usable "
-                "trajectory produced, see log for details");
-        }
+        // PostProcessor 完整链路
+        PreprocessingPipelineConfig pipeline_config;
+        NmpcSolverConfig nmpc_config;
+        AdaptiveRetryConfig retry_config;
+        const PostProcessor post_processor(vehicle_params, footprint_model,
+                                           esdf_map);
+        const auto post_result = post_processor.optimize(
+            init_path, pipeline_config, nmpc_config, retry_config);
+
         LOG_FMT_INFO(
-            "NMPC optimize converged={}, time_ms={}, prune_iterations={}, "
-            "maneuvers={}->{}, length={:.3f}->{:.3f}, message={}",
-            nmpc_result.converged, nmpc_result.solve_time_ms,
-            nmpc_result.prune_iterations, init_path.numManeuvers(),
-            nmpc_result.segment_steps.size(), init_path.length(),
-            optimized_path.empty() ? 0.0 : optimized_path.length(),
-            optimize_response.message());
+            "PostProcessor result: success={}, maneuvers={}, length={:.3f}, "
+            "time_ms={:.1f}, used_retry={}, message={}",
+            post_result.success, post_result.final_maneuvers,
+            post_result.final_length, post_result.total_time_ms,
+            post_result.used_retry, post_result.message);
 
-        auto visualizer = Visualizer("PostProcessor");
-        if (!optimized_path.empty()) {
-            visualizer
-                .plotPath(optimized_path, true,
-                          Visualizer::Style{{"color", visualizer::Pen::BLUE},
-                                            {"linewidth", "2"},
-                                            {"label", "OptimizedPath"}})
-                .plotPathDetails(
-                    optimized_path,
-                    Visualizer::Style{{"color", visualizer::Pen::BLUE},
-                                      {"label", "OptimizedPath"}});
+        const auto& optimized_path = post_result.optimized_path;
+
+        auto visualizer = Visualizer("PostProcessor", -1.0, 2.33);
+        // 预处理轨迹：不绘制扫过轮廓。
+        if (!post_result.preprocessed_traj.empty()) {
+            visualizer.plotTrajectory(
+                post_result.preprocessed_traj, vehicle_params, &footprint_model,
+                &esdf_map, &grid_map,
+                /*draw_swept_area=*/false,
+                {{"color", visualizer::Pen::RED}, {"label", "Preprocessed"}});
         }
-        visualizer
-            .plotPath(init_path, true,
-                      Visualizer::Style{{"color", visualizer::Pen::RED},
-                                        {"linewidth", "2"},
-                                        {"label", "InitPath"}})
-            .plotVehicle(init_path.front(), vehicle_params, false,
-                         Visualizer::Style{{"color", visualizer::Pen::YELLOW},
-                                           {"linewidth", "2"},
-                                           {"label", "Start"}})
-            .plotVehicle(init_path.back(), vehicle_params, false,
-                         Visualizer::Style{{"color", visualizer::Pen::GREEN},
-                                           {"linewidth", "2"},
-                                           {"label", "Goal"}})
-            // .plotGridMap(grid_map, [&esdf_map](double x, double y) {
-            //     return esdf_map.getDist(x, y);
-            // })
-            .plotGridMap(grid_map)
-            .plotPathDetails(init_path,
-                             Visualizer::Style{{"color", visualizer::Pen::RED},
-                                               {"label", "InitPath"}});
-        visualizer.save("../fig");
+        // NMPC 轨迹：绘制扫过轮廓。
+        if (!post_result.nmpc_traj.empty()) {
+            visualizer.plotTrajectory(post_result.nmpc_traj, vehicle_params,
+                                      &footprint_model, &esdf_map, &grid_map,
+                                      /*draw_swept_area=*/true,
+                                      {{"color", visualizer::Pen::BLUE},
+                                       {"label", "NMPC Optimized"}});
+        }
+        // 至少有一条轨迹才出图。
+        if (!post_result.preprocessed_traj.empty() ||
+            !post_result.nmpc_traj.empty()) {
+            visualizer.save("../fig");
+        }
     } catch (const std::exception& e) {
         LOG_FMT_ERROR("Exception caught in main: {}!!!", e.what());
         return 1;

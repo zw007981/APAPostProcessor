@@ -3,10 +3,9 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <opencv2/core.hpp>
 #include <random>
 #include <vector>
-
-#include <opencv2/core.hpp>
 
 namespace apa_post_processor {
 
@@ -36,13 +35,10 @@ struct RandomMapData {
     std::size_t center_index = 0;
 };
 
-inline constexpr std::array<Scenario, 6> kBenchmarkScenarios = {{
-    {200, 200, 50},   // 0.05
-    {200, 200, 200},  // 0.2
-    {500, 500, 50},   // 0.05
-    {500, 500, 200},  // 0.2
-    {1000, 1000, 50}, // 0.05
-    {1000, 1000, 200} // 0.2
+inline constexpr std::array<Scenario, 3> kBenchmarkScenarios = {{
+    {200, 200, 100},   // 0.1
+    {500, 500, 100},   // 0.1
+    {1000, 1000, 100}  // 0.1
 }};
 
 // Benchmark fixture：在测试开始前构造所有场景所需的随机地图，
@@ -79,8 +75,8 @@ inline BenchmarkFixture::BenchmarkFixture() {
 
 inline RandomMapData BenchmarkFixture::BuildRandomMapData(
     int width, int height, double occupied_probability) {
-    const auto cell_count = static_cast<std::size_t>(width) *
-                            static_cast<std::size_t>(height);
+    const auto cell_count =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
     std::vector<uint8_t> occupancy_data(cell_count, 0U);
 
     const int prob_x1000 =

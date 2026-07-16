@@ -1,7 +1,5 @@
 #include "util/path.h"
 
-#include "util/path_point.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -10,6 +8,7 @@
 #include <vector>
 
 #include "util/constants.h"
+#include "util/trajectory_point.h"
 
 namespace apa_post_processor {
 namespace {
@@ -28,10 +27,12 @@ Pose BuildPoseWithRawTheta(double x, double y, double theta) {
     return pose;
 }
 
-std::vector<PathPoint> CollectPathPoints(const Path& path) {
-    std::vector<PathPoint> points;
+std::vector<TrajectoryPoint> CollectPathPoints(const Path& path) {
+    std::vector<TrajectoryPoint> points;
     points.reserve(path.size());
-    path.forEach([&points](const PathPoint& point) { points.emplace_back(point); });
+    path.forEach([&points](const TrajectoryPoint& point) {
+        points.emplace_back(point);
+    });
     return points;
 }
 
@@ -79,7 +80,8 @@ TEST(PathTest, ConstructFromPoseSequence) {
     const auto manual_points = CollectPathPoints(manual_path);
     for (std::size_t i = 0; i < constructed_points.size(); ++i) {
         ExpectPoseNear(constructed_points[i], manual_points[i]);
-        EXPECT_NEAR(constructed_points[i].getKappa(), manual_points[i].getKappa(), EPSILON);
+        EXPECT_NEAR(constructed_points[i].getKappa(),
+                    manual_points[i].getKappa(), EPSILON);
     }
 }
 
@@ -109,7 +111,8 @@ TEST(PathTest, EmptyTailManeuverMakesPathEmpty) {
 // 因为部分测试和内部流程需要白盒构造状态，所以 getManeuvers 应返回可修改引用。
 TEST(PathTest, MutableGetManeuversAllowsStateConstruction) {
     Path path;
-    path.getManeuvers().emplace_back(PathPoint{0.0, 0.0, 0.0}, Direction::FORWARD);
+    path.getManeuvers().emplace_back(TrajectoryPoint{0.0, 0.0, 0.0},
+                                     Direction::FORWARD);
 
     ASSERT_FALSE(path.empty());
     ASSERT_EQ(path.getManeuvers().size(), 1U);
@@ -147,12 +150,12 @@ TEST(PathTest, SizeCountsSingleManeuverPoints) {
 // 因为换挡尖点会同时出现在前后两个 Maneuver，所以总点数应跳过后续段的重复首点。
 TEST(PathTest, SizeSkipsDuplicatedCuspPointsAcrossManeuvers) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{0.1, 0.0, 0.0};
-    const PathPoint target{0.0, 0.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{0.1, 0.0, 0.0};
+    const TrajectoryPoint target{0.0, 0.0, 0.0};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
 
     ASSERT_EQ(path.numManeuvers(), 2U);
@@ -197,7 +200,7 @@ TEST(PathTest, LengthRecomputesAfterMutableManeuversInvalidatesCache) {
     EXPECT_DOUBLE_EQ(path.length(), 5.0);
 
     auto& maneuvers = path.getManeuvers();
-    maneuvers.at(0).points.emplace_back(PathPoint{6.0, 8.0, 0.0});
+    maneuvers.at(0).points.emplace_back(TrajectoryPoint{6.0, 8.0, 0.0});
 
     EXPECT_DOUBLE_EQ(path.length(), 10.0);
 }
@@ -207,12 +210,12 @@ TEST(PathTest, LengthRecomputesAfterMutableManeuversInvalidatesCache) {
 // 的连续路径视图，所以换挡尖点只应参与一次相邻距离计算。
 TEST(PathTest, LengthSkipsDuplicatedCuspAcrossManeuvers) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{1.0, 0.0, 0.0};
-    const PathPoint target{1.0, 2.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{1.0, 0.0, 0.0};
+    const TrajectoryPoint target{1.0, 2.0, 0.0};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
 
     EXPECT_DOUBLE_EQ(path.length(), 3.0);
@@ -224,7 +227,8 @@ TEST(PathTest, ForEachDoesNothingForEmptyPath) {
     Path path;
     std::size_t callback_count = 0U;
 
-    path.forEach([&callback_count](const PathPoint&) { ++callback_count; });
+    path.forEach(
+        [&callback_count](const TrajectoryPoint&) { ++callback_count; });
 
     EXPECT_EQ(callback_count, 0U);
 }
@@ -233,12 +237,12 @@ TEST(PathTest, ForEachDoesNothingForEmptyPath) {
 // 因为对外遍历应呈现连续路径，所以换挡点只应出现一次且顺序保持不变。
 TEST(PathTest, ForEachTraversesPathInOrderWithoutDuplicatedCusp) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{0.1, 0.0, 0.0};
-    const PathPoint target{0.0, 0.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{0.1, 0.0, 0.0};
+    const TrajectoryPoint target{0.0, 0.0, 0.0};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
 
     const auto points = CollectPathPoints(path);
@@ -253,11 +257,11 @@ TEST(PathTest, ForEachTraversesPathInOrderWithoutDuplicatedCusp) {
 // 因为这种段没有新增轨迹点，所以遍历应跳过该段，防止重复输出尖点。
 TEST(PathTest, ForEachSkipsTrailingManeuverWithOnlyCuspPoint) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{1.0, 0.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{1.0, 0.0, 0.0};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp},
                                      Direction::BACKWARD);
 
     const auto points = CollectPathPoints(path);
@@ -282,7 +286,7 @@ TEST(PathTest, ToStringBuildsJsonTextForEmptyPath) {
 TEST(PathTest, ToStringBuildsJsonTextForSingleManeuver) {
     Path path;
     path.getManeuvers().emplace_back(
-        std::vector<PathPoint>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
+        std::vector<TrajectoryPoint>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}},
         Direction::FORWARD);
 
     EXPECT_EQ(path.toString(),
@@ -296,12 +300,12 @@ TEST(PathTest, ToStringBuildsJsonTextForSingleManeuver) {
 // 因为日志需要保留换挡边界，所以 toString 应按 Maneuver 原始顺序输出每一段。
 TEST(PathTest, ToStringBuildsJsonTextForMultipleManeuvers) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{1.0, 0.0, 0.0};
-    const PathPoint target{0.5, 0.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{1.0, 0.0, 0.0};
+    const TrajectoryPoint target{0.5, 0.0, 0.0};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
 
     EXPECT_EQ(path.toString(),
@@ -332,12 +336,12 @@ TEST(PathTest, ToProtoFlatClearsAndExportsEmptyPath) {
 // 因为 optimized_path 只表达连续位姿序列，所以换挡尖点只应导出一次。
 TEST(PathTest, ToProtoFlatExportsPointsWithoutDuplicatedCusp) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{1.0, 0.0, 0.1};
-    const PathPoint target{0.5, 0.0, 0.2};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{1.0, 0.0, 0.1};
+    const TrajectoryPoint target{0.5, 0.0, 0.2};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
     ::apa::post_processor::Path path_proto;
 
@@ -353,12 +357,12 @@ TEST(PathTest, ToProtoFlatExportsPointsWithoutDuplicatedCusp) {
 // 因为 maneuvers 字段需要保留换挡边界，所以每段方向和段内尖点都应原样输出。
 TEST(PathTest, ToProtoNestedExportsManeuversWithDirectionsAndCusp) {
     Path path;
-    const PathPoint first{0.0, 0.0, 0.0};
-    const PathPoint cusp{1.0, 0.0, 0.1};
-    const PathPoint target{0.5, 0.0, 0.2};
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{first, cusp},
+    const TrajectoryPoint first{0.0, 0.0, 0.0};
+    const TrajectoryPoint cusp{1.0, 0.0, 0.1};
+    const TrajectoryPoint target{0.5, 0.0, 0.2};
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
                                      Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<PathPoint>{cusp, target},
+    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
                                      Direction::BACKWARD);
     ::google::protobuf::RepeatedPtrField<::apa::post_processor::Maneuver>
         maneuvers_proto;
@@ -762,9 +766,11 @@ TEST(PathAddPointTest, InterpolationUsesWrappedAngleForMidPoints) {
     ASSERT_NO_THROW(path.addPoint(first));
     ASSERT_NO_THROW(path.addPoint(target));
 
-    std::vector<PathPoint> points;
+    std::vector<TrajectoryPoint> points;
     points.reserve(path.size());
-    path.forEach([&points](const PathPoint& point) { points.emplace_back(point); });
+    path.forEach([&points](const TrajectoryPoint& point) {
+        points.emplace_back(point);
+    });
 
     ASSERT_GT(points.size(), 3U);
     EXPECT_GT(std::abs(points.at(1).theta), 3.0);
@@ -855,7 +861,8 @@ TEST(PathCurvatureTest, GearShiftCuspIsolation) {
     ASSERT_GE(backward_points.size(), 2U);
 
     const double cusp_kappa = forward_points.back().getKappa();
-    const double prev_kappa = forward_points[forward_points.size() - 2].getKappa();
+    const double prev_kappa =
+        forward_points[forward_points.size() - 2].getKappa();
     EXPECT_DOUBLE_EQ(cusp_kappa, prev_kappa);
     EXPECT_TRUE(std::isfinite(cusp_kappa));
     EXPECT_FALSE(std::isnan(cusp_kappa));
@@ -974,9 +981,11 @@ TEST(PathCurvatureTest, SCurveInflectionPoint) {
     EXPECT_GT(max_positive_kappa, 0.8);
     // 拐点曲率应极小 (由于离散步长 dx=0.05，理论上应小于 0.05)
     EXPECT_LT(inflection_min_abs_kappa, 0.05);
-    // 边界继承逻辑校验
-    EXPECT_DOUBLE_EQ(points.front().getKappa(), points[1].getKappa());
-    EXPECT_DOUBLE_EQ(points.back().getKappa(), points[points.size() - 2].getKappa());
+    // 端点曲率由独立角度差分计算（前/后向差商），不再简单复制邻点值。
+    // 对光滑曲线应与邻点接近，但不要求完全相等。
+    EXPECT_NEAR(points.front().getKappa(), points[1].getKappa(), 1e-2);
+    EXPECT_NEAR(points.back().getKappa(), points[points.size() - 2].getKappa(),
+                1e-2);
 }
 
 // 测试 addPoint 过程中不提前计算曲率。
@@ -1047,7 +1056,8 @@ TEST(PathCurvatureTest, FinalizeComputesCurvatureForAllManeuvers) {
     EXPECT_NEAR(backward_points.front().getKappa(),
                 backward_points[1].getKappa(), EPSILON);
     EXPECT_NEAR(backward_points.back().getKappa(),
-                backward_points[backward_points.size() - 2].getKappa(), EPSILON);
+                backward_points[backward_points.size() - 2].getKappa(),
+                EPSILON);
 }
 }  // namespace
 }  // namespace apa_post_processor

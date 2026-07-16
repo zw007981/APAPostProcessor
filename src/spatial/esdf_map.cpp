@@ -1,5 +1,7 @@
 #include "esdf_map.h"
 
+#include <vector>
+
 namespace apa_post_processor {
 ESDFMap::ESDFMap(const GridMap& grid_map) {
     if (grid_map.getResolution() <= EPSILON) {
@@ -25,8 +27,14 @@ ESDFMap::ESDFMap(const GridMap& grid_map) {
                       occ_data.size(), size_);
         throw std::logic_error("ESDFMap occupancy data size is invalid!!!");
     }
-    distance_data_ =
+    const auto signed_distance =
         BuildSignedDistData(occ_data, width_, height_, resolution_);
+    cell_data_.resize(size_);
+    distance_data_.resize(size_);
+    for (GridIndex i = 0; i < size_; ++i) {
+        cell_data_[i].dist = signed_distance[i];
+        distance_data_[i] = signed_distance[i];
+    }
     calGradField();
 }
 
@@ -36,13 +44,112 @@ std::pair<double, Eigen::Vector2d> ESDFMap::getDistAndGrad(double x,
         LOG_FMT_WARN("ESDFMap query out of bounds: ({}, {})!", x, y);
         return {0.0, Eigen::Vector2d::Zero()};
     }
-    // 执行双线性插值获取距离值与梯度
+    // 双线性插值：从 AoS 缓存取四个角点，用 float 做 lerp，返回前转 double
     const auto params = this->calBilinearParams(x, y);
-    const double dist = this->calBilinearVal(distance_data_, params);
-    Eigen::Vector2d grad;
-    grad.x() = this->calBilinearVal(grad_x_data_, params);
-    grad.y() = this->calBilinearVal(grad_y_data_, params);
-    return {dist, grad};
+    const auto& cell_bl = cell_data_[params.idx_bl];
+    const auto& cell_br = cell_data_[params.idx_br];
+    const auto& cell_tl = cell_data_[params.idx_tl];
+    const auto& cell_tr = cell_data_[params.idx_tr];
+    const auto col_ratio = params.col_ratio;
+    const auto row_ratio = params.row_ratio;
+    const auto dist_row_lower =
+        cell_bl.dist + (cell_br.dist - cell_bl.dist) * col_ratio;
+    const auto dist_row_upper =
+        cell_tl.dist + (cell_tr.dist - cell_tl.dist) * col_ratio;
+    const auto dist =
+        dist_row_lower + (dist_row_upper - dist_row_lower) * row_ratio;
+    const auto grad_x_row_lower =
+        cell_bl.grad_x + (cell_br.grad_x - cell_bl.grad_x) * col_ratio;
+    const auto grad_x_row_upper =
+        cell_tl.grad_x + (cell_tr.grad_x - cell_tl.grad_x) * col_ratio;
+    const auto grad_x =
+        grad_x_row_lower + (grad_x_row_upper - grad_x_row_lower) * row_ratio;
+    const auto grad_y_row_lower =
+        cell_bl.grad_y + (cell_br.grad_y - cell_bl.grad_y) * col_ratio;
+    const auto grad_y_row_upper =
+        cell_tl.grad_y + (cell_tr.grad_y - cell_tl.grad_y) * col_ratio;
+    const auto grad_y =
+        grad_y_row_lower + (grad_y_row_upper - grad_y_row_lower) * row_ratio;
+    return {static_cast<double>(dist),
+            Eigen::Vector2d(static_cast<double>(grad_x),
+                            static_cast<double>(grad_y))};
+}
+
+void ESDFMap::getDistAndGradBatch(const double* xs, const double* ys, int n,
+                                  double* dists_out, double* grad_x_out,
+                                  double* grad_y_out) const {
+    // 参数结构体：每个查询存储 4 个 int 索引 + 2 个 float 权重
+    struct alignas(32) BatchParam {
+        int idx_bl, idx_br, idx_tl, idx_tr;
+        float col_ratio, row_ratio;
+        int valid;
+    };
+    // 栈上限 12（对应最多 12 个外圆），超出时回退到 std::vector
+    constexpr int kStackMax = 12;
+    BatchParam stack_buf[kStackMax];
+    std::vector<BatchParam> heap_buf;
+    BatchParam* params = stack_buf;
+    if (n > kStackMax) {
+        heap_buf.reserve(static_cast<std::size_t>(n));
+        heap_buf.resize(static_cast<std::size_t>(n));
+        params = heap_buf.data();
+    }
+
+    // 第一遍：计算所有点的双线性参数并检查越界
+    const double res = 1.0 / inv_resolution_;  // 恢复 resolution_（物理米/格）
+    const double ox = origin_.x;
+    const double oy = origin_.y;
+    const int w = width_;
+    const int h = height_;
+    const double map_x_max = ox + static_cast<double>(w) * res;
+    const double map_y_max = oy + static_cast<double>(h) * res;
+    for (int i = 0; i < n; ++i) {
+        const double x = xs[i];
+        const double y = ys[i];
+        if (x >= ox && x < map_x_max && y >= oy && y < map_y_max) {
+            const auto bp = calBilinearParams(x, y);
+            params[i].idx_bl = bp.idx_bl;
+            params[i].idx_br = bp.idx_br;
+            params[i].idx_tl = bp.idx_tl;
+            params[i].idx_tr = bp.idx_tr;
+            params[i].col_ratio = bp.col_ratio;
+            params[i].row_ratio = bp.row_ratio;
+            params[i].valid = 1;
+        } else {
+            params[i].valid = 0;
+        }
+    }
+
+    // 第二遍：对所有有效点做双线性插值（纯浮点，编译器可自动向量化）
+    const EsdfCell* cell_base = cell_data_.data();
+    for (int i = 0; i < n; ++i) {
+        if (!params[i].valid) {
+            dists_out[i] = 0.0;
+            grad_x_out[i] = 0.0;
+            grad_y_out[i] = 0.0;
+            continue;
+        }
+        const auto& p = params[i];
+        const auto& cell_bl = cell_base[p.idx_bl];
+        const auto& cell_br = cell_base[p.idx_br];
+        const auto& cell_tl = cell_base[p.idx_tl];
+        const auto& cell_tr = cell_base[p.idx_tr];
+        const float cr = p.col_ratio;
+        const float rr = p.row_ratio;
+        const float dist_lo = cell_bl.dist + (cell_br.dist - cell_bl.dist) * cr;
+        const float dist_hi = cell_tl.dist + (cell_tr.dist - cell_tl.dist) * cr;
+        const float gx_lo =
+            cell_bl.grad_x + (cell_br.grad_x - cell_bl.grad_x) * cr;
+        const float gx_hi =
+            cell_tl.grad_x + (cell_tr.grad_x - cell_tl.grad_x) * cr;
+        const float gy_lo =
+            cell_bl.grad_y + (cell_br.grad_y - cell_bl.grad_y) * cr;
+        const float gy_hi =
+            cell_tl.grad_y + (cell_tr.grad_y - cell_tl.grad_y) * cr;
+        dists_out[i] = static_cast<double>(dist_lo + (dist_hi - dist_lo) * rr);
+        grad_x_out[i] = static_cast<double>(gx_lo + (gx_hi - gx_lo) * rr);
+        grad_y_out[i] = static_cast<double>(gy_lo + (gy_hi - gy_lo) * rr);
+    }
 }
 
 double ESDFMap::getDist(double x, double y) const {
@@ -50,63 +157,58 @@ double ESDFMap::getDist(double x, double y) const {
         LOG_FMT_WARN("ESDFMap query out of bounds: ({}, {})!", x, y);
         return 0.0;
     }
-    return this->calBilinearVal(distance_data_, this->calBilinearParams(x, y));
+    // 仅对距离做双线性插值。使用独立 distance_data_ 保持 4-byte stride，
+    // 避免 AoS 布局对纯距离查询的 cache 密度损失。
+    const auto params = this->calBilinearParams(x, y);
+    const auto col_ratio = params.col_ratio;
+    const auto row_ratio = params.row_ratio;
+    const PhysicalDist* dist_data = distance_data_.data();
+    const auto dist_row_lower =
+        dist_data[params.idx_bl] +
+        (dist_data[params.idx_br] - dist_data[params.idx_bl]) * col_ratio;
+    const auto dist_row_upper =
+        dist_data[params.idx_tl] +
+        (dist_data[params.idx_tr] - dist_data[params.idx_tl]) * col_ratio;
+    const auto dist =
+        dist_row_lower + (dist_row_upper - dist_row_lower) * row_ratio;
+    return static_cast<double>(dist);
 }
 
-bool ESDFMap::inMap(double x, double y) const {
-    const auto max_x = origin_.x + static_cast<double>(width_) * resolution_;
-    const auto max_y = origin_.y + static_cast<double>(height_) * resolution_;
-    return x >= origin_.x && y >= origin_.y && x < max_x && y < max_y;
-}
-
+// 调用方必须保证 (x, y) 在地图范围内。static_cast<int> 对正数截断等价于 floor。
 ESDFMap::BilinearParams ESDFMap::calBilinearParams(double x, double y) const {
     auto params = BilinearParams();
-    // 根据坐标计算x,y方向上的前后栅格
-    const auto col_float = (x - origin_.x) * inv_resolution_,
-               row_float = (y - origin_.y) * inv_resolution_;
-    params.col_lower =
-        std::clamp(static_cast<int>(std::floor(col_float)), 0, width_ - 1);
-    params.row_lower =
-        std::clamp(static_cast<int>(std::floor(row_float)), 0, height_ - 1);
+    const auto col_float =
+        static_cast<float>((x - origin_.x) * inv_resolution_);
+    const auto row_float =
+        static_cast<float>((y - origin_.y) * inv_resolution_);
+    params.col_lower = std::clamp(static_cast<int>(col_float), 0, width_ - 1);
+    params.row_lower = std::clamp(static_cast<int>(row_float), 0, height_ - 1);
     params.col_upper = std::min(params.col_lower + 1, width_ - 1);
     params.row_upper = std::min(params.row_lower + 1, height_ - 1);
+    // 预计算四个角点的一维索引
+    const auto lower_offset = params.row_lower * width_;
+    const auto upper_offset = params.row_upper * width_;
+    params.idx_bl = lower_offset + params.col_lower;
+    params.idx_br = lower_offset + params.col_upper;
+    params.idx_tl = upper_offset + params.col_lower;
+    params.idx_tr = upper_offset + params.col_upper;
     // 计算双线性插值的权重系数
-    auto calRatioFunc = [](double val, int lower, int upper) -> double {
-        return (lower == upper) ? 0.0 : (val - static_cast<double>(lower));
-    };
-    params.col_ratio =
-        calRatioFunc(col_float, params.col_lower, params.col_upper);
-    params.row_ratio =
-        calRatioFunc(row_float, params.row_lower, params.row_upper);
+    params.col_ratio = (params.col_lower == params.col_upper)
+                           ? 0.0f
+                           : (col_float - static_cast<float>(params.col_lower));
+    params.row_ratio = (params.row_lower == params.row_upper)
+                           ? 0.0f
+                           : (row_float - static_cast<float>(params.row_lower));
     return params;
 }
 
-double ESDFMap::calBilinearVal(const std::vector<PhysicalDist>& data,
-                               const BilinearParams& params) const {
-    // 获取指定行列索引的值
-    auto fetchFunc = [&](int row, int col) -> double {
-        return static_cast<double>(data[getIndex(row, col)]);
-    };
-    // 线性插值，等价于a * (1 - t) + b * t
-    constexpr auto lerpFunc = [](double a, double b, double t) -> double {
-        return a + (b - a) * t;
-    };
-    // 分别在下方和上方沿着X方向进行插值
-    const auto val_bottom =
-                   lerpFunc(fetchFunc(params.row_upper, params.col_lower),
-                            fetchFunc(params.row_upper, params.col_upper),
-                            params.col_ratio),
-               val_top = lerpFunc(fetchFunc(params.row_lower, params.col_lower),
-                                  fetchFunc(params.row_lower, params.col_upper),
-                                  params.col_ratio);
-    // 沿着Y方向进行最终插值
-    return lerpFunc(val_top, val_bottom, params.row_ratio);
-}
-
 void ESDFMap::calGradField() {
-    grad_x_data_.assign(size_, 0.0f);
-    grad_y_data_.assign(size_, 0.0f);
+    // 退化尺寸下梯度无意义，直接清零。
     if (width_ <= 1 || height_ <= 1) {
+        for (auto& cell : cell_data_) {
+            cell.grad_x = 0.0f;
+            cell.grad_y = 0.0f;
+        }
         return;
     }
     // 基于有限差分法计算梯度，边界使用单侧差分，内部使用中心差分
@@ -114,43 +216,41 @@ void ESDFMap::calGradField() {
     // 内部 grad_x approx (DistField(x+1,y) - DistField(x-1,y)) / (2 * res)
     const auto INV_RES = static_cast<PhysicalDist>(inv_resolution_),
                HALF_INV_RES = INV_RES * 0.5f;
-    // 距离场只读基准地址
-    const PhysicalDist* dist_base = distance_data_.data();
-    // x方向梯度场基准地址
-    PhysicalDist* grad_x_base = grad_x_data_.data();
-    // y方向梯度场基准地址
-    PhysicalDist* grad_y_base = grad_y_data_.data();
+    // AoS 缓存基准地址，跨步读取 dist、回写 grad_x/grad_y。
+    EsdfCell* cell_base = cell_data_.data();
 #pragma omp parallel for schedule(dynamic, 8)
     for (int row = 0; row < height_; ++row) {
         const auto ROW_INV_RES =
             (row == 0 || row == height_ - 1) ? INV_RES : HALF_INV_RES;
-        // 从距离场中提取出当前行及上下相邻行的首地址
-        const PhysicalDist *dist_row_cur = dist_base + row * width_,
-                           *dist_row_prev =
-                               dist_base + std::max(0, row - 1) * width_,
-                           *dist_row_next =
-                               dist_base +
-                               std::min(row + 1, height_ - 1) * width_;
+        // 从 AoS 缓存中提取出当前行及上下相邻行的首地址
+        const EsdfCell *cell_row_cur = cell_base + row * width_,
+                       *cell_row_prev =
+                           cell_base + std::max(0, row - 1) * width_,
+                       *cell_row_next =
+                           cell_base + std::min(row + 1, height_ - 1) * width_;
         // 需要求解的梯度行地址
-        PhysicalDist *grad_x_row = grad_x_base + row * width_,
-                     *grad_y_row = grad_y_base + row * width_;
+        EsdfCell* cell_row_out = cell_base + row * width_;
         // 左边界
         int col = 0;
-        grad_x_row[col] = (dist_row_cur[col + 1] - dist_row_cur[col]) * INV_RES;
-        grad_y_row[col] =
-            (dist_row_next[col] - dist_row_prev[col]) * ROW_INV_RES;
+        cell_row_out[col].grad_x =
+            (cell_row_cur[col + 1].dist - cell_row_cur[col].dist) * INV_RES;
+        cell_row_out[col].grad_y =
+            (cell_row_next[col].dist - cell_row_prev[col].dist) * ROW_INV_RES;
         // 内部区域
         for (col = 1; col < width_ - 1; col++) {
-            grad_x_row[col] =
-                (dist_row_cur[col + 1] - dist_row_cur[col - 1]) * HALF_INV_RES;
-            grad_y_row[col] =
-                (dist_row_next[col] - dist_row_prev[col]) * ROW_INV_RES;
+            cell_row_out[col].grad_x =
+                (cell_row_cur[col + 1].dist - cell_row_cur[col - 1].dist) *
+                HALF_INV_RES;
+            cell_row_out[col].grad_y =
+                (cell_row_next[col].dist - cell_row_prev[col].dist) *
+                ROW_INV_RES;
         }
         // 右边界
         col = width_ - 1;
-        grad_x_row[col] = (dist_row_cur[col] - dist_row_cur[col - 1]) * INV_RES;
-        grad_y_row[col] =
-            (dist_row_next[col] - dist_row_prev[col]) * ROW_INV_RES;
+        cell_row_out[col].grad_x =
+            (cell_row_cur[col].dist - cell_row_cur[col - 1].dist) * INV_RES;
+        cell_row_out[col].grad_y =
+            (cell_row_next[col].dist - cell_row_prev[col].dist) * ROW_INV_RES;
     }
 }
 

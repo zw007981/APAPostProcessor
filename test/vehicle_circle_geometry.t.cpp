@@ -1,8 +1,7 @@
 #include "core/NMPC/vehicle_circle_geometry.h"
 
-#include <gtest/gtest.h>
-
 #include <constraints/circle_footprint_esdf_constraint.h>
+#include <gtest/gtest.h>
 
 #include <cmath>
 #include <stdexcept>
@@ -27,7 +26,7 @@ class VehicleCircleGeometryTest : public ::testing::Test {
         : veh_params_(kLength, kWidth, kWheelbase, kMaxSteerAngle,
                       kRearOverhang),
           model_(veh_params_, /*heading_sample_num=*/233, /*inner_row_num=*/2,
-                kOuterRowNum) {}
+                 kOuterRowNum) {}
 
     VehicleParams veh_params_;
     VehicleFootprintModel model_;

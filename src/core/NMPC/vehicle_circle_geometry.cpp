@@ -8,7 +8,7 @@ std::vector<Eigen::Vector2d> ExtractLocalCircleCenters(
         static_cast<int>(footprint_model.getCircleNum(type));
     std::vector<Eigen::Vector2d> centers(circle_num);
     std::vector<Eigen::Matrix<double, 2, 3>> jacobians(circle_num);
-    // 位姿取原点、航向为0，calInterpolatedCenters在该处退化为精确的车身局部坐标，无插值误差
+    // 位姿取原点、航向为0，退化为精确的车身局部坐标
     footprint_model.calInterpolatedCenters(0.0, 0.0, 0.0, type, centers,
                                            jacobians);
     return centers;

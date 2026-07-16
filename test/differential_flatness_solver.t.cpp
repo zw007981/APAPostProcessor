@@ -27,9 +27,7 @@ DifferentialFlatnessSolverConfig MakeConfig() {
 }
 
 // 判断双精度浮点数是否为有限值（非 NaN、非 Inf）。
-bool IsFinite(double value) {
-    return std::isfinite(value);
-}
+bool IsFinite(double value) { return std::isfinite(value); }
 
 }  // namespace
 
@@ -74,20 +72,19 @@ TEST(DifferentialFlatnessSolverTest, ComputesConstantCurvatureForCircularArc) {
 
         input.x_d1.push_back(kRadius * std::cos(theta) * dtheta_du);
         input.y_d1.push_back(kRadius * std::sin(theta) * dtheta_du);
-        input.x_d2.push_back(-kRadius * std::sin(theta) * dtheta_du * dtheta_du +
+        input.x_d2.push_back(-kRadius * std::sin(theta) * dtheta_du *
+                                 dtheta_du +
                              kRadius * std::cos(theta) * d2theta_du2);
         input.y_d2.push_back(kRadius * std::cos(theta) * dtheta_du * dtheta_du +
                              kRadius * std::sin(theta) * d2theta_du2);
-        input.x_d3.push_back(-kRadius * std::cos(theta) * dtheta_du * dtheta_du *
-                                 dtheta_du -
-                             3.0 * kRadius * std::sin(theta) * dtheta_du *
-                                 d2theta_du2 +
-                             kRadius * std::cos(theta) * d3theta_du3);
-        input.y_d3.push_back(-kRadius * std::sin(theta) * dtheta_du * dtheta_du *
-                                 dtheta_du +
-                             3.0 * kRadius * std::cos(theta) * dtheta_du *
-                                 d2theta_du2 +
-                             kRadius * std::sin(theta) * d3theta_du3);
+        input.x_d3.push_back(
+            -kRadius * std::cos(theta) * dtheta_du * dtheta_du * dtheta_du -
+            3.0 * kRadius * std::sin(theta) * dtheta_du * d2theta_du2 +
+            kRadius * std::cos(theta) * d3theta_du3);
+        input.y_d3.push_back(
+            -kRadius * std::sin(theta) * dtheta_du * dtheta_du * dtheta_du +
+            3.0 * kRadius * std::cos(theta) * dtheta_du * d2theta_du2 +
+            kRadius * std::sin(theta) * d3theta_du3);
 
         input.v.push_back(kV);
         input.a.push_back(0.0);
@@ -99,8 +96,7 @@ TEST(DifferentialFlatnessSolverTest, ComputesConstantCurvatureForCircularArc) {
     EXPECT_TRUE(result.success);
     ASSERT_EQ(result.points.size(), kNumPoints);
 
-    const double expected_delta =
-        std::atan(vehicle_params.wheelbase / kRadius);
+    const double expected_delta = std::atan(vehicle_params.wheelbase / kRadius);
     for (const auto& point : result.points) {
         EXPECT_TRUE(IsFinite(point.getDelta()));
         EXPECT_TRUE(IsFinite(point.getDeltaDot()));
@@ -110,8 +106,9 @@ TEST(DifferentialFlatnessSolverTest, ComputesConstantCurvatureForCircularArc) {
 }
 
 // 抛物线场景：曲率随弧长变化，delta_dot 不为 0，用于验证链式求导公式。
-// 触发原因：曲率导数项 dkappa/ds 的代数展开是 3.3 节核心，需要与解析手算值对齐。
-// 预期行为：delta 与 delta_dot 均与解析公式一致。
+// 触发原因：曲率导数项 dkappa/ds 的代数展开是 3.3
+// 节核心，需要与解析手算值对齐。 预期行为：delta 与 delta_dot
+// 均与解析公式一致。
 TEST(DifferentialFlatnessSolverTest, ComputesVaryingCurvatureForParabola) {
     const auto vehicle_params = MakeVehicleParams();
     const auto config = MakeConfig();

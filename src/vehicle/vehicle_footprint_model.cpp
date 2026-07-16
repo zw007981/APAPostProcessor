@@ -52,23 +52,23 @@ void VehicleFootprintModel::calInterpolatedCenters(
         throw std::invalid_argument(
             "calInterpolatedCenters requires pre-sized output buffers!!!");
     }
-    // 1. 将输入航向角严格映射到[0, 2π)的值域空间
-    // 2. 将整个360°空间等分为N个Bucket，计算当前航向对应的精确浮点Bucket
-    // 3. 向下取整获取基准Bucket的位置
-    // 4. 残差 Δθ = 真实航向角 - 基准 Bucket
+    // 1. 映射航向角到 [0, 2π)
+    // 2. 等分为 N 个 Bucket，计算当前航向对应浮点 Bucket 位置
+    // 3. 向下取整获取基准 Bucket
+    // 4. 残差 Δθ = 真实航向角 - 基准 Bucket 中心
     const double norm_theta = normalizeTheta(theta),
                  exact_bucket = norm_theta / heading_resolution_,
                  base_bucket_float = std::floor(exact_bucket),
                  delta_theta =
                      norm_theta - base_bucket_float * heading_resolution_;
-    // 5. 取模得到最终的Bucket索引
+    // 5. 取模得到最终 Bucket 索引
     const auto bucket_idx = static_cast<std::size_t>(base_bucket_float) %
                             static_cast<std::size_t>(heading_sample_num_);
     const auto& circle_table =
         (type == CircleType::INNER) ? inner_circle_table_ : outer_circle_table_;
     const auto& base_centers = circle_table[bucket_idx];
     for (int i = 0; i < circle_num; ++i) {
-        // 基于一阶泰勒展开进行近似，在delta_theta较小的前提下足够精确
+        // 基于一阶泰勒展开近似，在 delta_theta 较小的前提下足够精确
         const double local_x = base_centers[i].x() -
                                base_centers[i].y() * delta_theta,
                      local_y = base_centers[i].y() +
@@ -106,15 +106,7 @@ void VehicleFootprintModel::generateCirclesAtOrigin(
                                x * sin_theta + y * cos_theta);
     };
     // -----------------------------------------------------------------------
-    // 1. 内部圆 (Inner Circles)
-    // 求半径R使得这些圆紧贴车身矩形边界，且对角线上的相邻圆相切。
-    // 横向两相邻圆的间距为：Δx = (length - 2 * R) / (col_num - 1)
-    // 纵向两相邻圆的间距为：Δy = (width - 2 * R) / (row_num - 1)
-    // 对角相邻圆相切引入约束：Δx^2 + Δy^2 = (2R)^2
-    // 展开可得关于 R 的一元二次方程：A*R^2 + B*R + C = 0
-    // 其中P = 1 / (row_num - 1)^2, Q = 1 / (col_num - 1)^2
-    // A = P + Q - 1, B = -(P * width + Q * length),
-    // C = 0.25 * (P * width^2 + Q * length^2)
+    // 1. 内部圆：求半径 R 使圆紧贴车身矩形边界，对角线相邻圆相切
     // -----------------------------------------------------------------------
     auto row_num = inner_row_num_,
          col_num = static_cast<int>(std::ceil(length / width * inner_row_num_));
@@ -122,10 +114,10 @@ void VehicleFootprintModel::generateCirclesAtOrigin(
     inner_circles.reserve(row_num * col_num);
     double delta_x = 0.0, delta_y = 0.0, R = 0.5 * width;
     double Q = (col_num > 1) ? 1.0 / ((col_num - 1) * (col_num - 1)) : 0.0;
-    // 只有一行时半径由车宽直接决定，且纵向间距为0
+    // 只有一行时半径由车宽直接决定，纵向间距为 0
     if (row_num > 1) {
         double P = 1.0 / ((row_num - 1) * (row_num - 1));
-        // 构造一元二次方程的 A, B, C 系数并求解
+        // 构造一元二次方程 A*R^2 + B*R + C = 0 并求解
         double A = P + Q - 1.0, B = -(P * width + Q * length),
                C = 0.25 * (P * width * width + Q * length * length);
         double delta = std::max(B * B - 4.0 * A * C, 0.0);
@@ -136,7 +128,7 @@ void VehicleFootprintModel::generateCirclesAtOrigin(
         delta_x = (length - 2.0 * R) / (col_num - 1);
     }
     inner_radius_ = R;
-    // 按序号生成内圆坐标并旋转，以theta=0时车辆右后角的那个圆为基准圆
+    // 按序号生成内圆坐标并旋转，以 theta=0 时车辆右后角为基准圆
     double base_x = -rear_overhang + R, base_y = -0.5 * width + R;
     for (int i = 0; i < col_num; i++) {
         for (int j = 0; j < row_num; j++) {
@@ -145,8 +137,7 @@ void VehicleFootprintModel::generateCirclesAtOrigin(
         }
     }
     // -----------------------------------------------------------------------
-    // 2. 外部轮廓圆 (Outer Circles)
-    // 将车身切分为网格，以网格对角线的一半作为外圆的半径
+    // 2. 外部轮廓圆：将车身切分为网格，以网格对角线一半为外圆半径
     // -----------------------------------------------------------------------
     row_num = outer_row_num_, delta_y = width / row_num,
     col_num = static_cast<int>(std::ceil(length / delta_y)),
@@ -154,7 +145,7 @@ void VehicleFootprintModel::generateCirclesAtOrigin(
     outer_circles.clear();
     outer_circles.reserve(row_num * col_num);
     outer_radius_ = 0.5 * std::sqrt(delta_x * delta_x + delta_y * delta_y);
-    // 按序号生成外圆坐标并旋转，以theta=0时车辆右后角的那个圆为基准圆
+    // 按序号生成外圆坐标并旋转，以 theta=0 时车辆右后角为基准圆
     base_x = -rear_overhang + 0.5 * delta_x;
     base_y = -0.5 * width + 0.5 * delta_y;
     for (int i = 0; i < col_num; i++) {

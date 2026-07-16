@@ -11,13 +11,13 @@ namespace apa_post_processor {
 // 位置数据结构
 struct Position {
     Position() = default;
-    // 使用x、y坐标构造Position结构体
+    // 使用坐标构造
     Position(double x_val, double y_val) : x(x_val), y(y_val) {}
-    // 基于protobuf消息构造Position结构体
+    // 基于protobuf消息构造
     static Position FromProto(const ::apa::post_processor::Position& proto) {
         return Position{proto.x(), proto.y()};
     }
-    // 把位置信息转化为json格式的字符串
+    // 转化为JSON字符串
     std::string toString() const {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(PRINT_PRECISION)
@@ -25,9 +25,9 @@ struct Position {
         return oss.str();
     }
 
-    // x坐标（m）
+    // x (m)
     double x{0.0};
-    // y坐标（m）
+    // y (m)
     double y{0.0};
 };
 }  // namespace apa_post_processor

@@ -195,8 +195,9 @@ TEST(ESDFMapTest, QueryAtExactGridCenterHasNoInterpolationError) {
     EXPECT_DOUBLE_EQ(dist, 2.0);
 }
 
-// 验证自己造的轮子 F&H ESDF 与 OpenCV distanceTransform 在 50x50 随机地图上结果是否一致，
-// 使用固定种子和 25%占用率生成地图，逐栅格对比最近障碍物距离。
+// 验证自己造的轮子 F&H ESDF 与 OpenCV distanceTransform 在 50x50
+// 随机地图上结果是否一致， 使用固定种子和
+// 25%占用率生成地图，逐栅格对比最近障碍物距离。
 TEST(ESDFMapTest, ESDFMatchesOpenCVDistanceTransform) {
     constexpr int kWidth = 50;
     constexpr int kHeight = 50;
@@ -315,16 +316,15 @@ TEST(ESDFMapTest, ParallelESDFMatchesOpenCVDistanceTransform) {
             const double opencv_value =
                 static_cast<double>(signed_distance.at<float>(row, col));
             EXPECT_NEAR(esdf_map.getDist(x, y), opencv_value, 1e-4)
-                << "parallel getDist mismatch at row=" << row
-                << " col=" << col;
+                << "parallel getDist mismatch at row=" << row << " col=" << col;
         }
     }
 }
 
 // 测试非零原点下物理坐标到栅格索引的平移映射正确。
-// calBilinearParams 使用 (x - origin_) 计算索引，原点偏移不能影响相对距离与梯度。
-TEST(ESDFMapTest, DistanceAndGradientAreInvariantUnderOriginTranslation)
-{
+// calBilinearParams 使用 (x - origin_)
+// 计算索引，原点偏移不能影响相对距离与梯度。
+TEST(ESDFMapTest, DistanceAndGradientAreInvariantUnderOriginTranslation) {
     const GridMap zero_origin_map(0.5, 3, 3, Position{0.0, 0.0},
                                   {Position{0.5, 0.5}});
     const ESDFMap zero_origin_esdf(zero_origin_map);
@@ -344,10 +344,8 @@ TEST(ESDFMapTest, DistanceAndGradientAreInvariantUnderOriginTranslation)
 }
 
 // 测试 width=1 的退化地图仍能正确计算距离场，且梯度场因尺寸过小而安全置 0。
-TEST(ESDFMapTest, DegenerateOneByNMapComputesDistanceButZeroGradient)
-{
-    const GridMap grid_map(1.0, 1, 5, Position{0.0, 0.0},
-                           {Position{0.0, 0.0}});
+TEST(ESDFMapTest, DegenerateOneByNMapComputesDistanceButZeroGradient) {
+    const GridMap grid_map(1.0, 1, 5, Position{0.0, 0.0}, {Position{0.0, 0.0}});
     const ESDFMap esdf_map(grid_map);
     EXPECT_DOUBLE_EQ(esdf_map.getDist(0.0, 0.0), -1.0);
     EXPECT_DOUBLE_EQ(esdf_map.getDist(0.0, 1.0), 1.0);
@@ -358,10 +356,8 @@ TEST(ESDFMapTest, DegenerateOneByNMapComputesDistanceButZeroGradient)
 }
 
 // 测试 height=1 的退化地图仍能正确计算距离场，且梯度场因尺寸过小而安全置 0。
-TEST(ESDFMapTest, DegenerateNByOneMapComputesDistanceButZeroGradient)
-{
-    const GridMap grid_map(1.0, 5, 1, Position{0.0, 0.0},
-                           {Position{0.0, 0.0}});
+TEST(ESDFMapTest, DegenerateNByOneMapComputesDistanceButZeroGradient) {
+    const GridMap grid_map(1.0, 5, 1, Position{0.0, 0.0}, {Position{0.0, 0.0}});
     const ESDFMap esdf_map(grid_map);
     EXPECT_DOUBLE_EQ(esdf_map.getDist(0.0, 0.0), -1.0);
     EXPECT_DOUBLE_EQ(esdf_map.getDist(1.0, 0.0), 1.0);
@@ -369,6 +365,182 @@ TEST(ESDFMapTest, DegenerateNByOneMapComputesDistanceButZeroGradient)
     const auto [dist, grad] = esdf_map.getDistAndGrad(2.0, 0.0);
     EXPECT_DOUBLE_EQ(grad.x(), 0.0);
     EXPECT_DOUBLE_EQ(grad.y(), 0.0);
+}
+
+// ===== getDistAndGradBatch 批量查询测试 =====
+
+// 测试目标：批量查询与逐点 getDistAndGrad 在随机采样点上完全一致。
+// 测试流程：从双障碍物地图中随机采样 100 个点，分别用批量和单点查询，
+//   比较距离与梯度的 x/y 分量。
+// 预期结果：所有点距离误差 <= 1e-10，梯度 x/y 误差 <= 1e-10。
+TEST(ESDFMapTest, BatchQueryMatchesIndividualQueriesOnRandomPoints) {
+    const GridMap grid_map(0.2, 20, 20, Position{0.0, 0.0},
+                           {Position{1.0, 1.0}, Position{2.5, 2.5}});
+    const ESDFMap esdf_map(grid_map);
+    std::mt19937 rng(77U);
+    std::uniform_real_distribution<double> coord_dist(0.0, 3.8);
+    constexpr int kNumPoints = 100;
+    std::vector<double> xs(kNumPoints);
+    std::vector<double> ys(kNumPoints);
+    for (int i = 0; i < kNumPoints; ++i) {
+        xs[i] = coord_dist(rng);
+        ys[i] = coord_dist(rng);
+    }
+    std::vector<double> batch_dists(kNumPoints);
+    std::vector<double> batch_gx(kNumPoints);
+    std::vector<double> batch_gy(kNumPoints);
+    esdf_map.getDistAndGradBatch(xs.data(), ys.data(), kNumPoints,
+                                 batch_dists.data(), batch_gx.data(),
+                                 batch_gy.data());
+    for (int i = 0; i < kNumPoints; ++i) {
+        const auto [dist, grad] = esdf_map.getDistAndGrad(xs[i], ys[i]);
+        EXPECT_NEAR(batch_dists[i], dist, 1e-10)
+            << "dist mismatch at i=" << i << " (" << xs[i] << "," << ys[i]
+            << ")";
+        EXPECT_NEAR(batch_gx[i], grad.x(), 1e-10)
+            << "grad_x mismatch at i=" << i;
+        EXPECT_NEAR(batch_gy[i], grad.y(), 1e-10)
+            << "grad_y mismatch at i=" << i;
+    }
+}
+
+// 测试目标：批量查询在全部越界的极端情况下安全返回默认值。
+// 测试流程：构造 4×4 地图，取远离地图的 5 个坐标点做批量查询。
+// 预期结果：所有点 dist=0, grad_x=0, grad_y=0（与 getDistAndGrad
+// 越界行为一致）。
+TEST(ESDFMapTest, BatchQueryAllOutOfBoundsReturnsDefaults) {
+    const GridMap grid_map(1.0, 4, 4, Position{0.0, 0.0}, {Position{1.0, 1.0}});
+    const ESDFMap esdf_map(grid_map);
+    constexpr int kN = 5;
+    const double xs[kN] = {-1.0, 5.0, 10.0, -5.0, 100.0};
+    const double ys[kN] = {-1.0, 5.0, 10.0, 5.0, -100.0};
+    double dists[kN], gx[kN], gy[kN];
+    esdf_map.getDistAndGradBatch(xs, ys, kN, dists, gx, gy);
+    for (int i = 0; i < kN; ++i) {
+        EXPECT_DOUBLE_EQ(dists[i], 0.0) << "dist should be 0 at i=" << i;
+        EXPECT_DOUBLE_EQ(gx[i], 0.0) << "grad_x should be 0 at i=" << i;
+        EXPECT_DOUBLE_EQ(gy[i], 0.0) << "grad_y should be 0 at i=" << i;
+    }
+}
+
+// 测试目标：批量查询在部分越界、部分合法的混合场景下正确处理。
+// 测试流程：构造 3×3 小地图，取 4 个点：2 个在界内（栅格中心）、2 个在界外。
+// 预期结果：界内点返回正确距离值；界外点返回 (0,0,0)。
+TEST(ESDFMapTest, BatchQueryMixedInBoundsAndOutOfBounds) {
+    const GridMap grid_map(1.0, 3, 3, Position{0.0, 0.0}, {Position{0.0, 0.0}});
+    const ESDFMap esdf_map(grid_map);
+    constexpr int kN = 4;
+    // 点0: 越界（x<0）；点1: 界内(1.5,1.5)；点2: 界内(2.0,1.0)；点3:
+    // 越界（y>3）
+    const double xs[kN] = {-1.0, 1.5, 2.0, 0.5};
+    const double ys[kN] = {0.5, 1.5, 1.0, 5.0};
+    double dists[kN], gx[kN], gy[kN];
+    esdf_map.getDistAndGradBatch(xs, ys, kN, dists, gx, gy);
+    // 点0 越界
+    EXPECT_DOUBLE_EQ(dists[0], 0.0);
+    EXPECT_DOUBLE_EQ(gx[0], 0.0);
+    EXPECT_DOUBLE_EQ(gy[0], 0.0);
+    // 点1 界内
+    const auto [d1, grad1] = esdf_map.getDistAndGrad(1.5, 1.5);
+    EXPECT_NEAR(dists[1], d1, 1e-10);
+    EXPECT_NEAR(gx[1], grad1.x(), 1e-10);
+    EXPECT_NEAR(gy[1], grad1.y(), 1e-10);
+    // 点2 界内
+    const auto [d2, grad2] = esdf_map.getDistAndGrad(2.0, 1.0);
+    EXPECT_NEAR(dists[2], d2, 1e-10);
+    EXPECT_NEAR(gx[2], grad2.x(), 1e-10);
+    EXPECT_NEAR(gy[2], grad2.y(), 1e-10);
+    // 点3 越界
+    EXPECT_DOUBLE_EQ(dists[3], 0.0);
+    EXPECT_DOUBLE_EQ(gx[3], 0.0);
+    EXPECT_DOUBLE_EQ(gy[3], 0.0);
+}
+
+// 测试目标：批量查询 n=1 的单点边界情况与 getDistAndGrad 一致。
+// 测试流程：对有障碍物的地图取单点做批量查询。
+// 预期结果：距离和梯度与 getDistAndGrad 完全一致。
+TEST(ESDFMapTest, BatchQuerySinglePoint) {
+    const GridMap grid_map(1.0, 4, 4, Position{0.0, 0.0},
+                           {Position{1.0, 1.0}, Position{2.0, 2.0}});
+    const ESDFMap esdf_map(grid_map);
+    const double x = 1.5, y = 2.5;
+    double dist, gx, gy;
+    esdf_map.getDistAndGradBatch(&x, &y, 1, &dist, &gx, &gy);
+    const auto [expected_d, expected_g] = esdf_map.getDistAndGrad(x, y);
+    EXPECT_NEAR(dist, expected_d, 1e-10);
+    EXPECT_NEAR(gx, expected_g.x(), 1e-10);
+    EXPECT_NEAR(gy, expected_g.y(), 1e-10);
+}
+
+// 测试目标：批量查询在栅格中心点（插值 ratio=0）给出精确值。
+// 测试流程：取 4 个恰好落在栅格中心的坐标，批量查询。
+// 预期结果：距离值与 getDist 一致（无插值误差），梯度值与 getDistAndGrad 一致。
+TEST(ESDFMapTest, BatchQueryAtGridCentersExact) {
+    const GridMap grid_map(1.0, 4, 4, Position{0.0, 0.0},
+                           {Position{0.0, 0.0}, Position{1.0, 0.0},
+                            Position{0.0, 1.0}, Position{1.0, 1.0}});
+    const ESDFMap esdf_map(grid_map);
+    constexpr int kN = 4;
+    // 四个栅格中心：(0,0)障碍物内；(2,0)自由；(0,2)自由；(2,2)自由
+    const double xs[kN] = {0.0, 2.0, 0.0, 2.0};
+    const double ys[kN] = {0.0, 0.0, 2.0, 2.0};
+    double dists[kN], gx[kN], gy[kN];
+    esdf_map.getDistAndGradBatch(xs, ys, kN, dists, gx, gy);
+    for (int i = 0; i < kN; ++i) {
+        EXPECT_DOUBLE_EQ(dists[i], esdf_map.getDist(xs[i], ys[i]))
+            << "dist mismatch at i=" << i;
+        const auto [_, grad] = esdf_map.getDistAndGrad(xs[i], ys[i]);
+        EXPECT_NEAR(gx[i], grad.x(), 1e-10) << "grad_x mismatch at i=" << i;
+        EXPECT_NEAR(gy[i], grad.y(), 1e-10) << "grad_y mismatch at i=" << i;
+    }
+}
+
+// 测试目标：批量查询在地图最大尺寸（n=12，对应 12 个外圆）下结果一致。
+// 测试流程：从随机地图中随机采样 12 个点，对比批量与单点查询。
+// 预期结果：全部 12 个点距离和梯度与 getDistAndGrad 一致。
+TEST(ESDFMapTest, BatchQueryMaxBatchSize12) {
+    const GridMap grid_map(0.1, 30, 30, Position{0.0, 0.0},
+                           {Position{1.0, 1.0}, Position{2.0, 2.0}});
+    const ESDFMap esdf_map(grid_map);
+    std::mt19937 rng(123U);
+    std::uniform_real_distribution<double> coord_dist(0.1, 2.8);
+    constexpr int kN = 12;
+    double xs[kN], ys[kN];
+    for (int i = 0; i < kN; ++i) {
+        xs[i] = coord_dist(rng);
+        ys[i] = coord_dist(rng);
+    }
+    double dists[kN], gx[kN], gy[kN];
+    esdf_map.getDistAndGradBatch(xs, ys, kN, dists, gx, gy);
+    for (int i = 0; i < kN; ++i) {
+        const auto [dist, grad] = esdf_map.getDistAndGrad(xs[i], ys[i]);
+        EXPECT_NEAR(dists[i], dist, 1e-10) << "dist mismatch at i=" << i << " ("
+                                           << xs[i] << "," << ys[i] << ")";
+        EXPECT_NEAR(gx[i], grad.x(), 1e-10) << "grad_x mismatch at i=" << i;
+        EXPECT_NEAR(gy[i], grad.y(), 1e-10) << "grad_y mismatch at i=" << i;
+    }
+}
+
+// 测试目标：批量查询在全自由地图（无障碍物）上返回全场恒定距离且梯度近零。
+// 测试流程：构造 5×5 无障碍物地图，批量查询 8 个点。
+// 预期结果：所有点距离一致（全自由场恒定），梯度模长 ≈ 0。
+TEST(ESDFMapTest, BatchQueryFullyFreeMapConstantDistance) {
+    const GridMap grid_map(1.0, 5, 5, Position{0.0, 0.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    constexpr int kN = 8;
+    const double xs[kN] = {0.5, 1.5, 2.5, 3.5, 0.5, 1.5, 2.5, 3.5};
+    const double ys[kN] = {0.5, 0.5, 0.5, 0.5, 3.5, 3.5, 3.5, 3.5};
+    double dists[kN], gx[kN], gy[kN];
+    esdf_map.getDistAndGradBatch(xs, ys, kN, dists, gx, gy);
+    const double expected_dist = esdf_map.getDist(2.0, 2.0);
+    for (int i = 0; i < kN; ++i) {
+        EXPECT_NEAR(dists[i], expected_dist, 1e-5)
+            << "all free-space distances should be equal at i=" << i;
+        EXPECT_NEAR(gx[i], 0.0, 1e-5)
+            << "grad_x should be ~0 in free space at i=" << i;
+        EXPECT_NEAR(gy[i], 0.0, 1e-5)
+            << "grad_y should be ~0 in free space at i=" << i;
+    }
 }
 
 }  // namespace
