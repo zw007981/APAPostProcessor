@@ -14,6 +14,8 @@ class NMPCPlanningScene : public PlanningScene {
         const std::string& config_file_path);
     // 执行 NMPC 优化链路
     PostProcessorResult optimize() override;
+    // 从 proto JSON 文件加载 NMPC 配置详情
+    void loadConfigDetails(const std::string& config_details_path) override;
     // 带类型访问 NMPC 专有配置
     NMPCConfig& nmpcConfig() { return static_cast<NMPCConfig&>(config()); }
     const NMPCConfig& nmpcConfig() const {

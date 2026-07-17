@@ -1,6 +1,8 @@
 #include "nmpc_planning_scene.h"
 
+#include "../core/NMPC/nmpc_config.h"
 #include "../core/post_processor.h"
+#include "../util/data_loader.hpp"
 #include "../util/logger.h"
 
 namespace apa_post_processor {
@@ -12,6 +14,16 @@ std::unique_ptr<NMPCPlanningScene> NMPCPlanningScene::LoadFromFile(
     auto scene = std::unique_ptr<NMPCPlanningScene>(new NMPCPlanningScene());
     scene->init(config_file_path);
     return scene;
+}
+
+void NMPCPlanningScene::loadConfigDetails(
+    const std::string& config_details_path) {
+    ::apa::post_processor::NMPCConfigProto proto;
+    const auto load_result =
+        DataLoader::LoadProtoFromJsonFile(config_details_path, proto);
+    if (load_result == LoadResult::SUCCESS) {
+        nmpcConfig().loadFromProto(proto);
+    }
 }
 
 PostProcessorResult NMPCPlanningScene::optimize() {

@@ -43,8 +43,8 @@ TEST(VehicleParamsTest, DefaultConstructInitializesZeroValues) {
     EXPECT_DOUBLE_EQ(vehicle_params.max_steer_angle, 0.0);
     EXPECT_DOUBLE_EQ(vehicle_params.rear_overhang, 0.0);
     EXPECT_DOUBLE_EQ(vehicle_params.max_kappa, 0.0);
-    EXPECT_DOUBLE_EQ(vehicle_params.max_accel, 1.0);
-    EXPECT_DOUBLE_EQ(vehicle_params.max_decel, -1.5);
+    EXPECT_DOUBLE_EQ(vehicle_params.max_accel, 1.5);
+    EXPECT_DOUBLE_EQ(vehicle_params.max_decel, -3.0);
     EXPECT_DOUBLE_EQ(vehicle_params.max_steer_rate, 0.4);
 }
 
@@ -59,8 +59,8 @@ TEST(VehicleParamsTest, ConstructWithValuesStoresAllFields) {
     EXPECT_DOUBLE_EQ(vehicle_params.max_steer_angle, 0.6);
     EXPECT_DOUBLE_EQ(vehicle_params.rear_overhang, 0.5);
     EXPECT_NEAR(vehicle_params.max_kappa, std::tan(0.6) / 2.7, 1e-12);
-    EXPECT_DOUBLE_EQ(vehicle_params.max_accel, 1.0);
-    EXPECT_DOUBLE_EQ(vehicle_params.max_decel, -1.5);
+    EXPECT_DOUBLE_EQ(vehicle_params.max_accel, 1.5);
+    EXPECT_DOUBLE_EQ(vehicle_params.max_decel, -3.0);
     EXPECT_DOUBLE_EQ(vehicle_params.max_steer_rate, 0.4);
 }
 
@@ -162,8 +162,8 @@ TEST(VehicleParamsTest, ToStringBuildsJsonText) {
                           "\"wheelbase\": 2.79, "
                           "\"max_steer_angle\": 0.65, "
                           "\"rear_overhang\": 0.35, "
-                          "\"max_accel\": 1.00, "
-                          "\"max_decel\": -1.50, "
+                          "\"max_accel\": 1.50, "
+                          "\"max_decel\": -3.00, "
                           "\"max_steer_rate\": 0.40, "
                           "\"max_kappa\": 0.27}"));
 }

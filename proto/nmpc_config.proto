@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package apa.post_processor;
+
+// ==========================================
+// NMPC 配置详情 Proto 定义
+// 所有字段均为 optional，JSON 文件中仅需写入需要覆盖默认值的字段。
+// 未在 JSON 中出现的字段保持 C++ 代码中的默认值不变。
+// ==========================================
+
+// 样条平滑器子配置
+message BSplineConfigProto {
+    optional double dense_step_dist = 1;
+    optional double control_point_spacing = 2;
+    optional double weight_data = 3;
+    optional double weight_smooth_d1 = 4;
+    optional double weight_smooth_d2 = 5;
+    optional double weight_smooth_d3 = 6;
+    optional double weight_collision = 7;
+    optional double weight_kappa = 8;
+    optional double max_kappa = 9;
+    optional double weight_reg = 10;
+    optional double collision_margin = 11;
+    optional double anchor_extension_length = 12;
+    optional double min_segment_arc_length_for_degradation = 13;
+    optional double collision_validation_tolerance = 14;
+    optional int32 lbfgs_max_iterations = 15;
+    optional double lbfgs_epsilon = 16;
+    optional double lbfgs_epsilon_rel = 17;
+    optional int32 lbfgs_m = 18;
+    optional int32 lbfgs_max_linesearch = 19;
+    optional int32 lbfgs_linesearch_algo = 20;
+    optional double lbfgs_ftol = 21;
+    optional double lbfgs_wolfe = 22;
+    optional double arc_length_table_step = 23;
+}
+
+// 速度规划器子配置
+message SpeedConfigProto {
+    optional double max_v_forward = 1;
+    optional double max_v_reverse = 2;
+    optional double max_jerk_proxy = 3;
+    optional double weight_v_ref = 4;
+    optional double weight_a_sq = 5;
+    optional double weight_jerk_sq = 6;
+    optional double time_reintegration_epsilon = 7;
+    optional double max_lateral_accel = 8;
+    optional double esdf_danger_margin = 9;
+}
+
+// 微分平坦求解器子配置
+message DiffFlatConfigProto {
+    optional double curvature_denominator_epsilon = 1;
+}
+
+// 自适应重采样器子配置
+message ResamplerConfigProto {
+    optional int32 n_min_active_per_segment = 1;
+    optional double nominal_step_s = 2;
+    optional double density_w_base = 3;
+    optional double density_w_kappa = 4;
+    optional double density_w_obs = 5;
+    optional double dense_step_dist = 6;
+    optional double steer_padding_epsilon = 7;
+    optional double steer_safe_rate_ratio = 8;
+    optional double min_segment_arc_length_for_degradation = 9;
+    optional double time_reintegration_epsilon = 10;
+    optional double obstacle_density_margin = 11;
+}
+
+// 静态走廊构建器子配置
+message CorridorBuilderConfigProto {
+    optional double soft_margin = 1;
+}
+
+// NMPC 配置详情（含基类通用字段）
+message NMPCConfigProto {
+    // === 第一组：轨迹合法性门禁阈值 ===
+    optional double max_collision_depth = 1;
+    optional double terminal_position_error_threshold = 2;
+    optional double terminal_heading_error_threshold_deg = 3;
+
+    // === 第二组：Cost 权重 ===
+    optional double control_effort_accel_weight = 10;
+    optional double control_effort_steer_rate_weight = 11;
+    optional double smoothing_jerk_weight = 12;
+    optional double smoothing_steer_accel_weight = 13;
+    optional double interior_speed_weight = 14;
+    optional double interior_steer_weight = 15;
+    optional double global_target_position_weight = 16;
+    optional double global_target_heading_weight = 17;
+    optional double terminal_position_weight = 18;
+    optional double terminal_heading_weight = 19;
+    optional double terminal_speed_weight = 20;
+    optional double terminal_steer_weight = 21;
+
+    // === 第三组：轨迹跟踪软代价 ===
+    optional double position_tracking_weight = 30;
+    optional double max_position_deviation_from_ref = 31;
+    optional double theta_tracking_weight = 32;
+    optional double max_theta_deviation_from_ref = 33;
+
+    // === 第四组：碰撞安全 ===
+    optional double esdf_safety_margin = 40;
+    optional double esdf_penalty_weight = 41;
+
+    // === 第五组：求解器收敛 ===
+    optional int32 max_iter = 50;
+
+    // === 第六组：打靶步长 ===
+    optional double dt = 60;
+
+    // === 调试输出 ===
+    optional bool enable_debug_output = 70;
+
+    // === NMPC 专有参数 ===
+    optional double corridor_hard_margin = 80;
+    optional double corridor_soft_quadratic_weight = 81;
+    optional double corridor_soft_linear_weight = 82;
+    optional int32 hpipm_block_size = 83;
+    optional int32 short_n_threshold = 84;
+    optional bool use_line_search = 85;
+    optional double sqp_hessian_regularization = 86;
+    optional double hpipm_tol = 87;
+    optional bool skip_last_step_corridor = 88;
+    optional bool use_static_corridor_soft_constraint = 89;
+    optional double static_corridor_soft_weight = 90;
+
+    // === 预处理管线子配置 ===
+    optional BSplineConfigProto bspline = 100;
+    optional SpeedConfigProto speed = 101;
+    optional DiffFlatConfigProto diff_flat = 102;
+    optional ResamplerConfigProto resampler = 103;
+    optional CorridorBuilderConfigProto corridor = 104;
+    optional bool use_static_corridor = 105;
+    optional double collision_safety_margin = 106;
+}

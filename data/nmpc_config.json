@@ -1,0 +1,14 @@
+{
+  "_comment": "NMPC 配置详情文件。仅需写入需要覆盖默认值的字段，未出现的字段保持代码默认值。字段名必须与 proto/nmpc_config.proto 中的定义严格一致。完整字段列表与注释参见该 proto 文件。",
+
+  "maxIter": 150,
+  "terminalPositionErrorThreshold": 0.05,
+  "terminalHeadingErrorThresholdDeg": 3.0,
+
+  "bspline": {
+    "maxKappa": 0.18,
+    "lbfgsMaxIterations": 80
+  },
+
+  "useStaticCorridor": false
+}

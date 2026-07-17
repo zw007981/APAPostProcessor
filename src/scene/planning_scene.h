@@ -21,6 +21,8 @@ class PlanningScene {
     PlanningScene& operator=(const PlanningScene&) = delete;
     // 执行优化（由派生类实现）
     virtual PostProcessorResult optimize() = 0;
+    // 加载算法配置详情文件（由派生类实现）
+    virtual void loadConfigDetails(const std::string& config_details_path) = 0;
     // 车辆参数
     const VehicleParams& vehicleParams() const { return vehicle_params_; }
     // 车辆圆形分解模型

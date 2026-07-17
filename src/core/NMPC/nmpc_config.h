@@ -9,6 +9,7 @@
 #include "../../preprocessing/speed_profile_planner.h"
 #include "../../preprocessing/static_corridor_builder.h"
 #include "../../util/config.h"
+#include "nmpc_config.pb.h"
 #include "path_to_ocp_converter.h"
 
 namespace apa_post_processor {
@@ -59,5 +60,9 @@ struct NMPCConfig : public Config {
     bool use_static_corridor = false;
     // 跨阶段统一碰撞检测数值容差 (m)，自动传播到 bspline.collision_margin
     double collision_safety_margin = 0.0;
+
+    // 从 proto 消息覆盖配置值（仅覆盖已设置的 optional 字段）
+    void loadFromProto(
+        const ::apa::post_processor::NMPCConfigProto& proto);
 };
 }  // namespace apa_post_processor

@@ -6,8 +6,6 @@ using namespace apa_post_processor;
 
 int main() {
     Logger::SetLogDirectory("../log");
-    LOG_INFO("Hello, APA Post Processor!");
-
     try {
         auto scene = NMPCPlanningScene::LoadFromFile("data/config.json");
         scene->optimize();

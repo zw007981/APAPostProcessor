@@ -1,0 +1,48 @@
+============================================================
+  NMPC 性能基准测试 — 2026-07-17 16:54:36
+  每个数据文件运行 4 次
+============================================================
+
+------------------------------------------------------------
+  数据文件: data/test.json
+------------------------------------------------------------
+      #1  success=true   time_ms=5461.4    length=13.784    maneuvers=2    retry=false  msg=NMPC did not fully converge, using last iterate
+      #2  success=true   time_ms=5433.9    length=13.784    maneuvers=2    retry=false  msg=NMPC did not fully converge, using last iterate
+      #3  success=true   time_ms=5377.5    length=13.784    maneuvers=2    retry=false  msg=NMPC did not fully converge, using last iterate
+      #4  success=true   time_ms=5402.6    length=13.784    maneuvers=2    retry=false  msg=NMPC did not fully converge, using last iterate
+
+------------------------------------------------------------
+  数据文件: data/long_park/data6.json
+------------------------------------------------------------
+      #1  success=true   time_ms=1955.7    length=36.836    maneuvers=6    retry=false  msg=NMPC solve failed, falling back to preprocessing
+      #2  success=true   time_ms=1938.3    length=36.836    maneuvers=6    retry=false  msg=NMPC solve failed, falling back to preprocessing
+      #3  success=true   time_ms=1927.0    length=36.836    maneuvers=6    retry=false  msg=NMPC solve failed, falling back to preprocessing
+      #4  success=true   time_ms=1942.6    length=36.836    maneuvers=6    retry=false  msg=NMPC solve failed, falling back to preprocessing
+
+------------------------------------------------------------
+  数据文件: data/mid_park/data3.json
+------------------------------------------------------------
+      #1  success=true   time_ms=9391.1    length=20.292    maneuvers=8    retry=false  msg=NMPC did not fully converge, using last iterate
+      #2  success=true   time_ms=9391.7    length=20.292    maneuvers=8    retry=false  msg=NMPC did not fully converge, using last iterate
+      #3  success=true   time_ms=9273.8    length=20.292    maneuvers=8    retry=false  msg=NMPC did not fully converge, using last iterate
+      #4  success=true   time_ms=9211.6    length=20.292    maneuvers=8    retry=false  msg=NMPC did not fully converge, using last iterate
+
+------------------------------------------------------------
+  数据文件: data/rub_park/data1.json
+------------------------------------------------------------
+      #1  success=true   time_ms=6143.0    length=10.555    maneuvers=7    retry=false  msg=NMPC did not fully converge, using last iterate
+      #2  success=true   time_ms=6231.1    length=10.555    maneuvers=7    retry=false  msg=NMPC did not fully converge, using last iterate
+      #3  success=true   time_ms=6086.2    length=10.555    maneuvers=7    retry=false  msg=NMPC did not fully converge, using last iterate
+      #4  success=true   time_ms=6192.7    length=10.555    maneuvers=7    retry=false  msg=NMPC did not fully converge, using last iterate
+
+------------------------------------------------------------
+  数据文件: data/rub_park/data7.json
+------------------------------------------------------------
+      #1  success=true   time_ms=6953.6    length=18.271    maneuvers=5    retry=false  msg=NMPC did not fully converge, using last iterate
+      #2  success=true   time_ms=7127.4    length=18.271    maneuvers=5    retry=false  msg=NMPC did not fully converge, using last iterate
+      #3  success=true   time_ms=6977.9    length=18.271    maneuvers=5    retry=false  msg=NMPC did not fully converge, using last iterate
+      #4  success=true   time_ms=6895.0    length=18.271    maneuvers=5    retry=false  msg=NMPC did not fully converge, using last iterate
+
+============================================================
+  测试完成！结果保存在: /home/els/code/APAPostProcessor/tool/bench_nmpc_results.txt
+============================================================

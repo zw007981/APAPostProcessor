@@ -33,6 +33,13 @@ bool PlanningScene::init(const std::string& config_file_path) {
         footprint_model_ = std::make_unique<VehicleFootprintModel>(
             vehicle_params_, /*heading_sample_num=*/233, /*inner_row_num=*/2,
             /*outer_row_num=*/2);
+        // 加载算法配置详情文件（如果存在）覆盖默认配置
+        if (config_json.contains("config_details_path")) {
+            const auto details_path =
+                config_json["config_details_path"].get<std::string>();
+            loadConfigDetails(details_path);
+            LOG_FMT_INFO("Config overridden from {}", details_path);
+        }
         return true;
     } catch (const std::exception& e) {
         LOG_FMT_ERROR("PlanningScene::init failed: {}!!!", e.what());

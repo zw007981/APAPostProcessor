@@ -125,7 +125,10 @@ endif()
 # ==========================================
 # 2. Proto 协议代码生成与打包
 # ==========================================
-set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/apa_post_process.proto)
+set(PROTO_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/proto/apa_post_process.proto
+    ${CMAKE_CURRENT_SOURCE_DIR}/proto/nmpc_config.proto
+)
 
 add_library(apa_proto_lib STATIC)
 protobuf_generate(TARGET apa_proto_lib PROTOS ${PROTO_FILES})
