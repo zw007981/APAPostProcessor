@@ -43,7 +43,7 @@ endif()
 # 1. 查找并引入第三方库
 # ==========================================
 # 1.1 必须的库
-find_package(Protobuf REQUIRED)
+find_package(Protobuf CONFIG REQUIRED)
 message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
 
 find_package(OpenCV REQUIRED)
@@ -126,11 +126,14 @@ endif()
 # 2. Proto 协议代码生成与打包
 # ==========================================
 set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/proto/apa_post_process.proto)
-protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})
 
-add_library(apa_proto_lib STATIC ${PROTO_SRCS})
+add_library(apa_proto_lib STATIC)
+protobuf_generate(TARGET apa_proto_lib PROTOS ${PROTO_FILES})
 target_link_libraries(apa_proto_lib PUBLIC protobuf::libprotobuf)
-target_include_directories(apa_proto_lib PUBLIC ${CMAKE_CURRENT_BINARY_DIR})
+target_include_directories(apa_proto_lib PUBLIC
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}/proto
+)
 
 # ==========================================
 # 3. 源码打包与依赖解耦

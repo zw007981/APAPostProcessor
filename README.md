@@ -7,28 +7,34 @@ APA路径规划后处理器
 ### 1.1 环境要求
 
 - **编译器**：支持 C++17 的 GCC（≥8）或 Clang（≥10）
-- **CMake**：≥ 3.15
+- **CMake**：≥ 3.5
 - **Ninja**（可选，推荐）：构建加速
 
 ### 1.2 第三方依赖
 
 | 依赖 | 安装方式 | 备注 |
 |---|---|---|
-| **Protobuf** | `apt install libprotobuf-dev protobuf-compiler` | 必须 |
+| **Protobuf** | ≥ 3.15（需支持 proto3 `optional` 关键字） | 必须 |
 | **OpenCV** | `apt install libopencv-dev` | 必须 |
 | **Eigen3** | `apt install libeigen3-dev` | 必须 |
 | **nlohmann\_json** | `apt install nlohmann-json3-dev` | 必须 |
 | **OpenMP** | 随编译器安装（GCC/Clang 自带） | 必须 |
+| **CasADi (Python)** | `pip3 install casadi`（用于 StcSQP 动力学 / 走廊 C 代码生成） | 必须 |
+| **Python** | ≥ 3.8（CasADi 脚本需 `python3`） | 必须 |
 | **GTest** | `apt install libgtest-dev` | 可选（无则跳过单元测试） |
 | **Google Benchmark** | `apt install libbenchmark-dev` | 可选（无则跳过性能测试） |
 | **ccache** | `apt install ccache` | 可选（编译缓存加速） |
 
-以下库需从源码自行编译安装：
+以下库已内置在 `third_party/` 中，无需手动下载：
 
-| 库 | 源码获取 | 用途 |
+| 库 | 位置 | 用途 |
 |---|---|---|
-| **BLASFEO** | `git clone https://github.com/giaf/blasfeo.git` | 高性能线性代数（HPIPM 依赖） |
-| **HPIPM** | `git clone https://github.com/giaf/hpipm.git` | 结构 QP 求解器（StcSQP 底层后端） |
+| **BLASFEO** | `third_party/blasfeo/` | 高性能线性代数（HPIPM 依赖） |
+| **HPIPM** | `third_party/hpipm/` | 结构 QP 求解器（StcSQP 底层后端） |
+| **OSQP** | `third_party/osqp/` | 二次规划求解器 |
+| **StcSQP** | `third_party/StcSQP/` | SQP 数值优化框架 |
+| **LBFGSpp** | `third_party/LBFGSpp/` | 无约束/箱式约束优化 |
+| **Quill** | `third_party/quill/` | 异步日志库 |
 
 ### 1.4 运行主程序
 

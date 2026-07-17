@@ -40,10 +40,10 @@ if(NOT HPIPM_SRC_DIR)
     set(HPIPM_SRC_DIR "$ENV{HPIPM_SRC_DIR}" CACHE PATH "HPIPM source directory")
 endif()
 if(NOT BLASFEO_SRC_DIR)
-    set(BLASFEO_SRC_DIR "/home/els/download/blasfeo" CACHE PATH "BLASFEO source directory" FORCE)
+    set(BLASFEO_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../blasfeo" CACHE PATH "BLASFEO source directory" FORCE)
 endif()
 if(NOT HPIPM_SRC_DIR)
-    set(HPIPM_SRC_DIR "/home/els/download/hpipm" CACHE PATH "HPIPM source directory" FORCE)
+    set(HPIPM_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../hpipm" CACHE PATH "HPIPM source directory" FORCE)
 endif()
 
 if(EXISTS ${BLASFEO_SRC_DIR}/CMakeLists.txt AND EXISTS ${HPIPM_SRC_DIR}/CMakeLists.txt)
@@ -177,8 +177,13 @@ endif()
 # 3. 生成最终可执行文件
 # ==========================================
 # 主程序：仅包含 main.cpp，并链接已编译好的核心库
+# 注：stc_SQP_core_lib 为 OBJECT 库，其 PUBLIC 链接依赖不会向下传递，
+# 因此需要在最终可执行文件上显式再次链接 hpipm blasfeo，避免未定义引用。
 add_executable(SQP_solver ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 target_link_libraries(SQP_solver PRIVATE stc_SQP_core_lib)
+if(HPIPM_AVAILABLE)
+    target_link_libraries(SQP_solver PRIVATE hpipm blasfeo)
+endif()
 
 # 单元测试：仅在找到 GTest 时生成
 if(GTest_FOUND)
@@ -223,6 +228,9 @@ if(benchmark_FOUND)
         add_executable(bench_SQP_solver ${BENCH_SRCS})
         target_include_directories(bench_SQP_solver PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_link_libraries(bench_SQP_solver PRIVATE stc_SQP_core_lib benchmark::benchmark)
+        if(HPIPM_AVAILABLE)
+            target_link_libraries(bench_SQP_solver PRIVATE hpipm blasfeo)
+        endif()
 
     # 将 data3.json 复制到 benchmark 可执行文件目录，确保运行时能找到
     add_custom_command(TARGET bench_SQP_solver POST_BUILD

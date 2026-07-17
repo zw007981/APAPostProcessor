@@ -5,10 +5,20 @@
 
 namespace apa_post_processor {
 namespace util {
-// 获取可迭代容器的元素类型
+// 获取可迭代容器的元素类型（对非可迭代类型安全回退为 void）
+template <typename T, typename = void>
+struct iterable_value {
+    using type = void;  // 非可迭代类型的回退
+};
+
 template <typename T>
-using iterable_value_t =
-    std::decay_t<decltype(*std::begin(std::declval<const std::decay_t<T>&>()))>;
+struct iterable_value<T,
+    std::void_t<decltype(*std::begin(std::declval<const T&>()))>> {
+    using type = std::decay_t<decltype(*std::begin(std::declval<const T&>()))>;
+};
+
+template <typename T>
+using iterable_value_t = typename iterable_value<std::decay_t<T>>::type;
 
 // 判断类型是否为可迭代容器
 template <typename T, typename = void>
