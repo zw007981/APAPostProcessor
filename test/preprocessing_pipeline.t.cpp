@@ -495,7 +495,7 @@ TEST(PreprocessingPipelineTest, PipelineOutputFeedsNmpcSolverEndToEnd) {
     nmpc_path.finalize();
 
     // Step 3: 构造 NmpcSolver（使用管线输出维度调整 max_iter 以加速测试）
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter = 50;
     nmpc_config.esdf_safety_margin = 0.0;
     nmpc_config.esdf_penalty_weight = 100.0;

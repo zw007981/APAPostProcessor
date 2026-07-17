@@ -81,8 +81,8 @@ class PostProcessorTestAccess : public PostProcessor {
                             const VehicleFootprintModel& footprint_model,
                             const ESDFMap& esdf_map)
         : PostProcessor(vehicle_params, footprint_model, esdf_map) {}
-    static PreprocessingPipelineConfig CallApplyRetryConfig(
-        const PreprocessingPipelineConfig& base_config,
+    static NMPCConfig CallApplyRetryConfig(
+        const NMPCConfig& base_config,
         const AdaptiveRetryConfig& retry_config, int retry_idx) {
         return applyRetryConfig(base_config, retry_config, retry_idx);
     }
@@ -97,7 +97,7 @@ class PostProcessorTestAccess : public PostProcessor {
 // 第 0 次重试应将 dense_step_dist 乘以第一个乘数，nominal_step_s
 // 乘以第一个乘数，并保持静态走廊开关。
 TEST(PostProcessorTest, ApplyRetryConfigScalesDenseAndNominal) {
-    PreprocessingPipelineConfig base_config;
+    NMPCConfig base_config;
     base_config.bspline.dense_step_dist = 0.05;
     base_config.resampler.nominal_step_s = 0.15;
     base_config.use_static_corridor = true;
@@ -120,7 +120,7 @@ TEST(PostProcessorTest, ApplyRetryConfigScalesDenseAndNominal) {
 
 // 第 1 次重试应使用第二个乘数，并按配置关闭静态走廊。
 TEST(PostProcessorTest, ApplyRetryConfigDisablesCorridorOnSecondRetry) {
-    PreprocessingPipelineConfig base_config;
+    NMPCConfig base_config;
     base_config.bspline.dense_step_dist = 0.05;
     base_config.resampler.nominal_step_s = 0.15;
     base_config.use_static_corridor = true;
@@ -139,7 +139,7 @@ TEST(PostProcessorTest, ApplyRetryConfigDisablesCorridorOnSecondRetry) {
 
 // 乘数列表与走廊标志越界时应回退到最后一个值。
 TEST(PostProcessorTest, ApplyRetryConfigFallsBackToLastValues) {
-    PreprocessingPipelineConfig base_config;
+    NMPCConfig base_config;
     base_config.bspline.dense_step_dist = 0.05;
     base_config.resampler.nominal_step_s = 0.15;
     base_config.use_static_corridor = true;
@@ -168,13 +168,11 @@ TEST(PostProcessorTest, DoesNotLeakConfigAfterRetry) {
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
 
-    auto pipeline_config = PreprocessingPipelineConfig{};
-    pipeline_config.use_static_corridor = false;
-    const double original_dense = pipeline_config.bspline.dense_step_dist;
-    const double original_nominal = pipeline_config.resampler.nominal_step_s;
-
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter = 0;  // 强制 NMPC 在 validateProblem 阶段失败
+    nmpc_config.use_static_corridor = false;
+    const double original_dense = nmpc_config.bspline.dense_step_dist;
+    const double original_nominal = nmpc_config.resampler.nominal_step_s;
 
     AdaptiveRetryConfig retry_config;
     retry_config.max_retries = 2;
@@ -183,12 +181,11 @@ TEST(PostProcessorTest, DoesNotLeakConfigAfterRetry) {
 
     const auto path = MakePathFromManeuver(MakeLongStraightManeuver());
     const auto result =
-        processor.optimize(path, pipeline_config, nmpc_config, retry_config);
+        processor.optimize(path, nmpc_config, retry_config);
 
     // 输入配置对象必须保持原值
-    EXPECT_DOUBLE_EQ(pipeline_config.bspline.dense_step_dist, original_dense);
-    EXPECT_DOUBLE_EQ(pipeline_config.resampler.nominal_step_s,
-                     original_nominal);
+    EXPECT_DOUBLE_EQ(nmpc_config.bspline.dense_step_dist, original_dense);
+    EXPECT_DOUBLE_EQ(nmpc_config.resampler.nominal_step_s, original_nominal);
     // NMPC 失败但预处理成功 → 直接回退到预处理轨迹（无需重试）。
     // 重构后 PostProcessor 质量门已在 runSingleAttempt 中直接兜底，
     // 不再走外层的 AdaptiveRetry 重试循环。
@@ -209,15 +206,14 @@ TEST(PostProcessorTest,
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
 
-    PreprocessingPipelineConfig pipeline_config;
-    pipeline_config.use_static_corridor = false;
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter =
         0;  // 强制 NMPC 在 validateProblem 阶段失败，触发 fallback
+    nmpc_config.use_static_corridor = false;
 
     const auto path = MakeSwitchbackPath();
     const auto init_maneuvers = path.numManeuvers();
-    const auto result = processor.optimize(path, pipeline_config, nmpc_config);
+    const auto result = processor.optimize(path, nmpc_config);
 
     ASSERT_TRUE(result.success);
     EXPECT_NE(result.message.find("falling back"), std::string::npos);
@@ -235,13 +231,12 @@ TEST(PostProcessorTest, EndToEndSingleManeuverConverges) {
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
 
-    PreprocessingPipelineConfig pipeline_config;
-    pipeline_config.use_static_corridor = false;  // 空地图无梯度，关闭走廊
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter = 50;
+    nmpc_config.use_static_corridor = false;  // 空地图无梯度，关闭走廊
 
     const auto path = MakePathFromManeuver(MakeLongStraightManeuver());
-    const auto result = processor.optimize(path, pipeline_config, nmpc_config);
+    const auto result = processor.optimize(path, nmpc_config);
 
     EXPECT_TRUE(result.success);
     EXPECT_FALSE(result.optimized_path.empty());

@@ -175,7 +175,7 @@ TEST(NmpcSolverTest, MismatchedStaticCorridorDimensionsNoLongerThrows) {
         vehicle_params, /*heading_sample_num=*/233,
         /*inner_row_num=*/2, /*outer_row_num=*/2);
 
-    NmpcSolverConfig config;
+    NMPCConfig config;
     config.static_corridor_C = Eigen::MatrixXd::Ones(1, 5);  // 1行
     config.static_corridor_d = Eigen::VectorXd::Zero(2);  // 2个元素，不匹配
     NmpcSolver solver(vehicle_params, footprint_model, config);
@@ -322,7 +322,7 @@ TEST(NmpcSolverTest, OptimizesWithTrustRegionEnabled) {
         vehicle_params, /*heading_sample_num=*/233,
         /*inner_row_num=*/2, /*outer_row_num=*/2);
 
-    NmpcSolverConfig config;
+    NMPCConfig config;
     NmpcSolver solver(vehicle_params, footprint_model, config);
     NmpcSolver::Result result;
     ASSERT_NO_THROW(result = solver.optimize(path, esdf_map));
@@ -335,7 +335,7 @@ TEST(NmpcSolverTest, OptimizesWithTrustRegionEnabled) {
     }
 }
 
-// 验证默认 NmpcSolverConfig 在启用 Armijo 线搜索后不破坏既有场景。
+// 验证默认 NMPCConfig 在启用 Armijo 线搜索后不破坏既有场景。
 // 预期行为：直行换挡场景在线搜索模式下仍能产出有效轨迹（Milestone 023
 // 四次重构后 位置信赖域改为软代价跟踪，不再要求严格收敛）。
 TEST(NmpcSolverTest, DefaultConfigWithLineSearchStillConverges) {
@@ -347,7 +347,7 @@ TEST(NmpcSolverTest, DefaultConfigWithLineSearchStillConverges) {
         /*inner_row_num=*/2, /*outer_row_num=*/2);
 
     // 默认构造
-    const NmpcSolverConfig config;
+    const NMPCConfig config;
     NmpcSolver solver(vehicle_params, footprint_model, config);
     NmpcSolver::Result result;
     ASSERT_NO_THROW(result = solver.optimize(path, esdf_map));

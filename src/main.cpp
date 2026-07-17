@@ -40,13 +40,12 @@ int main() {
             /*outer_row_num=*/2);
 
         // PostProcessor 完整链路
-        PreprocessingPipelineConfig pipeline_config;
-        NmpcSolverConfig nmpc_config;
+        NMPCConfig nmpc_config;
         AdaptiveRetryConfig retry_config;
         const PostProcessor post_processor(vehicle_params, footprint_model,
                                            esdf_map);
         const auto post_result = post_processor.optimize(
-            init_path, pipeline_config, nmpc_config, retry_config);
+            init_path, nmpc_config, retry_config);
 
         LOG_FMT_INFO(
             "PostProcessor result: success={}, maneuvers={}, length={:.3f}, "

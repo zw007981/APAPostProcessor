@@ -51,7 +51,7 @@ void SetStcSqpLogSink() {
 namespace apa_post_processor {
 NmpcSolver::NmpcSolver(const VehicleParams& vehicle_params,
                        const VehicleFootprintModel& footprint_model,
-                       NmpcSolverConfig config)
+                       NMPCConfig config)
     : vehicle_params_(vehicle_params),
       circle_local_positions_(
           vehicle_circle_geometry::ExtractLocalCircleCenters(

@@ -545,7 +545,7 @@ TEST(PreprocessingToOcpConverterTest, EndToEndSingleManeuver) {
     const PreprocessingToOcpConverter converter(vehicle_params);
     const auto conv = converter.convert(path, pipe_result);
 
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter = 50;
     nmpc_config.static_corridor_C = conv.static_corridor_C;
     nmpc_config.static_corridor_d = conv.static_corridor_d;
@@ -610,7 +610,7 @@ TEST(PreprocessingToOcpConverterTest, ReturnsLastIterateOnMaxIterExhaustion) {
     const PreprocessingToOcpConverter converter(vehicle_params);
     const auto conv = converter.convert(path, pipe_result);
 
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter = 1;  // 强制未收敛但返回最后一次迭代
     nmpc_config.static_corridor_C = conv.static_corridor_C;
     nmpc_config.static_corridor_d = conv.static_corridor_d;
@@ -640,7 +640,7 @@ TEST(PreprocessingToOcpConverterTest, FallsBackToPreprocessingOnNmpcFailure) {
     const PreprocessingToOcpConverter converter(vehicle_params);
     const auto conv = converter.convert(path, pipe_result);
 
-    NmpcSolverConfig nmpc_config;
+    NMPCConfig nmpc_config;
     nmpc_config.max_iter = 0;  // 强制 validateProblem 失败
     nmpc_config.static_corridor_C = conv.static_corridor_C;
     nmpc_config.static_corridor_d = conv.static_corridor_d;

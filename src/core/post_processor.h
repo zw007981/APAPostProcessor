@@ -3,9 +3,9 @@
 #include <string>
 #include <vector>
 
-#include "../preprocessing/preprocessing_pipeline.h"
 #include "../util/path.h"
 #include "../util/trajectory.h"
+#include "NMPC/nmpc_config.h"
 #include "NMPC/nmpc_solver.h"
 #include "NMPC/preprocessing_to_ocp_converter.h"
 
@@ -53,9 +53,7 @@ class PostProcessor {
                   const ESDFMap& esdf_map);
     // 执行完整后处理链路。
     PostProcessorResult optimize(
-        const Path& init_path,
-        const PreprocessingPipelineConfig& pipeline_config,
-        const NmpcSolverConfig& nmpc_config,
+        const Path& init_path, const NMPCConfig& nmpc_config,
         const AdaptiveRetryConfig& retry_config = AdaptiveRetryConfig{}) const;
 
    public:
@@ -77,14 +75,12 @@ class PostProcessor {
         Trajectory nmpc_traj;
     };
     // 用给定配置执行一次预处理 + NMPC 尝试。
-    AttemptResult runSingleAttempt(
-        const Path& init_path,
-        const PreprocessingPipelineConfig& pipeline_config,
-        const NmpcSolverConfig& nmpc_config) const;
+    AttemptResult runSingleAttempt(const Path& init_path,
+                                   const NMPCConfig& nmpc_config) const;
     // 应用第 retry_idx 次重试的配置。
-    static PreprocessingPipelineConfig applyRetryConfig(
-        const PreprocessingPipelineConfig& base_config,
-        const AdaptiveRetryConfig& retry_config, int retry_idx);
+    static NMPCConfig applyRetryConfig(const NMPCConfig& base_config,
+                                       const AdaptiveRetryConfig& retry_config,
+                                       int retry_idx);
 
    protected:
     VehicleParams vehicle_params_;

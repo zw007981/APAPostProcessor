@@ -5,11 +5,25 @@
 #include <cmath>
 #include <string>
 
+#include "../preprocessing/preprocessing_pipeline.h"
 #include "../util/topology_cleaner.h"
 #include "NMPC/vehicle_circle_geometry.h"
 
 namespace apa_post_processor {
 namespace {
+// 从 NMPCConfig 构造 PreprocessingPipelineConfig（过渡期辅助函数）
+PreprocessingPipelineConfig BuildPipelineConfig(const NMPCConfig& nmpc_config) {
+    PreprocessingPipelineConfig cfg;
+    cfg.bspline = nmpc_config.bspline;
+    cfg.speed = nmpc_config.speed;
+    cfg.diff_flat = nmpc_config.diff_flat;
+    cfg.resampler = nmpc_config.resampler;
+    cfg.corridor = nmpc_config.corridor;
+    cfg.use_static_corridor = nmpc_config.use_static_corridor;
+    cfg.collision_safety_margin = nmpc_config.collision_safety_margin;
+    cfg.enable_debug_output = nmpc_config.enable_debug_output;
+    return cfg;
+}
 // 对 Path 中所有点做碰撞深度诊断（纯日志，不做门禁），返回最大碰撞深度(m)。
 double ComputeMaxCollisionDepth(const Path& path, const ESDFMap& esdf_map,
                                 const VehicleFootprintModel& footprint_model) {
@@ -39,11 +53,10 @@ PostProcessor::PostProcessor(const VehicleParams& vehicle_params,
       esdf_map_(esdf_map) {}
 
 PostProcessorResult PostProcessor::optimize(
-    const Path& init_path, const PreprocessingPipelineConfig& pipeline_config,
-    const NmpcSolverConfig& nmpc_config,
+    const Path& init_path, const NMPCConfig& nmpc_config,
     const AdaptiveRetryConfig& retry_config) const {
     (void)retry_config;
-    auto attempt = runSingleAttempt(init_path, pipeline_config, nmpc_config);
+    auto attempt = runSingleAttempt(init_path, nmpc_config);
     PostProcessorResult result;
     result.optimized_path = std::move(attempt.optimized_path);
     result.success = !result.optimized_path.empty();
@@ -58,12 +71,12 @@ PostProcessorResult PostProcessor::optimize(
 }
 
 PostProcessor::AttemptResult PostProcessor::runSingleAttempt(
-    const Path& init_path, const PreprocessingPipelineConfig& pipeline_config,
-    const NmpcSolverConfig& nmpc_config) const {
+    const Path& init_path, const NMPCConfig& nmpc_config) const {
     AttemptResult result;
     const auto t_start = std::chrono::steady_clock::now();
 
     // 单次全链路求解：预处理 → OCP → NMPC → 碰撞检查 → 拓扑清洗
+    const auto pipeline_config = BuildPipelineConfig(nmpc_config);
     auto solveFullPipeline =
         [&](const Path& input_path,
             Trajectory* preprocessed_out = nullptr,
@@ -245,9 +258,9 @@ PostProcessor::AttemptResult PostProcessor::runSingleAttempt(
     return result;
 }
 
-PreprocessingPipelineConfig PostProcessor::applyRetryConfig(
-    const PreprocessingPipelineConfig& base_config,
-    const AdaptiveRetryConfig& retry_config, int retry_idx) {
+NMPCConfig PostProcessor::applyRetryConfig(
+    const NMPCConfig& base_config, const AdaptiveRetryConfig& retry_config,
+    int retry_idx) {
     auto config = base_config;
     const std::size_t idx = static_cast<std::size_t>(retry_idx);
     const double dense_mult =
