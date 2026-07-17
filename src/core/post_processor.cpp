@@ -66,8 +66,8 @@ PostProcessor::AttemptResult PostProcessor::runSingleAttempt(
     // 单次全链路求解：预处理 → OCP → NMPC → 碰撞检查 → 拓扑清洗
     auto solveFullPipeline =
         [&](const Path& input_path,
-            std::vector<TrajectoryPoint>* preprocessed_out = nullptr,
-            std::vector<TrajectoryPoint>* nmpc_out = nullptr) -> Path {
+            Trajectory* preprocessed_out = nullptr,
+            Trajectory* nmpc_out = nullptr) -> Path {
         try {
             const PreprocessingPipeline pipeline(
                 pipeline_config, vehicle_params_, footprint_model_, esdf_map_);

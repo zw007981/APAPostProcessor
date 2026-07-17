@@ -16,7 +16,7 @@ struct VehicleParams {
     // 使用物理参数构造
     VehicleParams(double length_val, double width_val, double wheelbase_val,
                   double max_steer_angle_val, double rear_overhang_val = 0.0,
-                  double max_accel_val = 1.0, double max_decel_val = -1.5,
+                  double max_accel_val = 1.5, double max_decel_val = -3.0,
                   double max_steer_rate_val = 0.4)
         : length(length_val),
           width(width_val),
@@ -38,8 +38,8 @@ struct VehicleParams {
             proto.wheelbase(),
             proto.max_steer_angle(),
             proto.rear_overhang(),
-            proto.has_max_accel() ? proto.max_accel() : 1.0,
-            proto.has_max_decel() ? proto.max_decel() : -1.5,
+            proto.has_max_accel() ? proto.max_accel() : 1.5,
+            proto.has_max_decel() ? proto.max_decel() : -3.0,
             proto.has_max_steer_rate() ? proto.max_steer_rate() : 0.4};
         if (params.length < EPSILON || params.width < EPSILON ||
             params.wheelbase < EPSILON || params.max_steer_angle < EPSILON ||
@@ -80,9 +80,9 @@ struct VehicleParams {
     // 后轴到后保险杠距离 (m)
     double rear_overhang{0.0};
     // 最大纵向加速度 (m/s^2)
-    double max_accel{1.0};
+    double max_accel{1.5};
     // 最大纵向减速度 (m/s^2)
-    double max_decel{-1.5};
+    double max_decel{-3.0};
     // 最大前轮偏角速度 (rad/s)
     double max_steer_rate{0.4};
     // 最大曲率

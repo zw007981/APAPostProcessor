@@ -37,6 +37,7 @@
 #include "../vehicle/vehicle_params.h"
 #include "path.h"
 #include "pose.h"
+#include "trajectory.h"
 #include "type_traits.h"
 
 namespace apa_post_processor::visualizer {
@@ -711,7 +712,7 @@ class Visualizer {
         return *this;
     }
     Visualizer& plotTrajectory(
-        const std::vector<TrajectoryPoint>& traj_points,
+        const Trajectory& traj,
         const VehicleParams& vehicle_params,
         const VehicleFootprintModel* footprint_model = nullptr,
         const ESDFMap* esdf_map = nullptr, const GridMap* grid_map = nullptr,
@@ -724,7 +725,7 @@ class Visualizer {
             style["color"] = P[ti++ % P.size()];
         }
         EnsureStyles(style, {{"linewidth", "2"}});
-        trajectory_plots_.push_back({traj_points, vehicle_params, style,
+        trajectory_plots_.push_back({traj, vehicle_params, style,
                                      draw_swept_area, footprint_model, esdf_map,
                                      grid_map});
         return *this;
@@ -906,7 +907,7 @@ class Visualizer {
         std::optional<std::chrono::steady_clock::time_point> last_render;
     };
     struct TrajectoryPlotEntry {
-        std::vector<TrajectoryPoint> points;
+        Trajectory points;
         VehicleParams vehicle_params;
         Style style;
         bool draw_swept_area;
@@ -1192,6 +1193,12 @@ class Visualizer {
                 return false;
             }
             path.getManeuvers().emplace_back(input, Direction::UNKNOWN);
+            return true;
+        } else if constexpr (std::is_same_v<DecayedT, Trajectory>) {
+            if (input.empty()) {
+                return false;
+            }
+            path.getManeuvers().emplace_back(input.points(), Direction::UNKNOWN);
             return true;
         } else if constexpr (std::is_same_v<DecayedT, TrajectoryPoint>) {
             path.getManeuvers().emplace_back(input, Direction::UNKNOWN);
@@ -1832,22 +1839,23 @@ class Visualizer {
     visualizer::LumenSanctum sanctum_;
 
     // === 轨迹比较视图 ===
-    // 从 TrajectoryPoint 向量构建 DetailSeriesData。
+    // 从 Trajectory 构建 DetailSeriesData。
     static DetailSeriesData buildDetailSeriesFromTrajPoints(
-        const std::vector<TrajectoryPoint>& points, const std::string& label,
+        const Trajectory& traj, const std::string& label,
         const cv::Scalar& color, int line_width, const VehicleParams& vp) {
         DetailSeriesData series;
         series.label = label;
         series.color = color;
         series.line_width = line_width;
-        if (points.empty()) {
+        if (traj.empty()) {
             return series;
         }
-        reserveDetailSeries(series, points.size());
+        const std::size_t n = traj.size();
+        reserveDetailSeries(series, n);
         const double wheelbase = vp.wheelbase;
         double arc = 0.0;
-        for (std::size_t i = 0; i < points.size(); ++i) {
-            const auto& pp = points[i];
+        for (std::size_t i = 0; i < n; ++i) {
+            const auto& pp = traj[i];
             series.index.push_back(static_cast<double>(i));
             series.x.push_back(pp.x);
             series.y.push_back(pp.y);
@@ -1866,9 +1874,9 @@ class Visualizer {
             } else {
                 series.curvature.push_back(NAN);
             }
-            if (i + 1 < points.size()) {
+            if (i + 1 < n) {
                 arc +=
-                    std::hypot(points[i + 1].x - pp.x, points[i + 1].y - pp.y);
+                    std::hypot(traj[i + 1].x - pp.x, traj[i + 1].y - pp.y);
             }
         }
         return series;

@@ -5,6 +5,7 @@
 
 #include "../preprocessing/preprocessing_pipeline.h"
 #include "../util/path.h"
+#include "../util/trajectory.h"
 #include "NMPC/nmpc_solver.h"
 #include "NMPC/preprocessing_to_ocp_converter.h"
 
@@ -25,10 +26,10 @@ struct PostProcessorResult {
     int final_maneuvers = 0;
     // 最终路径长度
     double final_length = 0.0;
-    // 预处理产出的轨迹点（带时间戳）
-    std::vector<TrajectoryPoint> preprocessed_traj;
-    // NMPC 优化产出的轨迹点（带时间戳）
-    std::vector<TrajectoryPoint> nmpc_traj;
+    // 预处理产出的轨迹（带时间戳）
+    Trajectory preprocessed_traj;
+    // NMPC 优化产出的轨迹（带时间戳）
+    Trajectory nmpc_traj;
 };
 
 // 自适应间隔重试配置。
@@ -70,10 +71,10 @@ class PostProcessor {
         std::string message;
         // 本次尝试总耗时(ms)
         double time_ms = 0.0;
-        // 预处理轨迹点（带时间戳）
-        std::vector<TrajectoryPoint> preprocessed_traj;
-        // NMPC 轨迹点（带时间戳）
-        std::vector<TrajectoryPoint> nmpc_traj;
+        // 预处理轨迹（带时间戳）
+        Trajectory preprocessed_traj;
+        // NMPC 轨迹（带时间戳）
+        Trajectory nmpc_traj;
     };
     // 用给定配置执行一次预处理 + NMPC 尝试。
     AttemptResult runSingleAttempt(
