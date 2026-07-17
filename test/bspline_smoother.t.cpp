@@ -1,5 +1,3 @@
-#include "preprocessing/bspline_smoother.h"
-
 #include <gtest/gtest.h>
 #include <omp.h>
 
@@ -7,6 +5,7 @@
 #include <limits>
 #include <vector>
 
+#include "preprocessing/bspline_smoother.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/constants.h"

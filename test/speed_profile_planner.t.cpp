@@ -1,11 +1,10 @@
-#include "preprocessing/speed_profile_planner.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
 #include <vector>
 
+#include "preprocessing/speed_profile_planner.h"
 #include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {

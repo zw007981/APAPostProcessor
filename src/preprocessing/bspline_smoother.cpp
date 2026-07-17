@@ -13,7 +13,8 @@
 namespace apa_post_processor {
 namespace {
 // NURBS Book A2.3：一次性计算 span 内全部非零 B 样条基函数的 0 到 n 阶导数。
-// 使用 ndu 三角递推表避免递归求导在 clamped 端点出现 0/0，时间复杂度 O(p^2 + p*n)。
+// 使用 ndu 三角递推表避免递归求导在 clamped 端点出现 0/0，时间复杂度 O(p^2 +
+// p*n)。
 void computeBasisDerivatives(double u, int span, int p, int n,
                              const std::vector<double>& knots,
                              std::vector<std::vector<double>>& ders) {

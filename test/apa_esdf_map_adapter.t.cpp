@@ -1,9 +1,8 @@
-#include "core/NMPC/apa_esdf_map_adapter.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 
+#include "core/NMPC/apa_esdf_map_adapter.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/position.h"

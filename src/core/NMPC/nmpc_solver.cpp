@@ -149,13 +149,15 @@ NmpcSolver::Result NmpcSolver::solveOcp(const stc_SQP::MultiStageOCP& ocp,
     for (auto& segment : mutable_ocp.segments()) {
         const bool is_last_segment = (seg_idx == num_segments - 1);
         if (use_theta_tracking) {
-            // 航向跟踪：复用 ThetaTrustRegionConstraint 的 ng=2 约束形式，作为 HPIPM 软约束注入。
+            // 航向跟踪：复用 ThetaTrustRegionConstraint 的 ng=2 约束形式，作为
+            // HPIPM 软约束注入。
             segment.constraints.push_back(
                 std::make_shared<ThetaTrustRegionConstraint>(
                     config_.max_theta_deviation_from_ref));
         }
         if (use_position_tracking) {
-            // 位置跟踪：复用 PositionTrustRegionConstraint 的 ng=4 约束形式，作为 HPIPM 软约束注入。
+            // 位置跟踪：复用 PositionTrustRegionConstraint 的 ng=4
+            // 约束形式，作为 HPIPM 软约束注入。
             segment.constraints.push_back(
                 std::make_shared<PositionTrustRegionConstraint>(
                     config_.max_position_deviation_from_ref));

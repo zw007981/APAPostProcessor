@@ -1,10 +1,9 @@
-#include "spatial/grid_map.h"
-
 #include <gtest/gtest.h>
 
 #include <stdexcept>
 #include <vector>
 
+#include "spatial/grid_map.h"
 #include "test_fixture_util.h"
 
 namespace apa_post_processor {

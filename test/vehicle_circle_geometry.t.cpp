@@ -1,11 +1,10 @@
-#include "core/NMPC/vehicle_circle_geometry.h"
-
 #include <constraints/circle_footprint_esdf_constraint.h>
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <stdexcept>
 
+#include "core/NMPC/vehicle_circle_geometry.h"
 #include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
 

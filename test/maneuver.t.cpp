@@ -1,5 +1,3 @@
-#include "util/maneuver.h"
-
 #include <gtest/gtest.h>
 
 #include <cstddef>
@@ -7,6 +5,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "util/maneuver.h"
 
 namespace apa_post_processor {
 namespace {

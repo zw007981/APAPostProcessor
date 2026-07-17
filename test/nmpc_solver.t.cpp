@@ -1,10 +1,9 @@
-#include "core/NMPC/nmpc_solver.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <stdexcept>
 
+#include "core/NMPC/nmpc_solver.h"
 #include "core/NMPC/static_corridor_linear_constraint.h"
 #include "core/NMPC/theta_trust_region_constraint.h"
 #include "spatial/esdf_map.h"
@@ -43,7 +42,6 @@ ESDFMap MakeEmptyEsdfMap() {
     const GridMap grid_map(0.1, 200, 100, Position{-2.0, -3.0}, {});
     return ESDFMap(grid_map);
 }
-
 
 }  // namespace
 

@@ -1,5 +1,3 @@
-#include "util/visualizer.hpp"
-
 #include <gtest/gtest.h>
 
 #include <memory>
@@ -10,6 +8,7 @@
 #include "util/path.h"
 #include "util/pose.h"
 #include "util/trajectory_point.h"
+#include "util/visualizer.hpp"
 
 namespace apa_post_processor {
 namespace {

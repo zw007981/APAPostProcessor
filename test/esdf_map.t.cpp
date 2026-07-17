@@ -1,5 +1,3 @@
-#include "spatial/esdf_map.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -7,6 +5,8 @@
 #include <opencv2/imgproc.hpp>
 #include <random>
 #include <vector>
+
+#include "spatial/esdf_map.h"
 
 namespace apa_post_processor {
 namespace {

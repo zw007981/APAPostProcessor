@@ -51,39 +51,33 @@ double Trajectory::duration() const {
 
 TrajectoryPoint& Trajectory::front() {
     if (points_.empty()) {
-        throw std::runtime_error(
-            "Trajectory::front: trajectory is empty!!!");
+        throw std::runtime_error("Trajectory::front: trajectory is empty!!!");
     }
     return points_.front();
 }
 
 const TrajectoryPoint& Trajectory::front() const {
     if (points_.empty()) {
-        throw std::runtime_error(
-            "Trajectory::front: trajectory is empty!!!");
+        throw std::runtime_error("Trajectory::front: trajectory is empty!!!");
     }
     return points_.front();
 }
 
 TrajectoryPoint& Trajectory::back() {
     if (points_.empty()) {
-        throw std::runtime_error(
-            "Trajectory::back: trajectory is empty!!!");
+        throw std::runtime_error("Trajectory::back: trajectory is empty!!!");
     }
     return points_.back();
 }
 
 const TrajectoryPoint& Trajectory::back() const {
     if (points_.empty()) {
-        throw std::runtime_error(
-            "Trajectory::back: trajectory is empty!!!");
+        throw std::runtime_error("Trajectory::back: trajectory is empty!!!");
     }
     return points_.back();
 }
 
-TrajectoryPoint& Trajectory::operator[](std::size_t i) {
-    return points_[i];
-}
+TrajectoryPoint& Trajectory::operator[](std::size_t i) { return points_[i]; }
 
 const TrajectoryPoint& Trajectory::operator[](std::size_t i) const {
     return points_[i];
@@ -101,8 +95,8 @@ void Trajectory::push_back(TrajectoryPoint&& pt) {
 
 std::string Trajectory::toString() const {
     std::ostringstream oss;
-    oss << "Trajectory{size=" << points_.size()
-        << ", length=" << length() << ", duration=" << duration() << "s}";
+    oss << "Trajectory{size=" << points_.size() << ", length=" << length()
+        << ", duration=" << duration() << "s}";
     return oss.str();
 }
 

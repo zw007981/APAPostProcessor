@@ -1,11 +1,10 @@
-#include "util/topology_cleaner.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
 
 #include "util/maneuver.h"
+#include "util/topology_cleaner.h"
 #include "util/trajectory_point.h"
 
 namespace apa_post_processor {

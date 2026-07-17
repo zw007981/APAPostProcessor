@@ -1,8 +1,8 @@
-#include "util/pose.h"
-
 #include <gtest/gtest.h>
 
 #include <string>
+
+#include "util/pose.h"
 
 namespace apa_post_processor {
 namespace {

@@ -115,7 +115,8 @@ PreprocessingToOcpConverter::Result PreprocessingToOcpConverter::convert(
                 pipe_result.z_ref[static_cast<std::size_t>(i + 1)];
             const double dt_i =
                 pipe_result.delta_t[static_cast<std::size_t>(i)];
-            // 新控制量 [jerk, ddelta_dot] 的初始猜测：相邻 z_ref 差分近似，夹紧到物理 box
+            // 新控制量 [jerk, ddelta_dot] 的初始猜测：相邻 z_ref
+            // 差分近似，夹紧到物理 box
             const double jerk_guess =
                 std::clamp((pt_next.getA() - pt.getA()) / dt_i,
                            -config_.max_jerk, config_.max_jerk);

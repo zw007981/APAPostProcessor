@@ -12,8 +12,8 @@ struct iterable_value {
 };
 
 template <typename T>
-struct iterable_value<T,
-    std::void_t<decltype(*std::begin(std::declval<const T&>()))>> {
+struct iterable_value<
+    T, std::void_t<decltype(*std::begin(std::declval<const T&>()))>> {
     using type = std::decay_t<decltype(*std::begin(std::declval<const T&>()))>;
 };
 

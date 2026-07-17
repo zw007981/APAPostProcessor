@@ -1,11 +1,10 @@
-#include "preprocessing/adaptive_resampler.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
 #include <vector>
 
+#include "preprocessing/adaptive_resampler.h"
 #include "preprocessing/bspline_smoother.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"

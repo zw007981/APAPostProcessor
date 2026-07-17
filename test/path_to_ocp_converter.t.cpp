@@ -1,5 +1,3 @@
-#include "core/NMPC/path_to_ocp_converter.h"
-
 #include <costs/quadratic_tracking.h>
 #include <gtest/gtest.h>
 #include <models/bicycle_model_delta.h>
@@ -7,6 +5,7 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "core/NMPC/path_to_ocp_converter.h"
 #include "test_fixture_util.h"
 #include "util/constants.h"
 #include "util/path.h"

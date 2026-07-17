@@ -320,7 +320,8 @@ stc_SQP::StageSegment PathToOcpConverter::buildSegment(
     R(1, 1) = config_.control_effort_steer_rate_weight;
     segment.cost = std::make_shared<stc_SQP::QuadraticTrackingCost>(
         x_ref, Q, R, /*theta_idx=*/2);
-    // 填充 stage_params：每步存储局部步索引 p(0)、参考航向 p(1)、参考位置 p(3)/p(4)
+    // 填充 stage_params：每步存储局部步索引 p(0)、参考航向 p(1)、参考位置
+    // p(3)/p(4)
     segment.stage_params.resize(static_cast<std::size_t>(segment.N));
     for (int i = 0; i < segment.N; ++i) {
         stc_SQP::StageParameters sp;

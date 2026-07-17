@@ -75,7 +75,7 @@ Path ReconstructPath(const std::vector<Maneuver>& input_maneuvers) {
         }
         auto& last = out_maneuvers.back();
         if (last.direction == maneuver.direction) {
-        // 同向合并：前段尾点与后段首点物理重合，pop_back 去重
+            // 同向合并：前段尾点与后段首点物理重合，pop_back 去重
             if (!last.points.empty()) {
                 last.points.pop_back();
             }

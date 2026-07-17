@@ -1,8 +1,7 @@
 #pragma once
 
-#include <optional>
-
 #include <Eigen/Dense>
+#include <optional>
 
 #include "../../preprocessing/adaptive_resampler.h"
 #include "../../preprocessing/bspline_smoother.h"
@@ -15,7 +14,8 @@
 namespace apa_post_processor {
 // NMPC 求解器配置：继承通用 Config，追加 SQP / HPIPM / 迭代走廊等专有参数。
 struct NMPCConfig : public Config {
-    // 过渡期：保留 PathToOcpConfig 以兼容现有业务代码（后续统一到 Config 基类后移除）
+    // 过渡期：保留 PathToOcpConfig 以兼容现有业务代码（后续统一到 Config
+    // 基类后移除）
     PathToOcpConfig path_to_ocp_config{};
     // 静态舒适走廊不等式系数矩阵 C * Z <= d（预处理管线产出，运行时填充）
     std::optional<Eigen::MatrixXd> static_corridor_C;

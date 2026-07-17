@@ -1,5 +1,3 @@
-#include "util/trajectory.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -7,6 +5,7 @@
 
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
+#include "util/trajectory.h"
 #include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
 
@@ -315,8 +314,8 @@ TEST(TrajectoryTest, ValidateExactTerminalMatchPasses) {
     EXPECT_NEAR(result.terminal_heading_error_deg, 0.0, 1e-6);
 }
 
-// 测试场景：轨迹终点在 (5,0,0)，但目标在 (5,1,π/4)，位置误差 1.0m、航向误差 45°。
-// 预期行为：terminal_position_ok=false、terminal_heading_ok=false。
+// 测试场景：轨迹终点在 (5,0,0)，但目标在 (5,1,π/4)，位置误差 1.0m、航向误差
+// 45°。 预期行为：terminal_position_ok=false、terminal_heading_ok=false。
 TEST(TrajectoryTest, ValidateTerminalMismatchFails) {
     const auto traj = MakeStraightTrajectory();
     const auto esdf = MakeEmptyEsdfMap();
@@ -328,8 +327,10 @@ TEST(TrajectoryTest, ValidateTerminalMismatchFails) {
     EXPECT_FALSE(result.all_passed);
     EXPECT_NEAR(result.terminal_position_error, 1.0, 1e-6);
     EXPECT_NEAR(result.terminal_heading_error_deg, 45.0, 1e-2);
-    EXPECT_NE(result.terminal_position_detail.find("exceeds"), std::string::npos);
-    EXPECT_NE(result.terminal_heading_detail.find("exceeds"), std::string::npos);
+    EXPECT_NE(result.terminal_position_detail.find("exceeds"),
+              std::string::npos);
+    EXPECT_NE(result.terminal_heading_detail.find("exceeds"),
+              std::string::npos);
 }
 
 // 测试场景：终点位置误差 0.03m（<0.05m）、航向误差 1.0°（<3.0°）。
@@ -417,9 +418,11 @@ TEST(TrajectoryTest, ValidateCustomCollisionThreshold) {
     EXPECT_TRUE(result_default.collision_safe);
     TrajectoryValidationConfig strict_config;
     strict_config.max_collision_depth = -0.01;
-    const auto result_strict = traj.validate(goal, esdf, footprint, strict_config);
+    const auto result_strict =
+        traj.validate(goal, esdf, footprint, strict_config);
     EXPECT_FALSE(result_strict.collision_safe);
-    EXPECT_GT(result_strict.max_intrusion_depth, strict_config.max_collision_depth);
+    EXPECT_GT(result_strict.max_intrusion_depth,
+              strict_config.max_collision_depth);
 }
 
 }  // namespace

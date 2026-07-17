@@ -1,11 +1,10 @@
-#include "core/post_processor.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
 
 #include "core/NMPC/nmpc_solver.h"
+#include "core/post_processor.h"
 #include "preprocessing/preprocessing_pipeline.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
@@ -82,8 +81,8 @@ class PostProcessorTestAccess : public PostProcessor {
                             const ESDFMap& esdf_map)
         : PostProcessor(vehicle_params, footprint_model, esdf_map) {}
     static NMPCConfig CallApplyRetryConfig(
-        const NMPCConfig& base_config,
-        const AdaptiveRetryConfig& retry_config, int retry_idx) {
+        const NMPCConfig& base_config, const AdaptiveRetryConfig& retry_config,
+        int retry_idx) {
         return applyRetryConfig(base_config, retry_config, retry_idx);
     }
 };
@@ -180,8 +179,7 @@ TEST(PostProcessorTest, DoesNotLeakConfigAfterRetry) {
     retry_config.nominal_step_s_multipliers = {1.0, 1.5};
 
     const auto path = MakePathFromManeuver(MakeLongStraightManeuver());
-    const auto result =
-        processor.optimize(path, nmpc_config, retry_config);
+    const auto result = processor.optimize(path, nmpc_config, retry_config);
 
     // 输入配置对象必须保持原值
     EXPECT_DOUBLE_EQ(nmpc_config.bspline.dense_step_dist, original_dense);

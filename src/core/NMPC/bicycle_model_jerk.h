@@ -6,7 +6,8 @@
 #include <math/so2.hpp>
 
 namespace apa_post_processor {
-// 控制量升阶版阿克曼自行车模型：a/delta_dot 升级为状态，jerk/ddelta_dot 为控制量。
+// 控制量升阶版阿克曼自行车模型：a/delta_dot 升级为状态，jerk/ddelta_dot
+// 为控制量。
 class BicycleModelJerk : public stc_SQP::DynamicalSystem {
    protected:
     // 状态维度：x, y, theta, v, delta, a, ddelta

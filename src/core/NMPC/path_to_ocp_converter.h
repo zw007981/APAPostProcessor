@@ -35,9 +35,11 @@ struct PathToOcpConfig {
     double control_effort_accel_weight = 1e-2;
     // 控制效果代价权重：前轮转角变化率delta_dot
     double control_effort_steer_rate_weight = 1e-2;
-    // J_smooth 顺滑代价权重：jerk 的 R 代价，仅 PreprocessingToOcpConverter 使用
+    // J_smooth 顺滑代价权重：jerk 的 R 代价，仅 PreprocessingToOcpConverter
+    // 使用
     double smoothing_jerk_weight = 1e-1;
-    // J_smooth 顺滑代价权重：转向角加速度的 R 代价，仅 PreprocessingToOcpConverter 使用
+    // J_smooth 顺滑代价权重：转向角加速度的 R 代价，仅
+    // PreprocessingToOcpConverter 使用
     double smoothing_steer_accel_weight = 1e-1;
     // 内部机动段状态代价权重：速度 v
     double interior_speed_weight = 1e-2;
@@ -71,7 +73,8 @@ struct SegmentProfile {
     bool is_terminal = false;
 };
 
-// Path→MultiStageOCP 转换器：按 Maneuver 切分 Path 并构造 StageSegment 与初始猜测。
+// Path→MultiStageOCP 转换器：按 Maneuver 切分 Path 并构造 StageSegment
+// 与初始猜测。
 class PathToOcpConverter {
    public:
     // 转换结果：MultiStageOCP结构与其对应的初始猜测轨迹

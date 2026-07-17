@@ -1,11 +1,10 @@
-#include "preprocessing/differential_flatness_solver.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
 #include <vector>
 
+#include "preprocessing/differential_flatness_solver.h"
 #include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {

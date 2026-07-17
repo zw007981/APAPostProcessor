@@ -712,8 +712,7 @@ class Visualizer {
         return *this;
     }
     Visualizer& plotTrajectory(
-        const Trajectory& traj,
-        const VehicleParams& vehicle_params,
+        const Trajectory& traj, const VehicleParams& vehicle_params,
         const VehicleFootprintModel* footprint_model = nullptr,
         const ESDFMap* esdf_map = nullptr, const GridMap* grid_map = nullptr,
         bool draw_swept_area = false, Style style = {}) {
@@ -1198,7 +1197,8 @@ class Visualizer {
             if (input.empty()) {
                 return false;
             }
-            path.getManeuvers().emplace_back(input.points(), Direction::UNKNOWN);
+            path.getManeuvers().emplace_back(input.points(),
+                                             Direction::UNKNOWN);
             return true;
         } else if constexpr (std::is_same_v<DecayedT, TrajectoryPoint>) {
             path.getManeuvers().emplace_back(input, Direction::UNKNOWN);
@@ -1875,8 +1875,7 @@ class Visualizer {
                 series.curvature.push_back(NAN);
             }
             if (i + 1 < n) {
-                arc +=
-                    std::hypot(traj[i + 1].x - pp.x, traj[i + 1].y - pp.y);
+                arc += std::hypot(traj[i + 1].x - pp.x, traj[i + 1].y - pp.y);
             }
         }
         return series;

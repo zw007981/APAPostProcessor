@@ -18,12 +18,7 @@ template <typename T>
 struct UnsupportedManeuverInputType : std::false_type {};
 
 // 行驶方向
-enum class Direction {
-    UNKNOWN = 0,
-    FORWARD = 1,
-    BACKWARD = 2,
-    PIVOT = 3
-};
+enum class Direction { UNKNOWN = 0, FORWARD = 1, BACKWARD = 2, PIVOT = 3 };
 
 // 机动段
 struct Maneuver {

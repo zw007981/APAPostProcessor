@@ -1,5 +1,3 @@
-#include "vehicle/vehicle_footprint_model.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -8,6 +6,7 @@
 #include <vector>
 
 #include "util/constants.h"
+#include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {

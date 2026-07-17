@@ -81,7 +81,8 @@ double StaticCorridorBuilder::computeDScalar(double dist_ref,
     // 约束形式：-A^T * Z <= d_ref - A^T * Z_ref - R_m - margin
     // 这里 a_row 即为 A^T，因此 d = d_ref - a_row.dot(z_ref) - radius - margin
     //
-    // 自洽性修正：若参考点自身已违反边界，补偿等量 violation，使约束在 Z=Z_ref 处恰好取等
+    // 自洽性修正：若参考点自身已违反边界，补偿等量 violation，使约束在 Z=Z_ref
+    // 处恰好取等
     const double violation = std::max(0.0, radius + margin - dist_ref);
     return dist_ref - a_row.dot(z_ref) - radius - margin + violation;
 }

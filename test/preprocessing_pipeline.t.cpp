@@ -1,5 +1,3 @@
-#include "preprocessing/preprocessing_pipeline.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -7,6 +5,7 @@
 #include <vector>
 
 #include "core/NMPC/nmpc_solver.h"
+#include "preprocessing/preprocessing_pipeline.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/constants.h"

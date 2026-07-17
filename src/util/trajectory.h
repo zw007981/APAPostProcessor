@@ -42,7 +42,8 @@ struct TrajectoryValidationResult {
 };
 
 // 轨迹：带时间戳与完整运动学状态/控制量的 TrajectoryPoint 序列。
-// 与 Path 的区别：Path 侧重几何路径与机动段分割（Maneuver），Trajectory 侧重时序状态序列。
+// 与 Path 的区别：Path 侧重几何路径与机动段分割（Maneuver），Trajectory
+// 侧重时序状态序列。
 class Trajectory {
    public:
     Trajectory() = default;
@@ -87,7 +88,8 @@ class Trajectory {
     auto cend() const { return points_.cend(); }
     // 只读访问内部向量（用于与旧接口兼容的过渡期）
     const std::vector<TrajectoryPoint>& points() const { return points_; }
-    // 验证轨迹合法性：碰撞安全 + 终点收敛（运动学可行性由 SQP 保证，不重复检查）
+    // 验证轨迹合法性：碰撞安全 + 终点收敛（运动学可行性由 SQP
+    // 保证，不重复检查）
     TrajectoryValidationResult validate(
         const TrajectoryPoint& goal, const ESDFMap& esdf_map,
         const VehicleFootprintModel& footprint_model,

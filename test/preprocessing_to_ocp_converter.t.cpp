@@ -1,11 +1,10 @@
-#include "core/NMPC/preprocessing_to_ocp_converter.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <limits>
 
 #include "core/NMPC/nmpc_solver.h"
+#include "core/NMPC/preprocessing_to_ocp_converter.h"
 #include "preprocessing/preprocessing_pipeline.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"

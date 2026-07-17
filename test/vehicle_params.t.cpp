@@ -1,9 +1,9 @@
-#include "vehicle/vehicle_params.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <string>
+
+#include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {
 namespace {

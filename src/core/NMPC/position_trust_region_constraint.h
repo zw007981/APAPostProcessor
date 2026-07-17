@@ -5,7 +5,8 @@
 #include <string>
 
 namespace apa_post_processor {
-// 位置信赖域约束：对每个打靶点施加 |x-x_ref|<=delta_xy_max, |y-y_ref|<=delta_xy_max。
+// 位置信赖域约束：对每个打靶点施加 |x-x_ref|<=delta_xy_max,
+// |y-y_ref|<=delta_xy_max。
 class PositionTrustRegionConstraint : public stc_SQP::Constraint {
    public:
     // 使用最大允许位置偏差构造约束，delta_xy_max >= 0。

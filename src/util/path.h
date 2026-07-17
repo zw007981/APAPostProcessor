@@ -22,8 +22,8 @@ namespace path {
 // 判断类型是否为Pose可迭代序列（排除TrajectoryPoint，避免曲率误用）
 template <typename TContainer>
 inline constexpr bool is_pose_sequence_v =
-    util::is_iterable_v<std::decay_t<TContainer>> &&
-    std::is_same_v<util::iterable_value_t<std::decay_t<TContainer>>, Pose>;
+    util::is_iterable_v<std::decay_t<TContainer>>&&
+        std::is_same_v<util::iterable_value_t<std::decay_t<TContainer>>, Pose>;
 }  // namespace path
 
 class Path {

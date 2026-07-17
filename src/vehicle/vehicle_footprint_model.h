@@ -13,10 +13,7 @@
 
 namespace apa_post_processor {
 // 圆类型
-enum class CircleType {
-    INNER,
-    OUTER
-};
+enum class CircleType { INNER, OUTER };
 
 // 基于圆形近似的车辆占据模型
 class VehicleFootprintModel {

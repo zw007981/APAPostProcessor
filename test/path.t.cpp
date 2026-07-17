@@ -1,5 +1,3 @@
-#include "util/path.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -8,6 +6,7 @@
 #include <vector>
 
 #include "util/constants.h"
+#include "util/path.h"
 #include "util/trajectory_point.h"
 
 namespace apa_post_processor {

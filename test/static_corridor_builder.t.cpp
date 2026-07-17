@@ -1,5 +1,3 @@
-#include "preprocessing/static_corridor_builder.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -8,6 +6,7 @@
 #include <vector>
 
 #include "core/NMPC/vehicle_circle_geometry.h"
+#include "preprocessing/static_corridor_builder.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/position.h"
