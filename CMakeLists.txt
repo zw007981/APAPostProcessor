@@ -43,7 +43,12 @@ endif()
 # 1. 查找并引入第三方库
 # ==========================================
 # 1.1 必须的库
-find_package(Protobuf CONFIG REQUIRED)
+# 优先 CONFIG 模式（源码安装的新版 protobuf 自带 protobuf-config.cmake），
+# 找不到时回退 CMake 内置 Module 模式（适配 apt 安装的 libprotobuf-dev，无 config 文件）
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+    find_package(Protobuf MODULE REQUIRED)
+endif()
 message(STATUS "Found Protobuf: ${Protobuf_VERSION}")
 
 find_package(OpenCV REQUIRED)

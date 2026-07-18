@@ -6,7 +6,7 @@ extern "C" {
 # endif /* ifdef __cplusplus */
 
 /* DEBUG */
-#define DEBUG
+/* #undef DEBUG */
 
 /* Operating system */
 #define IS_LINUX
