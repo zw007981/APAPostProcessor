@@ -22,7 +22,7 @@ struct Config {
     // 终点位置误差上限 (m)，<0 表示不启用
     double terminal_position_error_threshold = 0.05;
     // 终点航向误差上限 (°)，<0 表示不启用
-    double terminal_heading_error_threshold_deg = 3.0;
+    double terminal_heading_error_threshold_deg = 1.5;
 
     // ============================================================
     // 第二组：Cost 权重（不同算法共享代价函数结构）
@@ -32,9 +32,9 @@ struct Config {
     // 控制代价：前轮转角变化率 δ_dot
     double control_effort_steer_rate_weight = 1e-2;
     // 顺滑代价：纵向加加速度 jerk
-    double smoothing_jerk_weight = 1e-1;
+    double smoothing_jerk_weight = 1.0;
     // 顺滑代价：转向角加速度
-    double smoothing_steer_accel_weight = 1e-1;
+    double smoothing_steer_accel_weight = 1.0;
     // 内部机动段状态代价：速度 v
     double interior_speed_weight = 1e-2;
     // 内部机动段状态代价：前轮转角 δ
@@ -67,16 +67,16 @@ struct Config {
     // ============================================================
     // 第四组：碰撞安全
     // ============================================================
-    // ESDF 碰撞数值容差 (m)，仅用于浮点误差兜底
-    double esdf_safety_margin = 0.0;
-    // ESDF 碰撞惩罚软代价权重，默认禁用
-    double esdf_penalty_weight = 0.0;
+    // ESDF 舒适间隙偏好 (m)，低于此距离时软代价开始生效
+    double esdf_safety_margin = 0.1;
+    // ESDF 碰撞惩罚软代价权重，提供 ~10cm 舒适间隙
+    double esdf_penalty_weight = 3.0;
 
     // ============================================================
     // 第五组：求解器收敛
     // ============================================================
     // 最大迭代次数
-    int max_iter = 150;
+    int max_iter = 100;
 
     // ============================================================
     // 第六组：打靶步长

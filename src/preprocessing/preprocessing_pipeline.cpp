@@ -248,6 +248,9 @@ SpeedProfileInput PreprocessingPipeline::buildSpeedProfileInput(
     if (n_points == 0) {
         return input;
     }
+    input.s.reserve(n_points);
+    input.kappa.reserve(n_points);
+    input.min_esdf_dist.reserve(n_points);
 
     const auto control_point_count =
         static_cast<int>(smooth_result.control_points.size());

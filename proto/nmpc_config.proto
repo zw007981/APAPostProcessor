@@ -125,6 +125,9 @@ message NMPCConfigProto {
     optional bool skip_last_step_corridor = 88;
     optional bool use_static_corridor_soft_constraint = 89;
     optional double static_corridor_soft_weight = 90;
+    optional double sqp_stationarity_tol = 91;
+    optional double sqp_kkt_tol = 92;
+    optional double sqp_constr_viol_tol = 93;
 
     // === 预处理管线子配置 ===
     optional BSplineConfigProto bspline = 100;

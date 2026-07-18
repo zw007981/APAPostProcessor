@@ -254,6 +254,9 @@ NmpcSolver::Result NmpcSolver::solveOcp(const stc_SQP::MultiStageOCP& ocp,
     solver.options().use_line_search = config_.use_line_search;
     solver.options().hessian_regularization =
         config_.sqp_hessian_regularization;
+    solver.options().stationarity_tol = config_.sqp_stationarity_tol;
+    solver.options().kkt_tol = config_.sqp_kkt_tol;
+    solver.options().constr_viol_tol = config_.sqp_constr_viol_tol;
 
     // QPData 对象池：按 (N, nx, nu, ng_max) 缓存，避免反复分配。
     {

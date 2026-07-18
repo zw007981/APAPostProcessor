@@ -52,6 +52,9 @@ void NMPCConfig::loadFromProto(
     LOAD_(proto, skip_last_step_corridor);
     LOAD_(proto, use_static_corridor_soft_constraint);
     LOAD_(proto, static_corridor_soft_weight);
+    LOAD_(proto, sqp_stationarity_tol);
+    LOAD_(proto, sqp_kkt_tol);
+    LOAD_(proto, sqp_constr_viol_tol);
     LOAD_(proto, use_static_corridor);
     LOAD_(proto, collision_safety_margin);
     // 子配置

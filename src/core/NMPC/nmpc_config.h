@@ -44,6 +44,12 @@ struct NMPCConfig : public Config {
     bool use_static_corridor_soft_constraint = false;
     // 静态舒适走廊 HPIPM 松弛变量惩罚权重
     double static_corridor_soft_weight = 10.0;
+    // SQP 平稳性收敛阈值（步长判停）
+    double sqp_stationarity_tol = 1e-3;
+    // SQP KKT 残差收敛阈值
+    double sqp_kkt_tol = 1e-3;
+    // SQP 约束违反收敛阈值
+    double sqp_constr_viol_tol = 1e-3;
 
     // === NMPC 使用的预处理管线配置 ===
     // B 样条平滑器配置

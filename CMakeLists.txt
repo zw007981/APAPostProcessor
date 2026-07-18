@@ -165,6 +165,11 @@ target_link_libraries(apa_core_lib PUBLIC
     OpenMP::OpenMP_CXX
 )
 
+# 项目根目录宏：供代码中定位 fig/、log/ 等资源目录
+target_compile_definitions(apa_core_lib PUBLIC
+    PROJECT_ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+
 # x86 平台启用 -march=native 以使用 AVX2/FMA 等指令，释放 SIMD 潜能
 # 如需部署到不同 CPU，可关闭此选项或指定目标架构
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
