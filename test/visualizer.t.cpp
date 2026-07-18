@@ -7,8 +7,10 @@
 #include "util/maneuver.h"
 #include "util/path.h"
 #include "util/pose.h"
+#include "util/trajectory.h"
 #include "util/trajectory_point.h"
 #include "util/visualizer.hpp"
+#include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {
 namespace {
@@ -17,11 +19,15 @@ namespace {
 class VisualizerTestAccess : public Visualizer {
    public:
     using Visualizer::appendDetailSeriesFromPath;
+    using Visualizer::buildVehicleFootprint;
     using Visualizer::collectPathPoints;
     using Visualizer::tryExtractPath;
     using Visualizer::Visualizer;
     const std::vector<DetailSeriesData>& detailSeries() const {
         return detail_series_;
+    }
+    const std::vector<TrajectoryPlotEntry>& trajectoryPlots() const {
+        return trajectory_plots_;
     }
 };
 
@@ -262,6 +268,67 @@ TEST(VisualizerAppendDetailSeriesTest, SkipsEmptyPath) {
     visualizer.appendDetailSeriesFromPath(path, {});
 
     EXPECT_TRUE(visualizer.detailSeries().empty());
+}
+
+// 后轴中心为原点、朝 +x 时：前保险杠 x=length-rear_overhang，后保险杠
+// x=-rear_overhang，半宽为 width/2，角点顺序与绘制约定一致。
+TEST(VisualizerBuildVehicleFootprintTest, CornersCenteredOnRearAxle) {
+    const VehicleParams vehicle_params{4.0, 2.0, 2.5, 0.6, 1.0};
+
+    VisualizerTestAccess visualizer;
+    const auto corners =
+        visualizer.buildVehicleFootprint(Pose{0.0, 0.0, 0.0}, vehicle_params);
+
+    ASSERT_EQ(corners.size(), 4U);
+    EXPECT_NEAR(corners[0].x, 3.0, EPSILON);
+    EXPECT_NEAR(corners[0].y, 1.0, EPSILON);
+    EXPECT_NEAR(corners[1].x, 3.0, EPSILON);
+    EXPECT_NEAR(corners[1].y, -1.0, EPSILON);
+    EXPECT_NEAR(corners[2].x, -1.0, EPSILON);
+    EXPECT_NEAR(corners[2].y, -1.0, EPSILON);
+    EXPECT_NEAR(corners[3].x, -1.0, EPSILON);
+    EXPECT_NEAR(corners[3].y, 1.0, EPSILON);
+}
+
+// 旋转 90° 后轮廓角点应随航向刚体变换，仍相对后轴中心布局。
+TEST(VisualizerBuildVehicleFootprintTest, CornersRotateWithHeading) {
+    const VehicleParams vehicle_params{4.0, 2.0, 2.5, 0.6, 1.0};
+
+    VisualizerTestAccess visualizer;
+    const auto corners = visualizer.buildVehicleFootprint(
+        Pose{1.0, 2.0, PI / 2.0}, vehicle_params);
+
+    ASSERT_EQ(corners.size(), 4U);
+    EXPECT_NEAR(corners[0].x, 0.0, EPSILON);
+    EXPECT_NEAR(corners[0].y, 5.0, EPSILON);
+    EXPECT_NEAR(corners[2].x, 2.0, EPSILON);
+    EXPECT_NEAR(corners[2].y, 1.0, EPSILON);
+}
+
+TEST(VisualizerPlotTrajectoryTest, DefaultsToNotDrawingStartEnd) {
+    const Trajectory traj(
+        std::vector<TrajectoryPoint>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}});
+    const VehicleParams vehicle_params{4.0, 2.0, 2.5, 0.6, 1.0};
+
+    VisualizerTestAccess visualizer;
+    visualizer.plotTrajectory(traj, vehicle_params);
+
+    ASSERT_EQ(visualizer.trajectoryPlots().size(), 1U);
+    EXPECT_FALSE(visualizer.trajectoryPlots().front().draw_start_end);
+}
+
+TEST(VisualizerPlotTrajectoryTest, StoresStartEndFlagWhenEnabled) {
+    const Trajectory traj(
+        std::vector<TrajectoryPoint>{{0.0, 0.0, 0.0}, {1.0, 0.0, 0.0}});
+    const VehicleParams vehicle_params{4.0, 2.0, 2.5, 0.6, 1.0};
+
+    VisualizerTestAccess visualizer;
+    visualizer.plotTrajectory(traj, vehicle_params, nullptr, nullptr, nullptr,
+                              /*draw_swept_area=*/false,
+                              /*draw_start_end=*/true);
+
+    ASSERT_EQ(visualizer.trajectoryPlots().size(), 1U);
+    EXPECT_TRUE(visualizer.trajectoryPlots().front().draw_start_end);
 }
 
 }  // namespace

@@ -5,7 +5,7 @@
 using namespace apa_post_processor;
 
 int main() {
-    Logger::SetLogDirectory("../log");
+    Logger::SetLogDirectory(std::string(PROJECT_ROOT_DIR) + "/log");
     try {
         auto scene = NMPCPlanningScene::LoadFromFile("data/config.json");
         scene->optimize();
@@ -18,6 +18,7 @@ int main() {
                 preprocessed, scene->vehicleParams(), &scene->footprintModel(),
                 &scene->esdfMap(), &scene->gridMap(),
                 /*draw_swept_area=*/false,
+                /*draw_start_end=*/true,
                 {{"color", visualizer::Pen::RED}, {"label", "Preprocessed"}});
         }
         if (!nmpc.empty()) {
@@ -25,11 +26,12 @@ int main() {
                                       &scene->footprintModel(),
                                       &scene->esdfMap(), &scene->gridMap(),
                                       /*draw_swept_area=*/true,
+                                      /*draw_start_end=*/false,
                                       {{"color", visualizer::Pen::BLUE},
                                        {"label", "NMPC Optimized"}});
         }
         if (!preprocessed.empty() || !nmpc.empty()) {
-            visualizer.save("../fig");
+            visualizer.save(std::string(PROJECT_ROOT_DIR) + "/fig");
         }
         (void)result;
     } catch (const std::exception& e) {

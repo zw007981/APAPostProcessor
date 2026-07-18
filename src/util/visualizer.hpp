@@ -64,6 +64,7 @@ struct Pen {
     static constexpr const char* YELLOW = "#FFC400";
     static constexpr const char* BLUE = "#00AEFF";
     static constexpr const char* GREEN = "#00A35A";
+    static constexpr const char* ORANGE = "#FF6600";
     static constexpr const char* PURPLE = "#800080";
 };
 
@@ -711,11 +712,14 @@ class Visualizer {
         });
         return *this;
     }
+    // 绘制轨迹；draw_start_end 为 true 时在空间子图额外标注起终点位姿：
+    // 橘黄色为起点（后轴中心圆点 + 车身轮廓），绿色为终点。
     Visualizer& plotTrajectory(
         const Trajectory& traj, const VehicleParams& vehicle_params,
         const VehicleFootprintModel* footprint_model = nullptr,
         const ESDFMap* esdf_map = nullptr, const GridMap* grid_map = nullptr,
-        bool draw_swept_area = false, Style style = {}) {
+        bool draw_swept_area = false, bool draw_start_end = false,
+        Style style = {}) {
         if (style.find("color") == style.end()) {
             static int ti = 0;
             static constexpr std::array<const char*, 8> P = {
@@ -725,8 +729,8 @@ class Visualizer {
         }
         EnsureStyles(style, {{"linewidth", "2"}});
         trajectory_plots_.push_back({traj, vehicle_params, style,
-                                     draw_swept_area, footprint_model, esdf_map,
-                                     grid_map});
+                                     draw_swept_area, draw_start_end,
+                                     footprint_model, esdf_map, grid_map});
         return *this;
     }
     // 保存图像，返回 OpenCV 写图结果。
@@ -910,6 +914,7 @@ class Visualizer {
         VehicleParams vehicle_params;
         Style style;
         bool draw_swept_area;
+        bool draw_start_end;
         const VehicleFootprintModel* footprint_model;
         const ESDFMap* esdf_map;
         const GridMap* grid_map;
@@ -2037,6 +2042,25 @@ class Visualizer {
                                  &DetailSeriesData::index, false, 0.0, 0.0, {},
                                  y_ticks, band_refs);
     }
+    // 查找序列中首/末 x、y、heading 均为有限值的索引；若无有效点，
+    // 首索引保持为序列长度，调用方据此跳过。
+    static std::pair<std::size_t, std::size_t> FindStartEndIndices(
+        const DetailSeriesData& series) {
+        const std::size_t n = series.x.size();
+        std::size_t first = n;
+        std::size_t last = n;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!std::isfinite(series.x[i]) || !std::isfinite(series.y[i]) ||
+                !std::isfinite(series.heading[i])) {
+                continue;
+            }
+            if (first == n) {
+                first = i;
+            }
+            last = i;
+        }
+        return {first, last};
+    }
     // 轨迹比较空间子图：障碍物背景 + 所有轨迹线 + swept area。
     void drawTrajectorySpatialSubplot(const cv::Rect& rect,
                                       const std::vector<TrajRenderCtx>& ctxs) {
@@ -2077,6 +2101,25 @@ class Visualizer {
                     max_x = std::max(max_x, ctx.series.x[i] + half_diag);
                     min_y = std::min(min_y, ctx.series.y[i] - half_diag);
                     max_y = std::max(max_y, ctx.series.y[i] + half_diag);
+                }
+            }
+            if (ctx.entry->draw_start_end) {
+                // 起终点车身轮廓需纳入视场范围，避免轮廓被图框裁剪。
+                const auto [start_idx, end_idx] =
+                    FindStartEndIndices(ctx.series);
+                if (start_idx < ctx.series.x.size()) {
+                    for (const std::size_t idx : {start_idx, end_idx}) {
+                        const auto corners = buildVehicleFootprint(
+                            Pose{ctx.series.x[idx], ctx.series.y[idx],
+                                 ctx.series.heading[idx]},
+                            ctx.entry->vehicle_params);
+                        for (const auto& corner : corners) {
+                            min_x = std::min(min_x, corner.x);
+                            max_x = std::max(max_x, corner.x);
+                            min_y = std::min(min_y, corner.y);
+                            max_y = std::max(max_y, corner.y);
+                        }
+                    }
                 }
             }
         }
@@ -2141,10 +2184,55 @@ class Visualizer {
                                      ctx.series.color, ctx.series.line_width);
             }
         }
+        // 起终点位姿标记：橘黄色起点 + 绿色终点（后轴中心圆点 + 车身轮廓），
+        // 绘制在轨迹线之上以便辨识。
+        const cv::Scalar start_color =
+            ParseColor(visualizer::Pen::ORANGE, cv::Scalar(0, 102, 255));
+        const cv::Scalar end_color =
+            ParseColor(visualizer::Pen::GREEN, cv::Scalar(90, 163, 0));
+        bool start_end_drawn = false;
+        for (const auto& ctx : ctxs) {
+            if (!ctx.entry->draw_start_end) {
+                continue;
+            }
+            const auto [start_idx, end_idx] = FindStartEndIndices(ctx.series);
+            if (start_idx >= ctx.series.x.size()) {
+                continue;
+            }
+            const auto draw_marker = [&](std::size_t idx,
+                                         const cv::Scalar& color) {
+                const auto corners = buildVehicleFootprint(
+                    Pose{ctx.series.x[idx], ctx.series.y[idx],
+                         ctx.series.heading[idx]},
+                    ctx.entry->vehicle_params);
+                std::vector<cv::Point> outline;
+                outline.reserve(corners.size() + 1);
+                for (const auto& corner : corners) {
+                    outline.emplace_back(world_to_pixel(corner.x, corner.y));
+                }
+                // 闭合轮廓：首尾相接形成完整车身矩形。
+                outline.emplace_back(outline.front());
+                drawPolylinesClipped(sanctum_, {outline}, plot_rect, color, 2);
+                sanctum_.drawCircle(
+                    world_to_pixel(ctx.series.x[idx], ctx.series.y[idx]), 5,
+                    color, -1);
+            };
+            draw_marker(start_idx, start_color);
+            // 单点轨迹起点与终点重合，只画起点，避免绿色覆盖橘黄色。
+            if (end_idx != start_idx) {
+                draw_marker(end_idx, end_color);
+            }
+            start_end_drawn = true;
+        }
         // 图例。
         std::vector<std::pair<std::string, cv::Scalar>> legend_entries;
         for (const auto& ctx : ctxs) {
             legend_entries.emplace_back(ctx.series.label, ctx.series.color);
+        }
+        if (start_end_drawn) {
+            // 标注起终点颜色含义：橘黄色=起点位姿，绿色=终点位姿。
+            legend_entries.emplace_back("Start Pose", start_color);
+            legend_entries.emplace_back("End Pose", end_color);
         }
         drawDetailSubplotLegend(plot_rect, legend_entries);
         sanctum_.putRawText("Spatial Geometry",
