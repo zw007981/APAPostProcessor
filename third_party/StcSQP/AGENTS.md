@@ -6,13 +6,13 @@
 
 - **设计文档**：`.github/design_document.md`
   - 描述 StcSQP 的整体架构、模块接口、CasADi 代码生成规范、HPIPM 配置以及 Agent 强制指令（避坑清单）。
-  - Milestone 017 已补充 `HPIPMQPSolver` 跨迭代热启动、`SQPSolverOptions::use_qp_warm_start` 开关及 IPM 迭代统计接口说明。
+  - 已补充 `HPIPMQPSolver` 跨迭代热启动、`SQPSolverOptions::use_qp_warm_start` 开关及 IPM 迭代统计接口说明。
 - **C++ 编程规范**：`.github/copilot-instructions.md`
   - 规定本仓库的 C++17 编码风格、命名规范、注释语言（中文优先）、垂直空白密度、访问控制（`protected` 优先）、RAII、异常处理、现代 C++ 特性等强制要求。
 
 本 `AGENTS.md` 仅作为上述两份文档的**摘要与补充**，若存在冲突，以原始文档为准。
 
-> **Milestone 018 评估说明**：Milestone 018 曾将 `Constraint`/`CostTerm` 从虚函数多态迁移到 closed-set `std::variant` 并实现、编译、测试通过，但 `third_party/StcSQP/bench/bench_performance_profiling.cpp` 的 Release 端到端数据未观测到可解释的性能收益；最终结论为**不合并**，已回退到原有虚函数机制，相关实验代码已从工作树移除。详见 `docs/milestones/milestone-018/review-log.md`（主仓库侧）与 `docs/quality-audits/audit-002/review-log.md`。
+> **`Constraint`/`CostTerm` 去虚拟化评估说明**：曾评估将 `Constraint`/`CostTerm` 从虚函数多态迁移到 closed-set `std::variant` 并实现、编译、测试通过，但 `third_party/StcSQP/bench/bench_performance_profiling.cpp` 的 Release 端到端数据未观测到可解释的性能收益；最终结论为**不合并**，已回退到原有虚函数机制，相关实验代码已从工作树移除。
 
 ## 项目定位
 

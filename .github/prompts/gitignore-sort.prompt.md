@@ -1,0 +1,1 @@
+../../.agents/prompts/gitignore-sort.md

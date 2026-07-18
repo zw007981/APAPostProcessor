@@ -20,7 +20,8 @@ description: "⚠️ 高危/不可逆操作：彻底清空 docs/milestones.md、
   3. `docs/quality-audits/` 整个目录（如存在）
 
   明确禁止删除或修改：`docs/architecture.md`、`docs/interfaces.md`、`docs/known-limitations.md`、`docs/default_params.md`、`docs/glossary.md`、`docs/NMPC.md`、`docs/visualizer_for_preprocessing_pipeline.md` 等其它设计/记忆类文档，以及 `.agents/`、`AGENTS.md`、`CLAUDE.md` 等规则/路由文件本身——这些是项目的设计资产与流程骨架，不属于"Milestone/质量校验历史记录"。
-- **悬空引用只报告，不擅自处理**：`docs/known-limitations.md`、`docs/interfaces.md` 的"变更记录"等文件中可能存在指向具体 `Milestone-NNN`/`audit-NNN` 的引用（如"来源：Milestone 004 收尾审计"）。这些文件本身承载的是独立于编号的技术知识，删除历史记录后这些引用会变成悬空链接，但**不属于本流程的清空范围**：Agent 只能在完成报告中列出发现的悬空引用位置，是否修改交由人工另行决定，不得顺手一并改掉。
+- **悬空引用需主动模糊化改写，不是只报告**：`docs/known-limitations.md`、`docs/interfaces.md`、`docs/architecture.md`等文件中可能存在指向具体 `Milestone-NNN`/`audit-NNN` 的引用（如"来源：Milestone 004 收尾审计"或指向已删除 `docs/milestones/milestone-NNN/spec.md` 的链接）。这些文件本身承载的是独立于编号的技术知识，删除历史记录后这些引用会变成悬空引用：Agent 应在本次流程中**主动梳理改写**（参见标准步骤第 7 步），而非仅列出清单交给人工。
+- **模糊化改写的范围边界**：只针对 [AGENTS.md](../../AGENTS.md) 指定的核心治理文档集合（`docs/architecture.md`、`docs/interfaces.md`、`docs/known-limitations.md`，以及因实现细节涉及而需同步改的 `third_party/*/AGENTS.md`/`design_document.md`、`docs/default_params.md` 等）做改写；**不主动展开** AGENTS.md 指定集合之外、体量巨大且章节结构本身就按 Milestone 轮次组织的独立领域设计文档（如 `docs/NMPC.md` 这类）——这类文档不在 AGENTS.md 开发流程的必读清单中，重写代价远超普通引用清理；若梳理中发现此类文档也大量引用了已删除的编号，只在完成报告中说明规模与位置，交由人工决定是否另行处理。
 - **编号重置是本流程的唯一例外**：仓库其它规则（见 [AGENTS.md](../../AGENTS.md)）要求 Milestone/审计编号全局唯一、永不回收，但那针对的是"正常开发过程中个别 Milestone 被废弃"的场景。本流程是人工主动发起的整体清空，执行后下一次开发的 Milestone 编号从 `001` 重新开始、`quality-audits` 编号从 `audit-001` 重新开始，这是本流程唯一被允许触发的编号例外。
 
 ## 标准步骤
@@ -38,9 +39,13 @@ description: "⚠️ 高危/不可逆操作：彻底清空 docs/milestones.md、
    ```
 
    删除表格下方所有针对具体已删除 Milestone 编号的历史说明段落（如"Milestone 019~022 是……系列"这类叙述性脚注）。
-7. 全仓库检索是否有其它文件（`docs/known-limitations.md`、`docs/interfaces.md` 等）引用了本次删除的具体 `milestone-NNN`/`audit-NNN` 编号或路径链接，将悬空引用位置汇总列出。
-8. 汇总本次实际删除的文件/目录清单、（如有）创建的备份 tag 名称、以及第 7 步发现的悬空引用清单，作为完成报告呈现给人工。
+7. 在"模糊化改写的范围边界"约定的文档集合内（`docs/architecture.md`、`docs/interfaces.md`、`docs/known-limitations.md` 及因实现细节涉及而需同步改的 `third_party/*/AGENTS.md`/`design_document.md`、`docs/default_params.md` 等），检索所有引用了本次删除的具体 `Milestone NNN`/`milestone-NNN`/`audit-NNN` 的位置（含正文提及的编号字样、指向已删除路径的链接、按编号命名的章节标题/表格列），逐条模糊化改写：
+   - 去掉具体编号/路径本身，但保留该条记录的技术实质（现象、根因、设计取舍、涉及的文件/函数/配置项），做到脱离编号也能独立读懂；风格类似"经过对 XX 的权衡考虑，本 repo 在 YY（具体文件/函数）采用/实现了 ZZ"；
+   - 若原文本身引用了 `docs/NMPC.md` 等未被删除文档的章节号（如"6.8 节"），可以保留，因为这些引用依然有效，不属于悬空链接；
+   - 若某个表格列（如"涉及 Milestone"）整列都是编号性质的元信息，直接删除该列，不要留空占位；
+   - 检索中若发现"模糊化改写的范围边界"里排除的独立领域设计文档（如 `docs/NMPC.md`）也大量引用了已删除编号，不展开重写，只记录规模与位置留给第 8 步的完成报告。
+8. 汇总本次实际删除的文件/目录清单、（如有）创建的备份 tag 名称、第 7 步已模糊化改写的文件清单，以及范围之外未处理的大型文档规模提示，作为完成报告呈现给人工。
 
 ## 完成标准
 
-`docs/milestones.md` 已重置为空骨架且不再包含任何具体 Milestone 记录；`docs/milestones/` 下不再存在任何 `milestone-*/`/`phases/` 目录；`docs/quality-audits/` 已不存在；已经完整报告本次删除清单与发现的悬空引用，且全过程严格发生在人工回复"确认清空全部历史"之后。
+`docs/milestones.md` 已重置为空骨架且不再包含任何具体 Milestone 记录；`docs/milestones/` 下不再存在任何 `milestone-*/`/`phases/` 目录；`docs/quality-audits/` 已不存在；"模糊化改写的范围边界"约定的核心治理文档集合内已不再包含悬空的 Milestone/audit 编号引用；已经完整报告本次删除清单、改写清单与范围之外未处理的大型文档提示，且全过程严格发生在人工回复"确认清空全部历史"之后。

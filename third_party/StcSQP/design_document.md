@@ -2,7 +2,7 @@
 
 **设计哲学**：SQP 引擎必须是**纯粹的数值优化器**，对物理世界"一无所知"。它只认识固定维度的矩阵 $A, B, C, d$ 和梯度 $q, r$。所有业务逻辑（障碍物筛选、车辆几何、地图语义）通过**通用参数向量 `p`** 注入，由外部业务层负责。
 
-> **Milestone 018 评估说明**：本文档第 3.4/3.5/3.6 节及以下多处以虚函数多态 / `clone()` 描述 `Constraint`/`CostTerm` 接口，这是当前代码的现状。Milestone 018 曾评估将其迁移到 closed-set `std::variant` 的去虚拟化方案，但 `third_party/StcSQP/bench/bench_performance_profiling.cpp` 的 Release 端到端 benchmark 未观测到可解释的收益；最终结论为**不合并**，已将相关实验代码从工作树移除，保留本文档描述的虚函数基线。评估详情见主仓库 `docs/milestones/milestone-018/review-log.md`，回退动作详见 `docs/quality-audits/audit-002/review-log.md`。
+> **`Constraint`/`CostTerm` 去虚拟化评估说明**：本文档第 3.4/3.5/3.6 节及以下多处以虚函数多态 / `clone()` 描述 `Constraint`/`CostTerm` 接口，这是当前代码的现状。曾评估将其迁移到 closed-set `std::variant` 的去虚拟化方案，但 `third_party/StcSQP/bench/bench_performance_profiling.cpp` 的 Release 端到端 benchmark 未观测到可解释的收益；最终结论为**不合并**，已将相关实验代码从工作树移除，保留本文档描述的虚函数基线。评估详情见主仓库 `docs/interfaces.md`/`docs/known-limitations.md` 对应记录。
 
 ---
 
@@ -610,7 +610,7 @@ private:
 } // namespace stc_SQP
 ```
 
-**热启动说明（Milestone 017）**：
+**热启动说明**：
 - `setWarmStart()` 将传入的 `QPSolution`（含 `x`/`u`/`s`）写入 HPIPM 内部 `qp_sol`；
 - `solve()` 在每次调用入口先重置 `warm_start` 标志为 0，仅在缓存有效且维度匹配时开启为 1，避免 stale 标志污染；
 - 求解成功后用本次解自动更新缓存，求解失败或不可行时强制清空缓存；

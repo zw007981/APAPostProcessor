@@ -1,14 +1,12 @@
+.VSCodeCounter/
 Testing/
+__pycache__/
 build/
 build_asan/
-__pycache__/
-.VSCodeCounter/
-log/
-src/generated/
 build_debug/
-
-docs/
+log/
 milestones/
 quality-audits/
+src/generated/
 
 .favorites.json
