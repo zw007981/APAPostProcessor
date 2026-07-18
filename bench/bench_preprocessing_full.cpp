@@ -1,10 +1,4 @@
-// 预处理管线统一性能基准：按 Milestone 005→006→007→008→009→010 顺序，
-// 依次测量各子阶段耗时，最后测量端到端总耗时。
-// 所有测试统一使用 data/config.json 指向的 data3.json 真实数据集，
-// 每个用例重复 4 次取均值，不再区分长短场景。
-//
-// 预计算上下文在首次初始化时跑通完整管线一次以构建各阶段的输入数据，
-// 后续各 benchmark 仅对目标阶段重新计时，上游输入均复用预计算结果。
+// 预处理管线统一性能基准
 
 #include <benchmark/benchmark.h>
 
@@ -208,7 +202,7 @@ void ApplyStandardArgs(benchmark::internal::Benchmark* b) {
 }
 
 // ============================================================
-// Benchmark 1: B 样条分段平滑 (Milestone 005)
+// Benchmark 1: B 样条分段平滑
 // 测量 BSplineSmoother::smooth() 所有机动段的总耗时。
 // ============================================================
 static void BM_Stage1_BSplineSmoother(benchmark::State& state) {
@@ -258,7 +252,7 @@ static void BM_Stage1_BSplineSmoother(benchmark::State& state) {
 BENCHMARK(BM_Stage1_BSplineSmoother)->Apply(ApplyStandardArgs);
 
 // ============================================================
-// Benchmark 2: 纵向速度规划 (Milestone 006)
+// Benchmark 2: 纵向速度规划
 // 测量 SpeedProfilePlanner::plan() 所有机动段的总耗时。
 // 输入由预计算的 BSplineSmoother 结果构建，不计入计时。
 // ============================================================
@@ -296,7 +290,7 @@ static void BM_Stage2_SpeedProfilePlanner(benchmark::State& state) {
 BENCHMARK(BM_Stage2_SpeedProfilePlanner)->Apply(ApplyStandardArgs);
 
 // ============================================================
-// Benchmark 3: 微分平坦状态补全 (Milestone 007)
+// Benchmark 3: 微分平坦状态补全
 // 测量 DifferentialFlatnessSolver::solve() 所有机动段的总耗时。
 // ============================================================
 static void BM_Stage3_DifferentialFlatness(benchmark::State& state) {
@@ -332,7 +326,7 @@ static void BM_Stage3_DifferentialFlatness(benchmark::State& state) {
 BENCHMARK(BM_Stage3_DifferentialFlatness)->Apply(ApplyStandardArgs);
 
 // ============================================================
-// Benchmark 4: 自适应重采样与维数固化 (Milestone 008)
+// Benchmark 4: 自适应重采样与维数固化
 // 测量 AdaptiveResampler::resample() 总耗时。
 // ============================================================
 static void BM_Stage4_AdaptiveResampler(benchmark::State& state) {
@@ -360,7 +354,7 @@ static void BM_Stage4_AdaptiveResampler(benchmark::State& state) {
 BENCHMARK(BM_Stage4_AdaptiveResampler)->Apply(ApplyStandardArgs);
 
 // ============================================================
-// Benchmark 5: 静态安全走廊构建 (Milestone 009)
+// Benchmark 5: 静态安全走廊构建
 // 测量 StaticCorridorBuilder::build() 总耗时。
 // ============================================================
 static void BM_Stage5_StaticCorridor(benchmark::State& state) {
@@ -383,7 +377,7 @@ static void BM_Stage5_StaticCorridor(benchmark::State& state) {
 BENCHMARK(BM_Stage5_StaticCorridor)->Apply(ApplyStandardArgs);
 
 // ============================================================
-// Benchmark 6: 预处理管线端到端 (Milestone 010)
+// Benchmark 6: 预处理管线端到端
 // 测量 PreprocessingPipeline::run() 总耗时，并记录各阶段耗时分解。
 // ============================================================
 static void BM_FullPipeline(benchmark::State& state) {

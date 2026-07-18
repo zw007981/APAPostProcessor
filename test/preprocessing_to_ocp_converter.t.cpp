@@ -490,8 +490,8 @@ TEST(PreprocessingToOcpConverterTest, TruncatesStaticCorridorToTotalSteps) {
 
     EXPECT_EQ(conv.static_corridor_C.rows(), constraints_per_point * n_steps);
     EXPECT_EQ(conv.static_corridor_d.size(), constraints_per_point * n_steps);
-    // 截断后的 C/d 应是原矩阵的前若干行；状态增广（Milestone 023，
-    // BicycleModelJerk）后 TruncateCorridor 会把列数从 5 补齐到 7（新增 a、
+    // 截断后的 C/d 应是原矩阵的前若干行；状态增广
+    // 后 TruncateCorridor 会把列数从 5 补齐到 7（新增 a、
     // ddelta 两列全零系数，走廊约束与之无关，见 TruncateCorridor 实现注释），
     // 因此这里只比较原始 5 列，新增列已由 padding 语义保证为 0，无需重复验证。
     const int src_cols = static_cast<int>(pipe_result.c_matrix.cols());

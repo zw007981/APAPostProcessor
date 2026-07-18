@@ -17,7 +17,7 @@
 namespace apa_post_processor {
 namespace {
 
-// 典型车辆参数：与 NMPC / Milestone 008 测试保持一致。
+// 典型车辆参数
 VehicleParams MakeVehicleParams() {
     return VehicleParams(/*length=*/4.3, /*width=*/1.8, /*wheelbase=*/2.7,
                          /*max_steer_angle=*/0.6, /*rear_overhang=*/0.8,
@@ -202,11 +202,7 @@ TEST(StaticCorridorBuilderTest, NumericalStabilityAtExtremeDistances) {
         }
     }
     // 极近场景：车辆后轴放在使第一个外圆圆心刚好侵入障碍物内部的位置。
-    // 此时 center 0 的 d_ref < R + soft_margin；Milestone 023
-    // 引入自洽性修正后， 约束在 Z = Z_ref 处的 slack 被钳制为恰好
-    // 0（而非负值）——这是有意为之的
-    // 行为变更：保证参考点自身永远满足其对应的静态舒适约束，避免 HPIPM 在
-    // 第 0 次 SQP 迭代因 Warm Start 自身违反约束而直接判定不可行。
+    // 此时 center 0 的 d_ref < R + soft_margin
     {
         const double local_x = local_centers.front().x();
         // 让 center 0 的圆心到障碍物 (0,0) 的 ESDF 距离约为 R + soft_margin -

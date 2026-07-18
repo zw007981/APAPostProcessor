@@ -136,7 +136,7 @@ struct HPIPMQPSolver::Impl {
     // HPIPM 软约束 reverse map（未软化位置为 -1）
     std::vector<int> idxs_rev;
     // ====================================================
-    // 跨迭代热启动缓存（Milestone 017）
+    // 跨迭代热启动缓存
     // ====================================================
     // 上一次求解成功得到的 primal 解；由 setWarmStart() 写入或 solve() 成功后自动更新
     QPSolution warm_start_cache_;

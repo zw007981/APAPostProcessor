@@ -498,8 +498,7 @@ TEST(PreprocessingPipelineTest, PipelineOutputFeedsNmpcSolverEndToEnd) {
     nmpc_config.max_iter = 50;
     nmpc_config.esdf_safety_margin = 0.0;
     nmpc_config.esdf_penalty_weight = 100.0;
-    // 传入静态走廊系数以验证字段接线与约束注入（Milestone 012 已完成静态走廊
-    // 在 NmpcSolver::optimize() 中的注入；此处验证结构兼容性与求解不崩溃）。
+    // 传入静态走廊系数以验证字段接线与约束注入
     nmpc_config.static_corridor_C = pipe_result.c_matrix;
     nmpc_config.static_corridor_d = pipe_result.d_vector;
 
@@ -515,7 +514,7 @@ TEST(PreprocessingPipelineTest, PipelineOutputFeedsNmpcSolverEndToEnd) {
 }
 
 // ============================================================
-// 测试：Milestone 011 — 碰撞安全裕度统一性验证
+// 碰撞安全裕度统一性验证
 // ============================================================
 
 // PreprocessingPipelineConfig 默认值一致性：collision_safety_margin 与
@@ -654,12 +653,10 @@ TEST(PreprocessingPipelineTest,
 }
 
 // ============================================================
-// 测试：Milestone 013 — 调试数据透传（enable_debug_output）
+// 调试数据透传（enable_debug_output）
 // ============================================================
 
 // 默认配置下 enable_debug_output 应为 false，且结果中调试容器为空。
-// 触发原因：Milestone 013 新增调试开关，必须保证默认关闭不影响生产路径。
-// 预期行为：debug_maneuver_outputs 为空，且不额外分配内存。
 TEST(PreprocessingPipelineTest, DebugOutputDisabledByDefault) {
     const PreprocessingPipelineConfig default_config;
     EXPECT_FALSE(default_config.enable_debug_output);
@@ -761,9 +758,6 @@ TEST(PreprocessingPipelineTest, DebugOutputClearedWhenDisabled) {
 
 // PreprocessingPipelineResult 应记录本次 run() 实际使用的关键参数与原始路径，
 // 供 Visualizer 侧的 slack_true / 隔离墙 / Subplot 1 原始轨迹对比使用。
-// 触发原因：Milestone 013 Round 1 评审要求可视化参数与管线实际参数保持一致。
-// 预期行为：original_z_ref 非空且与输入路径点数一致；hard/soft margin 与配置
-// 相同；outer_row_num_used 与构造管线时传入的 footprint 模型一致。
 TEST(PreprocessingPipelineTest, ResultRecordsOriginalPathAndMarginParams) {
     auto config = MakeConfigWithCorridor();
     config.collision_safety_margin = 0.08;

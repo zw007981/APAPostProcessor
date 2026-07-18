@@ -279,10 +279,7 @@ stc_SQP::StageSegment PreprocessingToOcpConverter::buildSegment(
     stc_SQP::Matrix Q = stc_SQP::Matrix::Zero(kNx, kNx);
     stc_SQP::Matrix R = stc_SQP::Matrix::Zero(kNu, kNu);
     stc_SQP::Vector x_ref = stc_SQP::Vector::Zero(kNx);
-    // 全程目标牵引代价（Milestone 023 六次重构新增，参考论文 Eq.(10) J1）：目标
-    // 位姿是整条路径的终点（常量，不随段/步变化），因此无论本段是否终端都先把
-    // x_ref(0..2) 设为该常量目标值；权重默认 0.0，未显式开启时对 x_ref 的赋值
-    // 不产生任何代价（Q 对应项仍为 0），不影响既有行为。
+    // 全程目标牵引代价
     const auto& global_target = pipe_result.z_ref.back();
     x_ref(0) = global_target.x;
     x_ref(1) = global_target.y;
@@ -313,7 +310,7 @@ stc_SQP::StageSegment PreprocessingToOcpConverter::buildSegment(
     // 对内部段与终端段统一生效，对应此前 R(0,0)/R(1,1) 恒定生效的位置。
     Q(5, 5) = config_.control_effort_accel_weight;
     Q(6, 6) = config_.control_effort_steer_rate_weight;
-    // J_smooth（Milestone 023 新增）：对新控制量 jerk、ddelta_dot 施加标准 R
+    // J_smooth：对新控制量 jerk、ddelta_dot 施加标准 R
     // 代价，等价于惩罚 (a_{k+1}-a_k)^2 类跨 stage 差分——这是 NMPC 求解本身
     // 真正具备"顺滑消融冗余换挡"压力的核心机制，详见 docs/NMPC.md 6.6 节。
     R(0, 0) = config_.smoothing_jerk_weight;
@@ -367,9 +364,8 @@ void PreprocessingToOcpConverter::TruncateCorridor(
     const int truncated_rows = constraints_per_point * total_steps;
     if (truncated_rows > 0) {
         // StaticCorridorBuilder 产出的 C_matrix 只有 5
-        // 列（x,y,theta,v,delta）， 状态增广（Milestone
-        // 023，BicycleModelJerk）后 OCP 状态维度为 7，需要 补齐 2
-        // 列全零系数（走廊约束天然与新增的 a、ddelta 状态无关）。
+        // 列（x,y,theta,v,delta）， 状态增广后 OCP 状态维度为 7，
+        // 需要补齐2列全零系数（走廊约束天然与新增的 a、ddelta 状态无关）。
         const int src_cols = static_cast<int>(pipe_result.c_matrix.cols());
         constexpr int kAugmentedNx = 7;
         stc_SQP::Matrix truncated =

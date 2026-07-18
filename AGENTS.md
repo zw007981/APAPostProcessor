@@ -39,6 +39,8 @@
 
 **规模化（可选，多数项目不需要）**：如果 Milestone 数量随项目多年演进积累到几十上百个、`docs/milestones.md` 变得难以阅读，人工可以在自然的阶段边界（如"主力开发转维护"）显式触发 [.agents/prompts/milestone-archive.md](.agents/prompts/milestone-archive.md)。该流程只读起草阶段小结（`docs/milestones/phases/*.md`），**不移动/删除任何原始 Milestone 目录**，且必须经人工校对确认后才正式生效。规模有限的项目不需要用到这个能力。
 
+**彻底清空历史（罕见，且不可逆，务必谨慎）**：如果需要让仓库回到"从未开发过任何 Milestone"的绝对干净状态（如推翻重来、更换用途），人工可以显式触发 [.agents/prompts/reset-development-history.md](.agents/prompts/reset-development-history.md)。该流程会**永久删除** `docs/milestones/`、`docs/quality-audits/` 下的全部历史记录并把 `docs/milestones.md` 重置为空骨架，只能由人工显式发起，且必须回复原文"确认清空全部历史"后才会真正执行删除；Agent 不得自行判断"该清空了"而主动发起。
+
 ## 目录 → 规则映射表
 
 | 修改路径 | 必读规则 | 说明 |

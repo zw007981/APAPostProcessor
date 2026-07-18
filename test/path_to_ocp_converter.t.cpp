@@ -328,11 +328,6 @@ TEST(PathToOcpConverterTest, GenerateInitialGuessRejectsDtArray) {
 // 终端机动段则对x/y/theta/v/delta全部施加跟踪权重且x_ref等于本段末端状态。
 // 因为这是删除占位跟踪代价后的核心行为变更，必须有单测直接验证权重矩阵本身，
 // 而不能只依赖间接的状态断言。
-// Milestone 023 六次重构后默认会对内部段额外施加全程目标牵引代价
-// （global_target_position_weight/global_target_heading_weight 默认 1e-3，
-// 详见 docs/NMPC.md 6.10 节），因此本测试显式将其关闭为 0，
-// 只验证"关闭全程目标牵引时"内部段权重结构本身，全程目标牵引的生效验证见
-// 下方 BuildSegmentAppliesGlobalTargetPullToInteriorSegment。
 TEST(PathToOcpConverterTest,
      BuildSegmentUsesInteriorWeightsForNonTerminalSegment) {
     const auto path = MakeStraightLineSwitchbackPath();
@@ -367,11 +362,7 @@ TEST(PathToOcpConverterTest,
     EXPECT_GT(cost->R()(1, 1), 0.0);
 }
 
-// 测试全程目标牵引代价（Milestone 023 六次重构新增，参考论文 Eq.(10) J1）：
-// 开启 global_target_position_weight/global_target_heading_weight 后，即使是
-// 非终端段（内部机动段），x/y/theta 也应对 global_target_x_ref 施加二次跟踪
-// 代价（而非像上一测试那样为 0），且 x_ref 应等于传入的常量目标值，与本段/
-// 本步的局部参考轨迹无关。
+// 测试全程目标牵引代价
 TEST(PathToOcpConverterTest,
      BuildSegmentAppliesGlobalTargetPullToInteriorSegment) {
     const auto path = MakeStraightLineSwitchbackPath();

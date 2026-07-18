@@ -45,13 +45,7 @@ ESDFMap MakeEmptyEsdfMap() {
 
 }  // namespace
 
-// 端到端集成测试（合成场景）：验证NmpcSolver在车辆运动学可行、无障碍物的直线换挡场景下
-// 能产出有效解（Milestone 023 四次重构后位置信赖域改为软代价跟踪，简单场景下
-// SQP 不一定在严格 KKT
-// 容差内收敛，但最后一次迭代解仍应有限且终点大致正确），且优化结果
-// 与M2构造的初始猜测在结构上一致（步数/换挡边界）。
-// 之所以用合成场景而非data/test.json，是因为该回归样例的机动段2要求前轮转角约1.4rad
-// （见仓库记忆：该样例的曲率需求远超车辆max_steer_angle，属于运动学不可行的极端测试数据，
+// 端到端集成测试（合成场景）
 // 只适合验证Path/Maneuver解析逻辑，不适合作为NMPC求解收敛性的验证场景）。
 TEST(NmpcSolverTest, OptimizesFeasibleStraightLineSwitchbackScenario) {
     const auto path = MakeStraightLineSwitchbackPath();
@@ -66,10 +60,6 @@ TEST(NmpcSolverTest, OptimizesFeasibleStraightLineSwitchbackScenario) {
     NmpcSolver::Result result;
     ASSERT_NO_THROW(result = solver.optimize(path, esdf_map));
 
-    // Milestone 023 四次重构：位置信赖域从硬约束改为软代价跟踪（详见
-    // docs/NMPC.md 6.8 节）后，SQP 在严格 KKT 容差内不一定对这类简单合成场景
-    // 收敛，但最后一次迭代解本身完全合格（终点精度、状态有限性均满足），因此
-    // 不再要求 result.converged 严格为 true，转而直接检查真正关心的质量指标。
     ASSERT_FALSE(result.trajectory.x.empty());
     for (const auto& state : result.trajectory.x) {
         EXPECT_TRUE(state.allFinite());
@@ -122,11 +112,6 @@ TEST(NmpcSolverTest, ToPathReconstructsManeuverStructureFromResult) {
     EXPECT_NEAR(maneuvers[0].points.back().y, maneuvers[1].points.front().y,
                 1e-9);
 
-    // 验证Milestone 002新增派生量回填行为：
-    // - 每点都应回填v/delta状态量；
-    // - 除每段最后一个点外，都应回填a/delta_dot控制量；
-    // - 每段最后一个点没有对应控制量，因此hasA()/hasDeltaDot()为false；
-    // - 所有点都未经过Path曲率估计，因此hasKappa()为false。
     int global_x = 0;
     int global_u = 0;
     for (std::size_t seg = 0; seg < maneuvers.size(); ++seg) {
@@ -182,11 +167,9 @@ TEST(NmpcSolverTest, MismatchedStaticCorridorDimensionsNoLongerThrows) {
 }
 
 // ============================================================
-// 测试：Milestone 012 — ThetaTrustRegionConstraint 单元测试
+// ThetaTrustRegionConstraint 单元测试
 // ============================================================
 
-// Milestone 023 五次重构：delta_theta_max 语义变为软代价死区宽度，0 表示无死区
-// （合法取值，此时软约束等价于纯二次跟踪代价），只有负值/非有限值才应抛异常。
 TEST(ThetaTrustRegionConstraintTest, ConstructorThrowsOnInvalidDelta) {
     EXPECT_NO_THROW(ThetaTrustRegionConstraint(0.0));
     EXPECT_THROW(ThetaTrustRegionConstraint(-0.1), std::invalid_argument);
@@ -257,7 +240,7 @@ TEST(ThetaTrustRegionConstraintTest, JacobianOnlyAffectsTheta) {
 }
 
 // ============================================================
-// 测试：Milestone 012 — StaticCorridorLinearConstraint 单元测试
+// StaticCorridorLinearConstraint 单元测试
 // ============================================================
 
 // 构造时非法参数应抛异常
@@ -303,15 +286,10 @@ TEST(StaticCorridorLinearConstraintTest, EvaluateComputesCorrectSlack) {
 }
 
 // ============================================================
-// 测试：Milestone 012 — NmpcSolver 信赖域集成测试
+// NmpcSolver 信赖域集成测试
 // ============================================================
 
 // 启用信赖域约束的 NMPC 求解器应在默认场景下产出有效解。
-// 触发原因：验证 ThetaTrustRegionConstraint 与现有 ESDF
-// 软代价共存时求解不崩溃。Milestone 023 四次重构后位置信赖域改为软代价跟踪
-// （见 docs/NMPC.md 6.8 节），简单直线换挡场景下 SQP 不一定能在严格 KKT 容差
-// 内形式上收敛，但最后一次迭代解仍应有限。预期行为：优化后轨迹非空且所有状态
-// 均有限，不要求严格 converged=true。
 TEST(NmpcSolverTest, OptimizesWithTrustRegionEnabled) {
     const auto path = MakeStraightLineSwitchbackPath();
     const auto vehicle_params = MakeVehicleParams();
@@ -324,9 +302,6 @@ TEST(NmpcSolverTest, OptimizesWithTrustRegionEnabled) {
     NmpcSolver solver(vehicle_params, footprint_model, config);
     NmpcSolver::Result result;
     ASSERT_NO_THROW(result = solver.optimize(path, esdf_map));
-
-    // Milestone 023 四次重构后位置信赖域改为软代价跟踪，不再要求严格收敛，只需
-    // 验证最后一次迭代解本身有效。
     ASSERT_FALSE(result.trajectory.x.empty());
     for (const auto& state : result.trajectory.x) {
         EXPECT_TRUE(state.allFinite());
@@ -334,8 +309,7 @@ TEST(NmpcSolverTest, OptimizesWithTrustRegionEnabled) {
 }
 
 // 验证默认 NMPCConfig 在启用 Armijo 线搜索后不破坏既有场景。
-// 预期行为：直行换挡场景在线搜索模式下仍能产出有效轨迹（Milestone 023
-// 四次重构后 位置信赖域改为软代价跟踪，不再要求严格收敛）。
+// 预期行为：直行换挡场景在线搜索模式下仍能产出有效轨迹
 TEST(NmpcSolverTest, DefaultConfigWithLineSearchStillConverges) {
     const auto path = MakeStraightLineSwitchbackPath();
     const auto vehicle_params = MakeVehicleParams();
@@ -349,18 +323,15 @@ TEST(NmpcSolverTest, DefaultConfigWithLineSearchStillConverges) {
     NmpcSolver solver(vehicle_params, footprint_model, config);
     NmpcSolver::Result result;
     ASSERT_NO_THROW(result = solver.optimize(path, esdf_map));
-
-    // Milestone 023 四次重构后位置信赖域改为软代价跟踪，不再要求严格收敛。
     ASSERT_FALSE(result.trajectory.x.empty());
 }
 
 // ============================================================
-// 测试：Milestone 019 — NmpcSolver OCP + init_guess 扩展点
+// NmpcSolver OCP + init_guess 扩展点
 // ============================================================
 
 // 验证新扩展点 optimize(ocp, init_guess, esdf_map) 与 Path
-// 入口在相同输入下等价。 这是Milestone
-// 019的核心交付：预处理管线产物可通过预装配OCP/初始猜测接入NmpcSolver。
+// 入口在相同输入下等价
 TEST(NmpcSolverTest, OptimizeWithPreassembledOcpMatchesPathEntry) {
     const auto path = MakeStraightLineSwitchbackPath();
     const auto vehicle_params = MakeVehicleParams();
@@ -391,7 +362,7 @@ TEST(NmpcSolverTest, OptimizeWithPreassembledOcpMatchesPathEntry) {
 }
 
 // ============================================================
-// 测试：Milestone 012 Round 2 — 补充 Sad Path 覆盖
+// 补充 Sad Path 覆盖
 // ============================================================
 
 // ThetaTrustRegionConstraint 在 p 维度不足时应抛异常。

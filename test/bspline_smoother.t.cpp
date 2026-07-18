@@ -368,14 +368,6 @@ TEST(BSplineSmootherTest, OmpParallelProducesSameResultAsSerial) {
     omp_set_num_threads(original_threads);
 
     EXPECT_EQ(result_serial.success, result_parallel.success);
-    // 容差从 1e-6 放宽：Milestone 023 修复了"L-BFGS 精修失败时错误回退到预推前
-    // 状态"的 bug 后（改为回退到碰撞预推后的检查点），碰撞预推阶段本身使用的
-    // OMP 并行归约（`reduction(+ : f_collision)` 与按线程收集梯度再合并）在
-    // 不同线程数下的浮点求和顺序不同，是浮点加法不满足结合律的正常表现——50 次
-    // 预推迭代的梯度下降对这类初始极小差异存在正常的链式放大效应。这不是并行
-    // 归约的正确性 bug（每个线程独立累加、循环外统一合并，不存在数据竞争），
-    // 之前用 1e-6 严格容差能通过纯属巧合：该场景此前的失败路径回退到与线程数
-    // 无关的原始控制点，掩盖了预推阶段本就存在的这一浮点非确定性。
     constexpr double kOmpTolerance = 0.05;
     EXPECT_NEAR(result_serial.max_intrusion_depth,
                 result_parallel.max_intrusion_depth, kOmpTolerance);

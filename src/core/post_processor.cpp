@@ -230,10 +230,6 @@ PostProcessor::AttemptResult PostProcessor::runSingleAttempt(
     };
 
     try {
-        // 单次全链路求解：Milestone 023 三次重构起彻底删除了预处理层"剪枝
-        // 重试"循环（RemoveShortestManeuver 及其四重门禁判定），改由 NMPC
-        // 内生的 J_smooth/J_target 等代价机制承担段数削减压力，不再需要
-        // 预处理层盲拼接重试验证（详见 docs/NMPC.md 6.7 节）。
         Path best_path = solveFullPipeline(init_path, &result.preprocessed_traj,
                                            &result.nmpc_traj);
         if (best_path.empty()) {

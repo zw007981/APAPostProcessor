@@ -91,7 +91,7 @@ PreprocessingPipelineResult PreprocessingPipeline::run(
         const int dir_sign = DirectionToSign(maneuver.direction);
 
         auto seg_start = std::chrono::steady_clock::now();
-        // Milestone 005: B 样条平滑
+        // B 样条平滑
         auto smooth_result = bspline_smoother_.smooth(maneuver);
         auto seg_bspline_end = std::chrono::steady_clock::now();
         total_bspline_ms += std::chrono::duration<double, std::milli>(
@@ -130,7 +130,7 @@ PreprocessingPipelineResult PreprocessingPipeline::run(
         // 为每点生成完整的方向符号数组（单段内所有点方向一致）
         std::vector<int> full_direction_signs(speed_input.s.size(), dir_sign);
 
-        // Milestone 006: 速度规划
+        // 速度规划
         auto speed_result =
             speed_planner_.plan(speed_input, vehicle_params_,
                                 full_direction_signs, {}, seg_initial_v);
@@ -150,7 +150,7 @@ PreprocessingPipelineResult PreprocessingPipeline::run(
         auto diff_input =
             buildDifferentialFlatnessInput(smooth_result, speed_result);
 
-        // Milestone 007: 微分平坦补全
+        // 微分平坦补全
         auto diff_result = diff_flat_solver_.solve(diff_input, vehicle_params_);
         auto seg_diff_end = std::chrono::steady_clock::now();
         total_diff_flat_ms += std::chrono::duration<double, std::milli>(
