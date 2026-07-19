@@ -128,6 +128,7 @@
 | 2026-07-09 | `PreprocessingToOcpConverter` | 按 `z_ref` 速度符号将单段 OCP 拆分为多段 `MultiStageOCP`；每段独立生成 `dt_array`、stage_params、终端跟踪代价与单向速度箱约束；静态走廊系数按总 OCP 步数截断 | 解决多 maneuver 真实数据上 NMPC 首迭代 QP 不可行问题，允许 Warm Start 在保持方向一致的各段内满足箱约束 |
 | 2026-07-09 | `PostProcessor` / `AdaptiveRetryConfig` | 新增 `PostProcessor` 完整链路封装与 `AdaptiveRetryConfig`；默认参数 NMPC 完全失败时，临时拉大 `AdaptiveResamplerConfig::nominal_step_s`（默认 ×2、×3）重试，并在最后一次重试关闭静态走廊作为兜底；所有重试只修改局部配置副本 | 满足用户需求"预处理间隔拉长重试、用完必须恢复默认值"，并保证调用方默认配置不被污染；解决 data6.json 静态走廊与 Warm Start 首迭代不可行问题 |
 | 2026-07-15 | `NmpcSolverConfig::esdf_penalty_weight` | 语义从"与 `static_corridor_C/d` 互斥的替代机制"改为"与静态走廊协同的梯度引导机制"——`NmpcSolver::solveOcp()` 内部触发条件从 `!use_static_corridor && esdf_penalty_weight > 0` 放宽为 `esdf_penalty_weight > 0`（不再要求走廊未启用）。默认值仍为 0（关闭），需按数据集显式调参开启 | 用户明确需求：静态走廊硬约束保证"每次 SQP 迭代无论是否收敛都安全（不穿模）"，ESDF 直接代价提供真实非线性梯度以加速/改善收敛，两者互不冲突（代价只影响目标函数，不影响可行域），不应互斥 |
+| 2026-07-19 | `src/core/ALM/`（新模块，规划中） | 新增"待实现：ALM 模块核心接口"一节，登记 `BlockTridiagonalSolver`/`MincoTrajectory`/`BicycleKinematicsExtractor`/`AlmManeuverSegmenter`/`AlmEsdfPenalty`/`AlmPreprocessor`/`AlmSolver` 等规划中接口的目标头文件路径与设计意图，对应 [docs/ALM.md](ALM.md) 与 [docs/milestones.md](milestones.md) `milestone-001`~`milestone-008` | 与 [docs/architecture.md](architecture.md) 3.7 节同步：ALM 是与 NMPC 并列的第二条后处理算法路径，尚未创建任何源文件，先落地接口规划供 Milestone 拆分与后续 Dev Agent 实现参考 |
 | 2026-07-15 | `NmpcSolver::solveOcp` | `ng_max` 计算从手工按约束类型硬编码行数累加改为直接调用 `stc_SQP::strategy_internal::computeOcpNgMax(mutable_ocp)`，对实际已装配的各段约束求和取最大值 | 手工累加公式曾遗漏"某类终端约束实际是否被注入"的条件判断（`terminal_position_error_threshold`/`terminal_heading_error_threshold_deg` <= 0 时 `TerminalPoseBoxConstraint` 不再注入，但原公式仍无条件加 6 行），导致 `qp_data.ng_max` 与 HPIPM 构造时的 `ng` 不一致，触发 `QPSolverStatus::INVALID_ARGUMENT`（诊断 data6.json 时复现）；改为动态求和后消除整类潜在的维度不一致 bug |
 | 2026-07-15 | `StaticCorridorBuilder::computeDScalar` | 内部实现新增"自洽性修正"：当参考点 `Z_ref` 自身已违反安全边界（`dist_ref < radius + margin`，多发生于 `BSplineSmoother` 碰撞预推未能完全消除侵入的极端困难场景）时，为该约束行补偿等量违反深度 `violation = max(0, radius + margin - dist_ref)`，使约束在 `Z = Z_ref` 处恰好取等号而非直接不可行；`dist_ref >= radius + margin` 时 `violation = 0`，与原公式完全一致，不影响既有已验证场景 | 原公式在参考点已侵入时会产出连 Warm Start 自身都无法满足的硬约束，导致 HPIPM 在第 0 次 SQP 迭代即失败；修正后保证"线性化安全裕度不允许比参考点当前状态更差"，即使无法达到理想安全裕度也不会让 HPIPM 因起点不可行而直接拒绝求解 |
 | 2026-07-15 | `PostProcessor::runSingleAttempt` | 内部实现修复：NMPC 求解失败或碰撞超标回退到预处理轨迹的两条分支，此前直接返回未经拓扑清洗的 `Path`，现统一改为调用与 NMPC 成功路径共享的 `applyTopologyCleanup` 辅助 lambda | 修复回归 bug：预处理轨迹中的换挡/起始转向零速补丁段会被 `Path::finalize()` 按方向变化拆分成比原始路径更多的 maneuver（实测 data1.json 曾回退产出 12 段，超过初始 10 段），直接违背"机动段数不劣化"的验收要求 |
@@ -181,5 +182,26 @@
 | ~~新增"预处理管线输出 → OCP"转换路径，消费非均匀 `delta_t`~~ | ~~新增类型（具体命名由 Dev Agent 确定），`stc_SQP::StageSegment::dt_array`~~ | ✅ 已完成：新增 `PreprocessingToOcpConverter`，把 `PreprocessingPipelineResult` 的 `z_ref`/`delta_t`/`c_matrix`/`d_vector` 直接作为 Warm Start，通过 `StageSegment::dt_array` 接入非均匀步长 |
 | ~~`main.cpp`/`NmpcSolver` 的"NMPC 失败回退预处理轨迹"三/四态判定~~ | ~~`src/main.cpp`、`NmpcSolver`~~ | ✅ 已完成：`main.cpp` 中实现"NMPC 收敛"/"NMPC 未收敛但仍返回最新迭代"/"回退到预处理轨迹"/"整体失败"四态，日志与 `OptimizeResponse.message` 明确区分 |
 | ~~自适应间隔重试机制（"拉长间隔重试、用完必须恢复默认值"）~~ | ~~`PreprocessingPipelineConfig`/`BSplineSmootherConfig::dense_step_dist` 或 `AdaptiveResamplerConfig::nominal_step_s`，新增 `PostProcessor`/`AdaptiveRetryConfig`~~ | ✅ 已完成：实测选定 `AdaptiveResamplerConfig::nominal_step_s` 作为重试调节对象（`dense_step_dist` 放大易触发 `dt_array` 非正异常）；`PostProcessor::optimize()` 内部使用局部配置副本，调用方默认配置保持不变；单元测试 `PostProcessorTest.DoesNotLeakConfigAfterRetry` 直接验证 |
+
+## 待实现：ALM 模块核心接口（新模块，milestone-001~008 规划）
+
+> 与 [docs/architecture.md](architecture.md) 3.7 节对应：`src/core/ALM/` 是与 `src/core/NMPC/` 并列的第二条
+> 后处理算法路径，目前**尚未创建任何源文件**，下表登记的是 Milestone 拆分阶段的接口设计意图与目标头文件路径，
+> **状态一律为"规划中"，不是"已冻结"**——本表不受 [.agents/rules.md](../.agents/rules.md)
+> "接口一经冻结禁止擅自修改签名"红线约束，Dev Agent 在对应 Milestone 实现时可按实际情况调整具体方法签名，
+> 但类名与核心职责应与本表保持一致（如需变更，先在此处登记原因）。每个 Milestone 完成并通过 Review 收敛后，
+> 应将对应行从本表移除并正式登记进上方"已冻结接口清单"，同步补充"变更记录"（比照既有"待办"表格的 ✅ 划线惯例）。
+
+| 接口 | 设计意图（一句话） | 计划头文件 | 对应 ALM.md 章节 | 对应 Milestone |
+|---|---|---|---|---|
+| `BlockTridiagonalSolver` | 固定 6x6（$h=3$）块的块 Thomas 算法通用求解器，栈上分配、$O(M)$ 前向消元+回代，供 `MincoTrajectory` 装配 $K(T)c=b$ 时复用，替代 `Eigen::SparseMatrix`+`SparseLU` | `src/core/ALM/block_tridiagonal_solver.h` | 2.6.2 | milestone-001 |
+| `MincoTrajectory` | $\theta_i(t)/s_i(t)$ 多项式段表示；封装 $K(T)$ 装配（含局部归一化时间 $\tau=t/T_i$）、边界条件注入、系数 $c$ ↔ 中间控制点 $^w\sigma'$/时间 $T$ 转换、$\tau\leftrightarrow T$ 分段光滑双射及其导数、终点弧长 $s_f$ 的 $K(T)^{-T}$ 伴随梯度 | `src/core/ALM/minco_trajectory.h` | 1.2 | milestone-001 |
+| `BicycleKinematicsExtractor` | 从 `MincoTrajectory` 的 $\theta,s$ 各阶导数解析阿克曼状态/控制量 $v,a,\delta,\dot\delta$（含 $\epsilon_g$ 分母正则化，值与梯度一致处理）与防奇异二次形态约束惩罚 $\mathcal{C}_v/\mathcal{C}_a/\mathcal{C}_\delta/\mathcal{C}_{\dot\delta}$ 及各自解析梯度 | `src/core/ALM/bicycle_kinematics_extractor.h` | 2.2 / 2.3 | milestone-002 |
+| `AlmManeuverSegmenter` | 复用 `Path`/`Maneuver`，实现换挡打断（宏观段，$\dot s_k=0$ 硬边界识别）与空间等距降采样（微观段），产出初始 $M$ 段估计（$p_{w0}^m$/$s_m$/$\theta_m$/$\tau_m$） | `src/core/ALM/alm_maneuver_segmenter.h` | 2.1 | milestone-003 |
+| `AlmEsdfPenalty` | 复用 `ESDFMap`/`VehicleFootprintModel` 外圆集合，实现 `margin_safe`/`margin_comf` 双重松弛罚函数 $\mathcal{C}_{safe}/\mathcal{C}_{comf}$、混合代价 $\mathcal{I}_{obs}$ 与对 $x,y,\theta$ 的解析梯度反传 | `src/core/ALM/alm_esdf_penalty.h` | 2.4 | milestone-004 |
+| `AlmPreprocessor` | 两阶段优化流程的第一阶段：基于运动学/加速度/段时长平衡约束 + 逐段终点跟踪惩罚构建 $\mathcal{J}_{pre}$，松收敛阈值下把初值拉近前端路径 | `src/core/ALM/alm_preprocessor.h` | 1.2 / 2.1 | milestone-005 |
+| `AlmSolver` | 与 `NmpcSolver` 并列的求解器编排入口（类名已定案，与仓库命名惯例 `XxxSolver` 一致）：内层 L-BFGS 优化 $(^w\sigma',\tau,s_f)$（复用 `third_party/LBFGSpp`）+ 外层 PHR-ALM 乘子/惩罚权重更新、$\rho^0$ 自适应标定、位置/朝向双指标收敛判据，输出满足终点精度与无碰撞/无奇异要求的解析轨迹 | `src/core/ALM/alm_solver.h` | 1.4 / 2.5 | milestone-006 |
+| 机动融化拓扑修剪钩子 | 融化收敛后的 REV 段压平/PIVOT 保留判据，直接复用 `util::topology_cleaner` 两遍分类算法与判据结构（仅重新标定量纲/阈值），"绝不合并方向相反相邻段"红线与 NMPC 侧一致；具体挂载点（`AlmSolver` 内部方法 or 独立类）由 Dev Agent 在 milestone-007 实现时确定 | 待定（`src/core/ALM/` 下，具体文件名由 milestone-007 确定） | 2.6.3 | milestone-007 |
+| `PostProcessor` 接入 ALM 路径的扩展点 | 让已冻结的 `PostProcessor` 新增可选走 `AlmSolver` 的路径（与现有 NMPC 路径并列，非替换），具体方法签名/开关形式由 Dev Agent 在 milestone-008 实现时依据当时的 `PostProcessor` 实际接口确定，避免此处提前臆造签名与实际冻结接口冲突 | `src/core/post_processor.h`（已冻结文件，milestone-008 需在此基础上扩展并同步登记变更记录） | 全部 | milestone-008 |
 
 

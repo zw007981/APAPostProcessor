@@ -227,6 +227,52 @@ benchmark，与主仓库 `bench/bench_apa_post_processor` 是两套独立的压�
 `PreprocessingToOcpConverter`/`NmpcSolver` 类型，因此编译期依赖图中保留
 `nmpc --> main` 边。
 
+### 3.7 ALM/MINCO/PHR-ALM 优化领域模型（规划中，尚未实现）
+
+作为与 3.4 节 NMPC 并列的第二条后处理算法路径，`src/core/ALM/` 面向同一 APA 场景实现一套
+完全独立的时空轨迹优化方法：把车辆轨迹参数化在“运动状态空间”（朝向角 $\theta$、弧长 $s$）
+而非笛卡尔坐标下，用 MINCO 多项式降维 + PHR-ALM（Powell-Hestenes-Rockafellar 增广拉格朗日）
+外层精确收紧终点误差，彻底改造自浙江大学 FAST Lab 的通用差速机器人轨迹优化框架（arXiv:2409.07924），
+并针对本仓库的阿克曼自行车模型、齿轮挡位、Hybrid A* 前端重新推导。完整数学原理见
+[docs/ALM.md](ALM.md)（第一章为原论文理论框架，第二章为本仓库自行车模型下的 APA 重新推导），本节
+只做架构层面的领域模型概述。
+
+```mermaid
+flowchart LR
+    Path -->|AlmManeuverSegmenter| Init[初始 M 段估计 p_w0/s_m/theta_m/tau_m]
+    Init --> Preproc[AlmPreprocessor 粗优化 Jpre]
+    Preproc -->|MincoTrajectory 初值| Solver[AlmSolver 内层 L-BFGS]
+    ESDFMap -->|AlmEsdfPenalty| Solver
+    VehicleFootprintModel -->|AlmEsdfPenalty 外圆集合| Solver
+    Solver -->|BicycleKinematicsExtractor| Kinematics[v/a/delta/delta_dot 解析]
+    Solver -->|外层 lambda/rho 更新| Solver
+    Solver --> Melter[机动融化与拓扑修剪]
+    Melter -->|复用 TopologyCleaner| Result[优化后 Trajectory]
+```
+
+领域模型划分（与 3.4 节 NMPC 一一对照，体现两条算法路径职责边界一致但内部实现完全独立）：
+
+- `MincoTrajectory`：$\theta_i(t)/s_i(t)$ 多项式段表示，封装 $K(T)c=b$ 装配、块 Thomas 求解、
+  时间重参数化 $\tau \leftrightarrow T$ 双射以及终点弧长 $s_f$ 的伴随梯度（对应 [docs/ALM.md](ALM.md) 1.2 节）。
+- `BicycleKinematicsExtractor`：从 `MincoTrajectory` 的 $\theta,s$ 各阶导数解析阿克曼状态/控制量
+  （$v,a,\delta,\dot\delta$）与对应的防奇异物理约束惩罚（对应 2.2/2.3 节）。
+- `AlmManeuverSegmenter`：复用 `Path`/`Maneuver`，实现换挡打断（宏观段）与空间等距降采样（微观段），
+  产出初始 $M$ 段估计（对应 2.1 节）。
+- `AlmEsdfPenalty`：复用 `ESDFMap`/`VehicleFootprintModel` 外圆集合，实现 `margin_safe`/`margin_comf`
+  双重松弛罚函数与梯度反传（对应 2.4 节）。
+- `AlmPreprocessor`：两阶段优化流程的第一阶段，松收敛阈值下把初值拉近前端路径（对应 1.2/2.1 节
+  “两阶段优化流程”）。
+- `AlmSolver`：与 `NmpcSolver` 并列的求解器编排入口，内层 L-BFGS（复用 `third_party/LBFGSpp`，
+  参照 `BSplineSmoother` 的 `operator()(x, grad)` 手写解析梯度范式）+ 外层 PHR-ALM 乘子/惩罚权重
+  更新，输出满足终点精度与无碰撞/无奇异要求的解析轨迹（对应 1.4/2.5 节）。
+- 机动融化后的拓扑修剪直接复用既有 `util::topology_cleaner`（对应 2.6.3 节红线：“绝不合并方向
+  相反的相邻段”，与 NMPC 侧共享同一套判据）。
+
+该路径整体处于**规划阶段**，具体 Milestone 拆分见 [docs/milestones.md](milestones.md)（`milestone-001`
+至 `milestone-008`），核心接口的规划详见 [docs/interfaces.md](interfaces.md)“待实现：ALM 模块核心接口”一节。
+上图 `main.cpp` 以及第 4 节现有模块依赖图目前均不包含 `core/ALM` 分支，待 `milestone-008`
+接入 `PostProcessor` 后再同步更新。
+
 ## 4. 模块划分
 
 | 模块 | 路径 | 职责 |
@@ -237,6 +283,7 @@ benchmark，与主仓库 `bench/bench_apa_post_processor` 是两套独立的压�
 | 后处理算法核心 | `src/core/` | 承载具体后处理算法实现；`obb_inflator.h/.cpp` 当前为空文件，是规划中的 OBB（有向包围盒）膨胀算法模块，**尚未实现** |
 | NMPC 子模块 | `src/core/NMPC/` | `ApaEsdfMapAdapter`（ESDF 适配器）、`vehicle_circle_geometry`（圆心几何提取）、`PathToOcpConverter`（Path→OCP 转换）、`PreprocessingToOcpConverter`（预处理管线输出 → OCP + Warm Start，M020）、`NmpcSolver`（求解编排 + 机动段裁剪）、`ThetaTrustRegionConstraint`（信赖域约束，M012）、`StaticCorridorLinearConstraint`（静态走廊线性不等式约束，M012），基于 `third_party/StcSQP` 实现 |
 | 预处理管线 | `src/preprocessing/` | NMPC 预处理管线：分 5 个独立阶段类（`BSplineSmoother`/`SpeedProfilePlanner`/`DifferentialFlatnessSolver`/`AdaptiveResampler`/`StaticCorridorBuilder`）+ 1 个组装类（`PreprocessingPipeline`），对应 [docs/NMPC.md](NMPC.md) 第 3 节，把 Hybrid A* 粗糙路径转换为动力学平滑、拓扑安全的 Warm Start；各阶段均已落地 |
+| ALM 子模块 | `src/core/ALM/` | 与 `NMPC` 子模块并列的第二条后处理算法路径（规划中，尚未实现）：`MincoTrajectory`（多项式轨迹与 $K(T)$ 求解）、`BicycleKinematicsExtractor`（阿克曼状态解析）、`AlmManeuverSegmenter`（前端解析与分段）、`AlmEsdfPenalty`（双重安全惩罚）、`AlmPreprocessor`（预处理粗优化）、`AlmSolver`（PHR-ALM 主求解器），详见 3.7 节、[docs/ALM.md](ALM.md)、[docs/milestones.md](milestones.md) |
 | 场景组装 | `src/scene/` | `planning_scene.h/.cpp` 当前为空文件，规划中用于持有一次后处理任务的完整上下文（环境+车辆+路径），**尚未实现** |
 | 通用 SQP/OCP 引擎（第三方） | `third_party/StcSQP/` | vendored 的通用数值优化框架，对物理世界无感知，通过固定维度参数向量与业务层交互；按第三方依赖对待，不计入本仓库业务代码规范（该框架自身的编码风格由 `third_party/StcSQP/AGENTS.md`/`design_document.md` 治理）；3.5 节所述的一段内部工程优化是本仓库主动发起、对其内部实现的性能优化，改动需同步更新该框架自身文档 |
 | 测试 | `test/` | 单元测试，命名 `*.t.cpp` |
@@ -296,3 +343,4 @@ flowchart LR
 | 2026-07-09 | benchmark 排查确认预处理管线耗时大头在 `BSplineSmoother`（第 5 节"预处理管线"模块）：落地文档 5.5 节已设计但未落地的密集配点 OMP 并行化，并对 L-BFGS 收敛参数（`lbfgs_max_iterations`/`lbfgs_max_linesearch`）按调参-验证-回滚流程做安全范围内的收紧探索；纯内部实现优化，不改变 `BSplineSmoother`/`BSplineSmootherConfig` 对外签名 |
 | 2026-07-09 | 启动"NMPC 算法最终重构"系列：新增第 3.6 节（框架审查重构→预处理管线接入 NMPC→四数据集调参与自适应间隔重试→端到端验收收尾），弥合"预处理管线已完成但 `main.cpp`/`NmpcSolver` 从未真正消费其输出"的架构差距 |
 | 2026-07-09 | 完成 `src/core/NMPC/` 框架审查与解耦重构：`PathToOcpConverter` 拆分为 `computeSegmentProfiles()`/`generateInitialGuess()`/`buildOcp()`，`NmpcSolver` 新增 `optimize(MultiStageOCP, Trajectory, ESDFMap)` 扩展点；非均匀 `delta_t` 已预留 `SegmentProfile::dt_array`/`StageSegment::dt_array` 但未接入，留给后续接线 |
+| 2026-07-19 | 新增第二条后处理算法路径规划：3.7 节 ALM/MINCO/PHR-ALM 优化领域模型（与 3.4 节 NMPC 并列，彻底改造自 arXiv:2409.07924）；第 4 节模块划分表新增 `src/core/ALM/` 行；具体 Milestone 拆分见 [docs/milestones.md](milestones.md) `milestone-001`~`milestone-008`，接口规划见 [docs/interfaces.md](interfaces.md) |

@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""车辆圆分解可视化脚本。
 
+"""
+车辆圆分解可视化脚本
 演示 VehicleFootprintModel 中内圆（INNER）和外圆（OUTER）的几何覆盖效果。
-参数与 C++ 运行时实际配置保持同步：
-  - outer_row_num = 2（planning_scene.cpp:34-35 显式传入，非声明默认值 4）
   - 车辆尺寸与 data/*.json 中的实际参数一致
   - 额外圆（additional circles）仅在本脚本中用于可视化参考，C++ 求解器不使用
 """
@@ -28,7 +27,7 @@ class VehicleCircleDecomposition:
         # 注意：VehicleFootprintModel 声明默认 outer_row_num=4，
         # 但 planning_scene.cpp 构造时显式传入 outer_row_num=2
         self.inner_row_num = 2
-        self.outer_row_num = 4           # ← 实际运行时为 2
+        self.outer_row_num = 2           # ← 实际运行时为 2
 
         # 存储计算结果
         self.inner_circles: list[tuple[float, float, float, str]] = []
