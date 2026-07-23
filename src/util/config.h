@@ -4,15 +4,12 @@
 
 namespace apa_post_processor {
 // 后处理算法通用配置基类（纯数据容器）。
-// 派生类（NMPCConfig / IlqrSolverConfig 等）在此基础上追加各自专有参数。
-// 禁止拷贝，仅允许通过指针/引用传递，避免切片。
+// 派生类（NMPCConfig / AlmConfig 等）在此基础上追加各自专有参数。
+// 基类自身的拷贝/移动构造与赋值收缩为 protected：派生类的隐式拷贝/移动
+// 不受影响（可正常按值传递 NMPCConfig / AlmConfig），但从外部直接拷贝或
+// 移动基类对象在编译期即被禁止，杜绝按值切片。
 struct Config {
     virtual ~Config() = default;
-    // 允许拷贝（派生类拷贝时不会切片，基类直接拷贝的风险由调用方负责）
-    Config(const Config&) = default;
-    Config& operator=(const Config&) = default;
-    Config(Config&&) = default;
-    Config& operator=(Config&&) = default;
 
     // ============================================================
     // 第一组：轨迹合法性门禁阈值（决定"什么是合法轨迹"）
@@ -71,6 +68,9 @@ struct Config {
     double esdf_safety_margin = 0.1;
     // ESDF 碰撞惩罚软代价权重，提供 ~10cm 舒适间隙
     double esdf_penalty_weight = 3.0;
+    // 外圆行数（车辆圆形分解模型的碰撞检测粒度），场景按此构造
+    // footprint 模型；由算法配置详情 JSON 的同名字段覆盖
+    int outer_row_num = 4;
 
     // ============================================================
     // 第五组：求解器收敛
@@ -92,5 +92,11 @@ struct Config {
    protected:
     // 仅允许派生类构造
     Config() = default;
+    // 拷贝/移动仅允许派生类的隐式特殊成员调用，外部直接拷贝/移动基类
+    // 对象会被编译期拒绝，防止按值切片
+    Config(const Config&) = default;
+    Config& operator=(const Config&) = default;
+    Config(Config&&) = default;
+    Config& operator=(Config&&) = default;
 };
 }  // namespace apa_post_processor

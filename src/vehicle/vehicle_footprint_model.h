@@ -31,6 +31,8 @@ class VehicleFootprintModel {
     double getInnerRadius() const { return inner_radius_; }
     // 获取外圆半径
     double getOuterRadius() const { return outer_radius_; }
+    // 获取车辆轴距 (m)（运动学关系 θ̇=v·tanδ/L 中的 L）
+    double getWheelbase() const { return veh_params_.wheelbase; }
     // 获取指定类型圆的数量
     std::size_t getCircleNum(CircleType type) const {
         const auto& table = (type == CircleType::INNER) ? inner_circle_table_

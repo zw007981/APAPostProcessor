@@ -1,1 +1,4 @@
-{}
+{
+  "algorithm": "nmpc",
+  "outer_row_num": 2
+}

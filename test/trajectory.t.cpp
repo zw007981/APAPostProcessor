@@ -1,3 +1,5 @@
+#include "util/trajectory.h"
+
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -5,7 +7,8 @@
 
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
-#include "util/trajectory.h"
+#include "util/path.h"
+#include "util/time_profile.h"
 #include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
 
@@ -236,6 +239,293 @@ TEST(TrajectoryTest, MoveConstructorTransfersOwnership) {
     EXPECT_EQ(new_traj.size(), 4u);
     EXPECT_TRUE(traj.empty());
     EXPECT_DOUBLE_EQ(new_traj.length(), 3.0);
+}
+
+// ===== 由 Path 构造（微分平坦补全） =====
+
+// 测试辅助：Path 构造用车辆参数（轴距 2.8m）
+VehicleParams MakeRefTrajVehicleParams() {
+    return VehicleParams(/*length=*/4.8, /*width=*/1.9, /*wheelbase=*/2.8,
+                         /*max_steer_angle=*/0.65);
+}
+
+// 测试辅助：向 Path 追加沿 x 轴的点列（theta 固定），从 x_from 到 x_to，
+// 步长 0.05m（与前端路径点距同量级）
+void AppendXLinePoints(Path* path, double x_from, double x_to, double theta) {
+    const int count =
+        static_cast<int>(std::round(std::abs(x_to - x_from) / 0.05));
+    for (int i = 1; i <= count; ++i) {
+        path->addPoint({x_from + (x_to - x_from) * i / count, 0.0, theta});
+    }
+}
+
+// 测试辅助：向 Path 追加从 (x0,y0) 出发、初始切向沿 +x 的圆弧点列
+// （半径 radius、每步 dtheta rad、heading = 切向 + heading_offset），
+// 首点 (x0,y0) 由调用方先行 addPoint
+void AppendArcPoints(Path* path, double x0, double y0, double radius,
+                     double dtheta, int count, double heading_offset) {
+    for (int i = 1; i <= count; ++i) {
+        const double theta = dtheta * i;
+        path->addPoint({x0 + radius * std::sin(theta),
+                        y0 + radius * (1.0 - std::cos(theta)),
+                        theta + heading_offset});
+    }
+}
+
+// 测试场景：空 Path 经微分平坦补全构造轨迹。
+// 预期行为：产出空轨迹，不抛异常。
+TEST(TrajectoryTest, FromPathEmptyPathYieldsEmptyTrajectory) {
+    const Path path;
+    const Trajectory traj(path, MakeRefTrajVehicleParams());
+    EXPECT_TRUE(traj.empty());
+    EXPECT_EQ(traj.size(), 0u);
+}
+
+// 测试场景：非法运动学输入（轴距非法、时间参数化配置非法）。
+// 预期行为：一律抛 std::invalid_argument。
+TEST(TrajectoryTest, FromPathRejectsInvalidKinematicInputs) {
+    Path path;
+    path.addPoint({0.0, 0.0, 0.0});
+    AppendXLinePoints(&path, 0.0, 1.0, 0.0);
+    path.finalize();
+    // 默认构造的 VehicleParams 轴距为 0，非法
+    EXPECT_THROW(Trajectory(path, VehicleParams{}), std::invalid_argument);
+    // 时间参数化配置非法
+    TimeProfileConfig bad_config;
+    bad_config.max_v_forward = 0.0;
+    EXPECT_THROW(Trajectory(path, MakeRefTrajVehicleParams(), bad_config),
+                 std::invalid_argument);
+}
+
+// 测试场景：沿 x 轴前进直线（κ=0），梯形加减速时间参数化。
+// 预期行为：κ=δ=δ̇=0；首末 v=0、内部 v>0 且不超限速平台；t 自 0 严格
+// 递增；时长不短于纯巡航时间（"最快走完"下界）。
+TEST(TrajectoryTest, FromPathStraightForwardFillsKinematics) {
+    Path path;
+    path.addPoint({0.0, 0.0, 0.0});
+    AppendXLinePoints(&path, 0.0, 2.0, 0.0);
+    path.finalize();
+    const Trajectory traj(path, MakeRefTrajVehicleParams());
+    ASSERT_EQ(traj.size(), path.size());
+    EXPECT_DOUBLE_EQ(traj.front().getT(), 0.0);
+    EXPECT_DOUBLE_EQ(traj.front().getV(), 0.0);
+    EXPECT_DOUBLE_EQ(traj.back().getV(), 0.0);
+    double max_v = 0.0;
+    for (const auto& pt : traj) {
+        EXPECT_TRUE(pt.hasV());
+        EXPECT_TRUE(pt.hasA());
+        EXPECT_TRUE(pt.hasDelta());
+        EXPECT_TRUE(pt.hasDeltaDot());
+        EXPECT_TRUE(pt.hasKappa());
+        EXPECT_TRUE(pt.hasT());
+        EXPECT_NEAR(pt.getKappa(), 0.0, 1e-12);
+        EXPECT_NEAR(pt.getDelta(), 0.0, 1e-12);
+        EXPECT_NEAR(pt.getDeltaDot(), 0.0, 1e-12);
+        max_v = std::max(max_v, pt.getV());
+    }
+    for (std::size_t i = 1; i + 1 < traj.size(); ++i) {
+        EXPECT_GT(traj[i].getV(), 0.0);
+    }
+    EXPECT_LE(max_v, TimeProfileConfig{}.max_v_forward + 1e-9);
+    for (std::size_t i = 1; i < traj.size(); ++i) {
+        EXPECT_GT(traj[i].getT(), traj[i - 1].getT());
+    }
+    EXPECT_GE(traj.duration(), 2.0 / TimeProfileConfig{}.max_v_forward);
+    EXPECT_NEAR(traj.length(), 2.0, 1e-9);
+}
+
+// 测试场景：半径 10m 的前进圆弧（恒定曲率）。
+// 预期行为：κ≈1/R、δ≈atan(L/R)（微分平坦关系）、δ̇≈0；v 首末为 0、
+// 内部为正；时长为正。
+TEST(TrajectoryTest, FromPathForwardArcFillsDeltaFromFlatness) {
+    Path path;
+    path.addPoint({0.0, 0.0, 0.0});
+    constexpr double kRadius = 10.0;
+    AppendArcPoints(&path, 0.0, 0.0, kRadius, 0.01, 30,
+                    /*heading_offset=*/0.0);
+    path.finalize();
+    const auto params = MakeRefTrajVehicleParams();
+    const Trajectory traj(path, params);
+    ASSERT_EQ(traj.size(), path.size());
+    const double expect_delta = std::atan(params.wheelbase / kRadius);
+    EXPECT_DOUBLE_EQ(traj.front().getV(), 0.0);
+    EXPECT_DOUBLE_EQ(traj.back().getV(), 0.0);
+    for (std::size_t i = 1; i + 1 < traj.size(); ++i) {
+        EXPECT_GT(traj[i].getV(), 0.0);
+    }
+    for (const auto& pt : traj) {
+        EXPECT_NEAR(pt.getKappa(), 1.0 / kRadius, 1e-4);
+        EXPECT_NEAR(pt.getDelta(), expect_delta, 1e-4);
+        EXPECT_NEAR(pt.getDeltaDot(), 0.0, 1e-6);
+    }
+    EXPECT_GT(traj.duration(), 0.0);
+}
+
+// 测试场景：半径 10m 的倒车圆弧（航向 = 切向 + π，几何曲率 κ_geom>0）。
+// 预期行为：识别为 BACKWARD，内部 v 恒负、首末为 0；运动方向签名曲率与
+// δ 取负（σ=-1 ⇒ κ=-1/R、δ=atan(-L/R)），δ̇≈0。
+TEST(TrajectoryTest, FromPathBackwardArcFlipsSteerSign) {
+    Path path;
+    path.addPoint({0.0, 0.0, PI});
+    AppendArcPoints(&path, 0.0, 0.0, 10.0, 0.01, 30,
+                    /*heading_offset=*/PI);
+    path.finalize();
+    ASSERT_EQ(path.numManeuvers(), 1u);
+    ASSERT_EQ(path.getManeuvers().front().direction, Direction::BACKWARD);
+    const auto params = MakeRefTrajVehicleParams();
+    const Trajectory traj(path, params);
+    ASSERT_EQ(traj.size(), path.size());
+    EXPECT_DOUBLE_EQ(traj.front().getV(), 0.0);
+    EXPECT_DOUBLE_EQ(traj.back().getV(), 0.0);
+    for (std::size_t i = 1; i + 1 < traj.size(); ++i) {
+        EXPECT_LT(traj[i].getV(), 0.0);
+    }
+    for (const auto& pt : traj) {
+        EXPECT_NEAR(pt.getKappa(), -0.1, 1e-4);
+        EXPECT_NEAR(pt.getDelta(), std::atan(-params.wheelbase / 10.0), 1e-4);
+        EXPECT_NEAR(pt.getDeltaDot(), 0.0, 1e-6);
+    }
+}
+
+// 测试场景：前进 1.0m 再后退 0.5m 的单次换挡路径（2 个机动段）。
+// 预期行为：换挡边界重复点只发射一次（size 与 Path::size() 一致）；首末
+// 与换挡边界点 v=0；段内离开端点后 v 按机动段变号；t 不减且时长为正。
+TEST(TrajectoryTest, FromPathGearShiftAssignsVelocitySignPerManeuver) {
+    Path path;
+    path.addPoint({0.0, 0.0, 0.0});
+    AppendXLinePoints(&path, 0.0, 1.0, 0.0);
+    AppendXLinePoints(&path, 1.0, 0.5, 0.0);
+    path.finalize();
+    ASSERT_EQ(path.numManeuvers(), 2u);
+    const Trajectory traj(path, MakeRefTrajVehicleParams());
+    ASSERT_EQ(traj.size(), path.size());
+    const std::size_t boundary = path.getManeuvers().front().points.size() - 1;
+    EXPECT_DOUBLE_EQ(traj[boundary].x, 1.0);
+    EXPECT_DOUBLE_EQ(traj.front().getV(), 0.0);
+    EXPECT_DOUBLE_EQ(traj[boundary].getV(), 0.0);
+    EXPECT_DOUBLE_EQ(traj.back().getV(), 0.0);
+    EXPECT_GT(traj[1].getV(), 0.0);
+    EXPECT_LT(traj[boundary + 2].getV(), 0.0);
+    for (std::size_t i = 1; i < traj.size(); ++i) {
+        EXPECT_GE(traj[i].getT(), traj[i - 1].getT());
+    }
+    EXPECT_GT(traj.duration(), 0.0);
+}
+
+// 测试场景：直线接圆弧的曲率过渡路径（κ 由 0 单调升至 0.1）。
+// 预期行为：δ̇=dδ/dt 在交界附近取正值，稳态弧段末端回归 0。
+TEST(TrajectoryTest, FromPathSteerRateTracksCurvatureVariation) {
+    Path path;
+    path.addPoint({0.0, 0.0, 0.0});
+    AppendXLinePoints(&path, 0.0, 1.0, 0.0);
+    AppendArcPoints(&path, 1.0, 0.0, 10.0, 0.01, 20, /*heading_offset=*/0.0);
+    path.finalize();
+    const Trajectory traj(path, MakeRefTrajVehicleParams());
+    ASSERT_EQ(traj.size(), path.size());
+    double max_delta_dot = 0.0;
+    for (const auto& pt : traj) {
+        max_delta_dot = std::max(max_delta_dot, pt.getDeltaDot());
+    }
+    EXPECT_GT(max_delta_dot, 0.0);
+    EXPECT_NEAR(traj.back().getDeltaDot(), 0.0, 1e-3);
+}
+
+// 测试场景：路径未 finalize（路径点 κ 未设置）时构造轨迹。
+// 预期行为：κ 按 0 回退处理，δ 随之恒为 0，不抛异常。
+TEST(TrajectoryTest, FromPathUnfinalizedPathTreatsKappaAsZero) {
+    Path path;
+    path.addPoint({0.0, 0.0, 0.0});
+    AppendArcPoints(&path, 0.0, 0.0, 10.0, 0.01, 30, /*heading_offset=*/0.0);
+    // 故意不调用 finalize()
+    const Trajectory traj(path, MakeRefTrajVehicleParams());
+    ASSERT_EQ(traj.size(), path.size());
+    for (const auto& pt : traj) {
+        EXPECT_DOUBLE_EQ(pt.getKappa(), 0.0);
+        EXPECT_DOUBLE_EQ(pt.getDelta(), 0.0);
+    }
+}
+
+// ===== 物理方向段数（countDirectionRuns） =====
+
+// 测试辅助：由 (x, v) 序列构造轨迹（位移与速度是统计的全部输入）
+Trajectory MakeVelocityTrajectory(
+    const std::vector<std::pair<double, double>>& xvs) {
+    Trajectory traj;
+    traj.reserve(xvs.size());
+    for (const auto& [x, v] : xvs) {
+        TrajectoryPoint pt(x, 0.0, 0.0);
+        pt.setV(v);
+        traj.push_back(pt);
+    }
+    return traj;
+}
+
+// 测试场景：物理方向段数统计——按明确符号切段后丢弃位移不足的抖动段；
+// 停驻点不改变方向状态、不产生段边界。
+// 预期行为：各序列给出表中段数。
+TEST(TrajectoryTest, CountDirectionRunsIgnoresStandstills) {
+    // 空轨迹与未设置 v 的轨迹
+    EXPECT_EQ(Trajectory{}.countDirectionRuns(), 0);
+    // 全正/全负：1 段
+    EXPECT_EQ(MakeVelocityTrajectory({{0.0, 0.5}, {0.1, 1.0}, {0.2, 0.8}})
+                  .countDirectionRuns(),
+              1);
+    EXPECT_EQ(
+        MakeVelocityTrajectory({{0.0, -0.5}, {0.1, -1.0}}).countDirectionRuns(),
+        1);
+    // 正-负-正-负：4 段
+    EXPECT_EQ(MakeVelocityTrajectory(
+                  {{0.0, 0.5}, {0.1, -0.3}, {0.2, 0.2}, {0.3, -0.4}})
+                  .countDirectionRuns(),
+              4);
+    // 换挡停驻不产生额外段：正-停-负为 2 段
+    EXPECT_EQ(MakeVelocityTrajectory({{0.0, 0.5}, {0.1, 1e-4}, {0.2, -0.5}})
+                  .countDirectionRuns(),
+              2);
+    // 同向夹停驻仍为 1 段：正-停-正
+    EXPECT_EQ(MakeVelocityTrajectory({{0.0, 0.5}, {0.1, 1e-4}, {0.2, 0.3}})
+                  .countDirectionRuns(),
+              1);
+    // 首末停驻不单独成段
+    EXPECT_EQ(
+        MakeVelocityTrajectory({{0.0, 0.0}, {0.1, 0.5}, {0.2, 0.3}, {0.3, 0.0}})
+            .countDirectionRuns(),
+        1);
+    EXPECT_EQ(
+        MakeVelocityTrajectory(
+            {{0.0, 1e-4}, {0.1, -0.5}, {0.2, -0.3}, {0.3, 1e-4}, {0.4, 0.5}})
+            .countDirectionRuns(),
+        2);
+    // 全部停驻：0 段（无任何明确运动方向）
+    EXPECT_EQ(MakeVelocityTrajectory({{0.0, 0.0}, {0.1, 1e-4}, {0.2, 0.0}})
+                  .countDirectionRuns(),
+              0);
+    // 自定义停驻阈值
+    EXPECT_EQ(MakeVelocityTrajectory({{0.0, 0.04}, {0.1, -0.04}})
+                  .countDirectionRuns(0.05),
+              0);
+}
+
+// 测试场景：低速数值抖动过滤——反号 excursion 位移不足 min_arc 时判为
+// 抖动丢弃（离散求解器停驻区 ±cm/s 毛刺的典型形态），位移足够的真实
+// 小幅度段保留。
+// 预期行为：毛刺不计段，真实段保留。
+TEST(TrajectoryTest, CountDirectionRunsFiltersDisplacementJitter) {
+    // 前进主段中夹 0.01m 位移的后退毛刺：毛刺丢弃，合并为 1 段
+    EXPECT_EQ(MakeVelocityTrajectory(
+                  {{0.0, 0.5}, {0.1, 0.5}, {0.11, -0.5}, {0.12, 0.5}})
+                  .countDirectionRuns(),
+              1);
+    // 0.06m 位移的后退 excursion 与其后 0.07m 位移的前进段均为真实
+    // 小幅度段：计为 3 段
+    EXPECT_EQ(MakeVelocityTrajectory({{0.0, 0.5},
+                                      {0.1, 0.5},
+                                      {0.13, -0.5},
+                                      {0.16, -0.5},
+                                      {0.17, 0.5},
+                                      {0.23, 0.5}})
+                  .countDirectionRuns(),
+              3);
 }
 
 // ====== validate() 验证功能 ======

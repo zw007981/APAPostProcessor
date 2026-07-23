@@ -781,8 +781,9 @@ class Visualizer {
             saved_any =
                 tv.saveCurrentCanvas(dir_name, tv.title_, GetNextSaveNum()) ||
                 saved_any;
-            if (!tv.last_save_path_.empty())
+            if (!tv.last_save_path_.empty()) {
                 last_save_path_ = tv.last_save_path_;
+            }
         }
         return saved_any;
     }
@@ -801,7 +802,9 @@ class Visualizer {
     static constexpr double VIEW_PADDING_RATIO = 1.2;
     static double normalizeAnglePi(double theta) {
         double t = std::fmod(theta + PI, 2.0 * PI);
-        if (t < 0.0) t += 2.0 * PI;
+        if (t < 0.0) {
+            t += 2.0 * PI;
+        }
         return t - PI;
     }
     template <typename MapFunc>
@@ -809,19 +812,54 @@ class Visualizer {
         const std::vector<double>& xs, const std::vector<double>& ys,
         MapFunc&& map_to_pixel) {
         std::vector<std::vector<cv::Point>> groups;
-        if (xs.size() != ys.size()) return groups;
+        if (xs.size() != ys.size()) {
+            return groups;
+        }
         std::vector<cv::Point> cur;
         cur.reserve(xs.size());
         for (std::size_t i = 0; i < xs.size(); ++i) {
             if (!std::isfinite(xs[i]) || !std::isfinite(ys[i])) {
-                if (cur.size() >= 2) groups.push_back(std::move(cur));
+                if (cur.size() >= 2) {
+                    groups.push_back(std::move(cur));
+                }
                 cur.clear();
                 continue;
             }
             cur.emplace_back(map_to_pixel(xs[i], ys[i]));
         }
-        if (cur.size() >= 2) groups.push_back(std::move(cur));
+        if (cur.size() >= 2) {
+            groups.push_back(std::move(cur));
+        }
         return groups;
+    }
+    // kappa 绘图上下限 (1/m)：换挡尖点/近重复点处的曲率估计会因除数趋零
+    // 出现尖峰伪影（物理上无意义，且把正常量程压扁成直线），显示值统一
+    // 裁剪到 [-kKappaPlotLimit, +kKappaPlotLimit]，超出部分在边界处贴轨
+    // 显示；非有限值（换挡断点）原样保留，绘图时表现为断线
+    static constexpr double kKappaPlotLimit = 0.4444;
+    // 供绘图路径调用的 kappa 显示值裁剪（只裁剪有限值）
+    static std::vector<double> ClampKappaForPlot(std::vector<double> kappa) {
+        for (auto& k : kappa) {
+            if (std::isfinite(k)) {
+                k = std::clamp(k, -kKappaPlotLimit, kKappaPlotLimit);
+            }
+        }
+        return kappa;
+    }
+    // delta_dot 绘图上下限 (rad/s)：换挡尖点/近零车速处的转向角速度估计
+    // 会因除数趋零出现尖峰伪影（物理上无意义，且把正常量程压扁成直线），
+    // 显示值统一裁剪到 [-kDeltaDotPlotLimit, +kDeltaDotPlotLimit]，超出
+    // 部分在边界处贴轨显示；非有限值（换挡断点）原样保留，绘图时表现为断线
+    static constexpr double kDeltaDotPlotLimit = 0.5;
+    // 供绘图路径调用的 delta_dot 显示值裁剪（只裁剪有限值）
+    static std::vector<double> ClampDeltaDotForPlot(
+        std::vector<double> delta_dot) {
+        for (auto& dd : delta_dot) {
+            if (std::isfinite(dd)) {
+                dd = std::clamp(dd, -kDeltaDotPlotLimit, kDeltaDotPlotLimit);
+            }
+        }
+        return delta_dot;
     }
     template <typename W2P>
     void drawSweptAreaImpl(const std::vector<double>& xs,
@@ -829,7 +867,9 @@ class Visualizer {
                            const std::vector<double>& headings,
                            const VehicleParams& vp, const Style& style,
                            W2P&& w2p) {
-        if (xs.size() < 2) return;
+        if (xs.size() < 2) {
+            return;
+        }
         const double rx = -vp.rear_overhang;
         const double fx = vp.length - vp.rear_overhang;
         const double hw = vp.width * 0.5;
@@ -857,9 +897,13 @@ class Visualizer {
                 }
                 q.emplace_back(w2p(wx, wy));
             }
-            if (ok) outlines.push_back(std::move(q));
+            if (ok) {
+                outlines.push_back(std::move(q));
+            }
         }
-        if (outlines.size() < 2) return;
+        if (outlines.size() < 2) {
+            return;
+        }
 
         const cv::Scalar color = styleColor(style, cv::Scalar(180, 180, 180));
         const int thickness = std::max(1, styleLineWidth(style, 1));
@@ -874,14 +918,6 @@ class Visualizer {
         sanctum_.blendOverlay(overlay, styleAlpha(style, 0.35));
         addLegend(style, color);
     }
-    void drawSweptAreaImpl(const std::vector<double>& xs,
-                           const std::vector<double>& ys,
-                           const std::vector<double>& headings,
-                           const VehicleParams& vp, const Style& style) {
-        drawSweptAreaImpl(
-            xs, ys, headings, vp, style,
-            [this](double x, double y) { return worldToPixel(x, y); });
-    }
     static constexpr double AUTO_PAN_INNER_RATIO = 0.35;
     // Details 图序列缓存。
     struct DetailSeriesData {
@@ -894,15 +930,10 @@ class Visualizer {
         std::vector<double> curvature;
         std::vector<double> heading;
         std::vector<double> ref_s;
-        std::vector<double> lateral_d;
         std::vector<double> v;
         std::vector<double> a;
         std::vector<double> delta;
         std::vector<double> delta_dot;
-        std::vector<double> delta_t;
-        std::vector<double> time;
-        std::vector<double> slack_true;
-        std::vector<double> slack_calc;
         std::vector<std::size_t> shift_indices;
     };
     // 实例级门控状态。
@@ -1227,15 +1258,6 @@ class Visualizer {
         }
         return false;
     }
-    // 从 Path 收集扁平点序列。
-    std::vector<TrajectoryPoint> collectPathPoints(const Path& path) const {
-        std::vector<TrajectoryPoint> points;
-        points.reserve(path.size());
-        path.forEach([&points](const TrajectoryPoint& point) {
-            points.emplace_back(point);
-        });
-        return points;
-    }
     // 从单条 Path 追加一组 Details 曲线数据，按 maneuver 拆分并标记换挡点。
     void appendDetailSeriesFromPath(const Path& path, const Style& style) {
         if (path.empty()) {
@@ -1282,7 +1304,7 @@ class Visualizer {
                 prev_pose = point;
                 appendDetailPoint(series, point,
                                   point.hasKappa() ? point.getKappa() : 0.0,
-                                  accum_s, 0.0);
+                                  accum_s);
                 ++flat_index;
             }
         }
@@ -1300,29 +1322,22 @@ class Visualizer {
         series.curvature.reserve(size);
         series.heading.reserve(size);
         series.ref_s.reserve(size);
-        series.lateral_d.reserve(size);
         series.v.reserve(size);
         series.a.reserve(size);
         series.delta.reserve(size);
         series.delta_dot.reserve(size);
-        series.delta_t.reserve(size);
-        series.time.reserve(size);
-        series.slack_true.reserve(size);
-        series.slack_calc.reserve(size);
         series.shift_indices.reserve(size);
     }
     // 追加单个 Details 采样点。
     static void appendDetailPoint(DetailSeriesData& series,
                                   const TrajectoryPoint& point,
-                                  double curvature, double ref_s,
-                                  double lateral_d) {
+                                  double curvature, double ref_s) {
         series.index.push_back(static_cast<double>(series.index.size()));
         series.x.push_back(point.x);
         series.y.push_back(point.y);
         series.curvature.push_back(curvature);
         series.heading.push_back(point.theta);
         series.ref_s.push_back(ref_s);
-        series.lateral_d.push_back(lateral_d);
     }
     // 生成车辆矩形轮廓，坐标原点约定为后轴中心。
     std::vector<cv::Point2d> buildVehicleFootprint(
@@ -1467,11 +1482,13 @@ class Visualizer {
                     style_data, default_color, closed, draw_marker);
             });
     }
-    // 根据可视距离计算坐标标注间隔。
+    // 根据可视距离计算坐标标注间隔。量级完全解耦：仅对非有限值与
+    // 浮点噪声级跨度兜底，优美数乘数取 1.0/2.0/2.5/5.0/10.0 五档，
+    // 使 0.001~10000 全量程都能自适应出平滑的刻度间隔。
     static double ComputeCoordinateInterval(double max_visible_distance,
                                             int target_ticks = 6) {
         if (!std::isfinite(max_visible_distance) ||
-            max_visible_distance <= 1e-6) {
+            max_visible_distance < 1e-12) {
             return 1.0;
         }
         const double raw_interval =
@@ -1480,22 +1497,35 @@ class Visualizer {
         const double magnitude =
             std::pow(10.0, std::floor(std::log10(raw_interval)));
         const double fraction = raw_interval / magnitude;
-        return magnitude *
-               (fraction <= 1.5
-                    ? 1.0
-                    : (fraction <= 3.0 ? 2.0 : (fraction <= 7.0 ? 5.0 : 10.0)));
+        double multiplier = 10.0;
+        if (fraction <= 1.2) {
+            multiplier = 1.0;
+        } else if (fraction <= 2.5) {
+            multiplier = 2.0;
+        } else if (fraction <= 3.5) {
+            multiplier = 2.5;
+        } else if (fraction <= 7.0) {
+            multiplier = 5.0;
+        }
+        return magnitude * multiplier;
     }
     // 计算网格起始坐标。
     static double ComputeGridStartCoord(double min_coord, double interval) {
         return std::ceil(min_coord / interval) * interval;
     }
-    // 根据间隔估算小数精度。
+    // 根据间隔估算小数精度：基础精度取间隔幂次的相反数；乘数带小数
+    // （如 2.5 档产生的 0.25 间隔）时额外补偿一位，避免标签被截断。
     static int ComputeCoordinatePrecision(double interval) {
-        if (!std::isfinite(interval) || interval <= 1e-12 ||
-            interval >= 1.0 - 1e-9) {
+        if (!std::isfinite(interval) || interval < 1e-12) {
             return 0;
         }
-        return static_cast<int>(std::round(-std::floor(std::log10(interval))));
+        const double power = std::floor(std::log10(interval));
+        int precision = static_cast<int>(-power);
+        const double multiplier = interval / std::pow(10.0, power);
+        if (std::abs(multiplier - std::round(multiplier)) > 1e-9) {
+            ++precision;
+        }
+        return std::max(0, precision);
     }
     // 格式化坐标标签。
     static std::string FormatNumber(double value, int precision) {
@@ -1866,7 +1896,6 @@ class Visualizer {
             series.y.push_back(pp.y);
             series.heading.push_back(normalizeAnglePi(pp.theta));
             series.ref_s.push_back(arc);
-            series.time.push_back(pp.hasT() ? pp.getT() : NAN);
             series.v.push_back(pp.hasV() ? pp.getV() : NAN);
             series.a.push_back(pp.hasA() ? pp.getA() : NAN);
             series.delta.push_back(pp.hasDelta() ? pp.getDelta() : NAN);
@@ -1967,12 +1996,18 @@ class Visualizer {
             }
             std::vector<DetailSeriesData> bands;
             bands.reserve(7);
-            bands.push_back(make_band("kappa(1/m)", d.curvature));
+            // kappa 显示值按 ±kKappaPlotLimit 裁剪：尖点/近重复点处的
+            // 曲率尖峰伪影贴轨到边界，不再压扁正常量程
+            bands.push_back(
+                make_band("kappa(1/m)", ClampKappaForPlot(d.curvature)));
             bands.push_back(make_band("heading(deg)", heading_deg));
             bands.push_back(make_band("v(m/s)", d.v));
             bands.push_back(make_band("a(m/s2)", d.a));
             bands.push_back(make_band("delta(rad)", d.delta));
-            bands.push_back(make_band("delta_dot(rad/s)", d.delta_dot));
+            // delta_dot 显示值按 ±kDeltaDotPlotLimit 裁剪：换挡尖点/近零
+            // 车速处的转向角速度尖峰伪影贴轨到边界，不再压扁正常量程
+            bands.push_back(make_band("delta_dot(rad/s)",
+                                      ClampDeltaDotForPlot(d.delta_dot)));
             // 安全余量：decomposed circle 方法。
             if (ctx.entry->footprint_model && ctx.entry->esdf_map) {
                 const double outer_r =
@@ -2027,20 +2062,18 @@ class Visualizer {
         using MemPtr = std::vector<double> DetailSeriesData::*;
         std::vector<MemPtr> y_getters(n_bands, &DetailSeriesData::v);
         std::vector<std::string> y_labels = signal_order;
-        // 仅为 min_margin band 添加 y=0 红色虚线参考线。
+        // 为 min_margin band 和 v(m/s) band 添加 y=0 红色虚线参考线。
         std::vector<std::vector<std::pair<double, cv::Scalar>>> band_refs(
             n_bands);
         for (std::size_t i = 0; i < n_bands; ++i) {
-            if (y_labels[i].find("min_margin") != std::string::npos) {
+            if (y_labels[i].find("min_margin") != std::string::npos ||
+                y_labels[i] == "v(m/s)") {
                 band_refs[i].push_back({0.0, cv::Scalar(0, 0, 255)});
-                break;
             }
         }
-        const int y_ticks = std::max(2, 5 - static_cast<int>(ctxs.size()));
-        drawDetailSubplotStacked(grouped_bands, y_getters, y_labels, rect_right,
-                                 "Signal by Index", "index",
-                                 &DetailSeriesData::index, false, 0.0, 0.0, {},
-                                 y_ticks, band_refs);
+        drawDetailSubplotStacked(
+            grouped_bands, y_getters, y_labels, rect_right, "Signal by Index",
+            "index", &DetailSeriesData::index, false, 0.0, 0.0, {}, band_refs);
     }
     // 查找序列中首/末 x、y、heading 均为有限值的索引；若无有效点，
     // 首索引保持为序列长度，调用方据此跳过。
@@ -2325,7 +2358,6 @@ class Visualizer {
         bool use_fixed_y = false, double fixed_min_y = 0.0,
         double fixed_max_y = 0.0,
         const std::vector<std::pair<double, cv::Scalar>>& reference_lines = {},
-        int y_target_ticks = 3,
         const std::vector<std::vector<std::pair<double, cv::Scalar>>>&
             band_refs = {}) {
         const int n_bands = static_cast<int>(band_series_list.size());
@@ -2388,6 +2420,11 @@ class Visualizer {
             if (plot_rect.width <= 10 || plot_rect.height <= 10) {
                 continue;
             }
+            // 按绘图区像素高度动态确定目标刻度数：约 35px 一个刻度是
+            // 人眼舒适的密度下限，避免小图刻度拥挤、大图刻度稀疏。
+            constexpr int optimal_tick_spacing_px = 35;
+            const int dynamic_y_ticks =
+                std::max(3, plot_rect.height / optimal_tick_spacing_px);
             const auto& band_series = band_series_list[band_idx];
             if (band_series.empty()) {
                 continue;
@@ -2438,9 +2475,9 @@ class Visualizer {
             const cv::Scalar kGridColor(238, 238, 238);
             const cv::Scalar kAxisColor(205, 205, 205);
             const cv::Scalar kTextColor(120, 120, 120);
-            // 水平网格与 Y 刻度。
+            // 水平网格与 Y 刻度：目标刻度数随绘图区像素高度自适应。
             const double y_interval =
-                ComputeCoordinateInterval(y_span, y_target_ticks);
+                ComputeCoordinateInterval(y_span, dynamic_y_ticks);
             const int y_precision = ComputeCoordinatePrecision(y_interval);
             for (double value = ComputeGridStartCoord(min_y, y_interval);
                  value <= max_y + y_interval * 0.5; value += y_interval) {

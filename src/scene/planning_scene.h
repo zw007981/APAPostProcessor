@@ -19,10 +19,26 @@ class PlanningScene {
     virtual ~PlanningScene() = default;
     PlanningScene(const PlanningScene&) = delete;
     PlanningScene& operator=(const PlanningScene&) = delete;
+    // 场景工厂：读取场景配置文件中的 config_details_path，按算法配置详情
+    // JSON 的 "algorithm" 字段（"alm"/"nmpc"）路由到对应算法场景并完成
+    // 加载；文件缺失/字段缺失/算法无法识别时返回 nullptr（错误已记日志）。
+    // 生产入口据此按配置运行时选择算法，无需改动代码
+    static std::unique_ptr<PlanningScene> LoadFromFile(
+        const std::string& config_file_path);
     // 执行优化（由派生类实现）
     virtual PostProcessorResult optimize() = 0;
     // 加载算法配置详情文件（由派生类实现）
     virtual void loadConfigDetails(const std::string& config_details_path) = 0;
+    // 最近一次优化产出的轨迹（未执行 optimize() 或优化失败时为空），
+    // 供生产入口算法无关地绘制"初始 vs 优化后"对比图
+    virtual const Trajectory& optimizedTraj() const = 0;
+    // 算法名（"ALM"/"NMPC"，绘图标签与日志用）
+    virtual std::string algorithmName() const = 0;
+    // 生成优化摘要：优化前后路径长度与机动段数变化、优化耗时；未执行
+    // optimize() 或优化失败时不含优化后指标并注明原因
+    std::string optimizeSummary() const;
+    // 打印优化摘要（成功记 LOG_INFO，未执行/失败记 LOG_ERROR）
+    void printOptimizeSummary() const;
     // 车辆参数
     const VehicleParams& vehicleParams() const { return vehicle_params_; }
     // 车辆圆形分解模型
@@ -42,8 +58,6 @@ class PlanningScene {
     const PostProcessorResult& lastResult() const { return last_result_; }
     // 预处理产出的轨迹
     const Trajectory& preprocessedTraj() const { return preprocessed_traj_; }
-    // 优化产出的轨迹
-    const Trajectory& nmpcTraj() const { return nmpc_traj_; }
 
    protected:
     // 派生类构造时传入自己的 Config 实例
@@ -57,7 +71,7 @@ class PlanningScene {
     // 预处理轨迹（带时间戳）
     Trajectory preprocessed_traj_;
     // 优化后轨迹（带时间戳）
-    Trajectory nmpc_traj_;
+    Trajectory optimized_traj_;
 
    private:
     // 通用配置（实际指向 NMPCConfig 等派生类型）

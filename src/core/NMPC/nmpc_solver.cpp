@@ -428,10 +428,17 @@ Path NmpcSolver::ToPath(const Result& result) {
                 result.trajectory.x[static_cast<std::size_t>(global_k + i)];
             TrajectoryPoint point(state(0), state(1), state(2));
             // 回填状态量（v/delta）与控制量（a/delta_dot）。
+            // 状态增广模型（7 维，BicycleModelJerk）中 a/delta_dot 是状态
+            // 分量（索引 5/6），每个采样点都有真值，控制序列承载的是
+            // jerk/ddelta_dot（语义不同，不能混用）；5 维模型
+            // （BicycleModelDelta）中 a/delta_dot 来自控制序列，
             // 控制序列比状态序列少一个，末尾点无对应控制量为预期行为。
             point.setV(state(3));
             point.setDelta(state(4));
-            if (i < step_num) {
+            if (state.size() >= 7) {
+                point.setA(state(5));
+                point.setDeltaDot(state(6));
+            } else if (i < step_num) {
                 const auto& control =
                     result.trajectory.u[static_cast<std::size_t>(global_u + i)];
                 point.setA(control(0));

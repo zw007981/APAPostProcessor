@@ -16,6 +16,10 @@ class NMPCPlanningScene : public PlanningScene {
     PostProcessorResult optimize() override;
     // 从 proto JSON 文件加载 NMPC 配置详情
     void loadConfigDetails(const std::string& config_details_path) override;
+    // 最近一次 NMPC 优化产出的轨迹（未执行 optimize() 或失败时为空）
+    const Trajectory& optimizedTraj() const override { return optimized_traj_; }
+    // 算法名（绘图标签与日志用）
+    std::string algorithmName() const override { return "NMPC"; }
     // 带类型访问 NMPC 专有配置
     NMPCConfig& nmpcConfig() { return static_cast<NMPCConfig&>(config()); }
     const NMPCConfig& nmpcConfig() const {

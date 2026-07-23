@@ -145,6 +145,69 @@ TEST(NmpcSolverTest, ToPathReconstructsManeuverStructureFromResult) {
     }
 }
 
+// 测试ToPath()对状态增广（7 维，BicycleModelJerk）结果按状态分量回填 a/delta_dot。
+// 增广模型中 a/delta_dot 是状态（索引 5/6）、每个采样点都有真值，控制序列承载的是
+// jerk/ddelta_dot（语义不同、量级刻意拉开），若误从控制序列回填会张冠李戴。
+TEST(NmpcSolverTest, ToPathFillsAugmentedStatesForJerkModelResults) {
+    NmpcSolver::Result result;
+    result.segment_steps = {2};
+    result.segment_v_signs = {1.0};
+    for (int i = 0; i < 3; ++i) {
+        stc_SQP::Vector x(7);
+        x << 0.1 * i, 0.01 * i, 0.001 * i, 1.0 + 0.1 * i, 0.05 * i,
+            0.5 + 0.01 * i, 0.02 + 0.001 * i;
+        result.trajectory.x.push_back(x);
+    }
+    for (int i = 0; i < 2; ++i) {
+        stc_SQP::Vector u(2);
+        // jerk/ddelta_dot 取值与状态中的 a/delta_dot 刻意拉开，回填错来源必被发现
+        u << 9.0 + i, -7.0 - i;
+        result.trajectory.u.push_back(u);
+    }
+    const Path path = NmpcSolver::ToPath(result);
+    ASSERT_EQ(path.numManeuvers(), 1U);
+    const auto& points = path.getManeuvers().front().points;
+    ASSERT_EQ(points.size(), 3U);
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto& x = result.trajectory.x[i];
+        // 含末点在内的每个采样点都必须从状态分量回填
+        EXPECT_TRUE(points[i].hasA());
+        EXPECT_TRUE(points[i].hasDeltaDot());
+        EXPECT_DOUBLE_EQ(points[i].getA(), x(5));
+        EXPECT_DOUBLE_EQ(points[i].getDeltaDot(), x(6));
+    }
+}
+
+// 测试ToPath()对 5 维（BicycleModelDelta，Path 直接入口）结果保持控制序列回填：
+// a/delta_dot 来自控制量，每段末点无对应控制量、保持未设置（既有行为不变）。
+TEST(NmpcSolverTest, ToPathKeepsControlFillForFiveDimResults) {
+    NmpcSolver::Result result;
+    result.segment_steps = {2};
+    result.segment_v_signs = {1.0};
+    for (int i = 0; i < 3; ++i) {
+        stc_SQP::Vector x(5);
+        x << 0.1 * i, 0.01 * i, 0.001 * i, 1.0 + 0.1 * i, 0.05 * i;
+        result.trajectory.x.push_back(x);
+    }
+    for (int i = 0; i < 2; ++i) {
+        stc_SQP::Vector u(2);
+        u << 0.5 + 0.01 * i, 0.02 + 0.001 * i;
+        result.trajectory.u.push_back(u);
+    }
+    const Path path = NmpcSolver::ToPath(result);
+    ASSERT_EQ(path.numManeuvers(), 1U);
+    const auto& points = path.getManeuvers().front().points;
+    ASSERT_EQ(points.size(), 3U);
+    for (std::size_t i = 0; i + 1 < points.size(); ++i) {
+        EXPECT_TRUE(points[i].hasA());
+        EXPECT_TRUE(points[i].hasDeltaDot());
+        EXPECT_DOUBLE_EQ(points[i].getA(), result.trajectory.u[i](0));
+        EXPECT_DOUBLE_EQ(points[i].getDeltaDot(), result.trajectory.u[i](1));
+    }
+    EXPECT_FALSE(points.back().hasA());
+    EXPECT_FALSE(points.back().hasDeltaDot());
+}
+
 // 测试solveOcp对静态走廊C_matrix与d向量维度不一致做fail-early校验，
 // 避免在约束构造阶段才暴露难以诊断的维度错误。
 // 迭代重新线性化走廊不使用 static_corridor_C/d，维度不匹配不再抛异常。

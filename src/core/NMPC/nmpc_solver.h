@@ -23,7 +23,10 @@ class NmpcSolver {
     struct Result {
         // SQP是否收敛；不收敛时trajectory仍写入最新迭代轨迹。
         bool converged = false;
-        // 优化后的轨迹（状态x=[x,y,theta,v,delta]，控制u=[a,delta_dot]）
+        // 优化后的轨迹。状态/控制布局随入口模型不同：Path 直接入口
+        // （BicycleModelDelta）为 x=[x,y,theta,v,delta]、u=[a,delta_dot]；
+        // 预处理管线入口（BicycleModelJerk，状态增广）为
+        // x=[x,y,theta,v,delta,a,delta_dot]、u=[jerk,ddelta_dot]
         stc_SQP::Trajectory trajectory;
         // 每个机动段的步数N，与Path的Maneuver一一对应
         std::vector<int> segment_steps;

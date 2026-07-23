@@ -39,7 +39,7 @@ PostProcessorResult NMPCPlanningScene::optimize() {
         last_result_.final_length, last_result_.total_time_ms,
         last_result_.used_retry, last_result_.message);
     preprocessed_traj_ = last_result_.preprocessed_traj;
-    nmpc_traj_ = last_result_.nmpc_traj;
+    optimized_traj_ = last_result_.nmpc_traj;
     return last_result_;
 }
 }  // namespace apa_post_processor

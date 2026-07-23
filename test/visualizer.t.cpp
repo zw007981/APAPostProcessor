@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 
@@ -20,7 +22,9 @@ class VisualizerTestAccess : public Visualizer {
    public:
     using Visualizer::appendDetailSeriesFromPath;
     using Visualizer::buildVehicleFootprint;
-    using Visualizer::collectPathPoints;
+    using Visualizer::ClampKappaForPlot;
+    using Visualizer::ComputeCoordinateInterval;
+    using Visualizer::ComputeCoordinatePrecision;
     using Visualizer::tryExtractPath;
     using Visualizer::Visualizer;
     const std::vector<DetailSeriesData>& detailSeries() const {
@@ -176,26 +180,6 @@ TEST(VisualizerTryExtractPathTest, ReturnsFalseForUnsupportedType) {
     EXPECT_TRUE(output.empty());
 }
 
-TEST(VisualizerCollectPathPointsTest,
-     ReturnsFlatSequenceSkippingDuplicateCusp) {
-    Path path;
-    const TrajectoryPoint first{0.0, 0.0, 0.0};
-    const TrajectoryPoint cusp{1.0, 0.0, 0.0};
-    const TrajectoryPoint target{0.5, 0.0, 0.0};
-    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{first, cusp},
-                                     Direction::FORWARD);
-    path.getManeuvers().emplace_back(std::vector<TrajectoryPoint>{cusp, target},
-                                     Direction::BACKWARD);
-
-    VisualizerTestAccess visualizer;
-    const auto points = visualizer.collectPathPoints(path);
-
-    ASSERT_EQ(points.size(), 3U);
-    EXPECT_NEAR(points[0].x, 0.0, EPSILON);
-    EXPECT_NEAR(points[1].x, 1.0, EPSILON);
-    EXPECT_NEAR(points[2].x, 0.5, EPSILON);
-}
-
 TEST(VisualizerAppendDetailSeriesTest, PopulatesBasicDataForSingleManeuver) {
     Path path;
     path.addPoint(Pose{0.0, 0.0, 0.0});
@@ -329,6 +313,90 @@ TEST(VisualizerPlotTrajectoryTest, StoresStartEndFlagWhenEnabled) {
 
     ASSERT_EQ(visualizer.trajectoryPlots().size(), 1U);
     EXPECT_TRUE(visualizer.trajectoryPlots().front().draw_start_end);
+}
+
+// 测试场景：kappa 绘图值按 ±kKappaPlotLimit(0.4444) 上下限裁剪——
+// 换挡尖点/近重复点处的曲率估计尖峰伪影（除数趋零产生，物理上无意义）
+// 贴轨到边界，避免压扁正常量程；正常值、恰在边界的值与非有限值
+// （换挡断点）原样保留。
+TEST(VisualizerClampKappaForPlotTest, ClampsOutOfRangeValuesAndPreservesRest) {
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    constexpr double kLimit = 0.4444;
+    const std::vector<double> input = {0.0,  0.3,      -0.3, 3.2,  -150.0,
+                                       nan,  INFINITY,  -INFINITY, kLimit, -kLimit};
+    const auto clamped = VisualizerTestAccess::ClampKappaForPlot(input);
+    ASSERT_EQ(clamped.size(), input.size());
+    EXPECT_DOUBLE_EQ(clamped[0], 0.0);
+    EXPECT_DOUBLE_EQ(clamped[1], 0.3);
+    EXPECT_DOUBLE_EQ(clamped[2], -0.3);
+    EXPECT_DOUBLE_EQ(clamped[3], kLimit);
+    EXPECT_DOUBLE_EQ(clamped[4], -kLimit);
+    EXPECT_TRUE(std::isnan(clamped[5]));
+    EXPECT_TRUE(std::isinf(clamped[6]));
+    EXPECT_TRUE(std::isinf(clamped[7]));
+    EXPECT_DOUBLE_EQ(clamped[8], kLimit);
+    EXPECT_DOUBLE_EQ(clamped[9], -kLimit);
+}
+
+// 测试场景：坐标刻度间隔需在 0.001~10000 全量级自适应——极小量程
+// （如 κ 的 ±0.4 量程）不再被 1e-6 硬下限强制返回 1.0，大量程
+// （如 margin 的 0~50）依旧产出整数间隔。
+TEST(VisualizerComputeCoordinateIntervalTest, AdaptsAcrossMagnitudes) {
+    // 非有限值与浮点噪声级跨度回退为 1.0。
+    EXPECT_DOUBLE_EQ(
+        VisualizerTestAccess::ComputeCoordinateInterval(
+            std::numeric_limits<double>::infinity(), 6),
+        1.0);
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(1e-15, 6),
+                     1.0);
+    // κ 量级：0.8 跨度 / 4 目标刻度 → 0.2 间隔。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(0.8, 4),
+                     0.2);
+    // 极小量程不再触发硬下限：5e-9 跨度 / 5 → 1e-9 间隔（旧实现返回 1.0）。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(5e-9, 5),
+                     1e-9);
+    // 大量级：50 跨度 / 5 → 10 间隔。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(50.0, 5),
+                     10.0);
+}
+
+// 测试场景：优美数乘数档位映射为 1.0/2.0/2.5/5.0/10.0 五档，
+// 新增 2.5 档使跨度过渡更平滑。
+TEST(VisualizerComputeCoordinateIntervalTest, SelectsNiceNumberMultipliers) {
+    // fraction ≤ 1.2 → 1.0 档：跨度 10 / 10 → 间隔 1。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(10.0, 10),
+                     1.0);
+    // fraction ≤ 2.5 → 2.0 档：跨度 0.5 / 2 → raw 0.25 → 间隔 0.2。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(0.5, 2),
+                     0.2);
+    // fraction ≤ 3.5 → 2.5 档：跨度 0.6 / 2 → raw 0.3 → 间隔 0.25。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(0.6, 2),
+                     0.25);
+    // fraction ≤ 7.0 → 5.0 档：跨度 10 / 2 → 间隔 5。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(10.0, 2),
+                     5.0);
+    // fraction > 7.0 → 10.0 档：跨度 9 / 1 → 间隔 10。
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(9.0, 1),
+                     10.0);
+}
+
+// 测试场景：刻度精度由间隔幂次决定，带小数的乘数（如 2.5 档的
+// 0.25 间隔）额外补偿一位小数，避免标签被截断；逼近 1.0 的
+// 间隔不再被强制取整。
+TEST(VisualizerComputeCoordinatePrecisionTest, HandlesFractionalMultipliers) {
+    // 非有限值与噪声级间隔回退为 0。
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(INFINITY), 0);
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(1e-15), 0);
+    // 整数乘数：精度由幂次直接决定。
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(0.1), 1);
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(0.2), 1);
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(0.05), 2);
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(10.0), 0);
+    // 带小数的乘数需补偿一位：0.25 → 2 位小数，2.5 → 1 位小数。
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(0.25), 2);
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(2.5), 1);
+    // 逼近 1.0 的间隔保留小数：0.5 → 1 位小数。
+    EXPECT_EQ(VisualizerTestAccess::ComputeCoordinatePrecision(0.5), 1);
 }
 
 }  // namespace
