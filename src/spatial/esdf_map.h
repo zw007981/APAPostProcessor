@@ -21,7 +21,7 @@ using GridIndex = std::size_t;
 // 平方距离存储类型
 using SquaredDist = std::int32_t;
 // 物理距离缓存元素类型
-using PhysicalDist = float;
+using PhysicalDist = double;
 
 // Euclidean Signed Distance Field (ESDF) 地图
 class ESDFMap {
@@ -38,8 +38,8 @@ class ESDFMap {
         int idx_tl{0};
         int idx_tr{0};
         // 插值权重
-        float col_ratio{0.0f};
-        float row_ratio{0.0f};
+        double col_ratio{0.0};
+        double row_ratio{0.0};
     };
 
    public:
@@ -68,10 +68,10 @@ class ESDFMap {
 
    protected:
     // 单个栅格的符号距离与梯度 (AoS)
-    struct EsdfCell {
-        PhysicalDist dist{0.0f};
-        PhysicalDist grad_x{0.0f};
-        PhysicalDist grad_y{0.0f};
+    struct ESDFCell {
+        PhysicalDist dist{0.0};
+        PhysicalDist grad_x{0.0};
+        PhysicalDist grad_y{0.0};
     };
 
    protected:
@@ -98,7 +98,7 @@ class ESDFMap {
     GridIndex size_{0};
     Position origin_;
     // AoS 距离与梯度缓存
-    std::vector<EsdfCell> cell_data_;
+    std::vector<ESDFCell> cell_data_;
     // 紧凑距离缓存（供 getDist 高效访问）
     std::vector<PhysicalDist> distance_data_;
 };

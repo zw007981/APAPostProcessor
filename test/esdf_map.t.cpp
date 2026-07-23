@@ -69,6 +69,50 @@ TEST(ESDFMapTest, QueryUsesBilinearInterpolationForDistanceAndGradient) {
     EXPECT_NEAR(grad.y(), expected_grad_y, 1e-5);
 }
 
+// 测试底层存储与插值计算为双精度：非栅格点查询与双精度手推双线性公式在
+// 1e-13 内一致（float 存储的量化噪声 ~1e-7 会立即暴露）。
+// 因为下游 ALM 数值梯度对拍需要 1e-6 量级精度，float 量化噪声是唯一瓶颈。
+TEST(ESDFMapTest, BilinearQueryMaintainsDoublePrecision) {
+    const GridMap grid_map(1.0, 3, 3, Position{0.0, 0.0}, {Position{0.0, 0.0}});
+    const ESDFMap esdf_map(grid_map);
+    // 查询点 (1.2345678901234567, 1.03125)：两个方向的双线性权重均非平凡
+    // （col_ratio 非 2 的幂友好值，float 截断会产生可观测误差）
+    const double query_x = 1.2345678901234567;
+    const double query_y = 1.03125;
+    const auto [dist, grad] = esdf_map.getDistAndGrad(query_x, query_y);
+
+    const double col_ratio = query_x - 1.0;
+    const double row_ratio = query_y - 1.0;
+    const double sqrt2 = std::sqrt(2.0);
+    const double sqrt5 = std::sqrt(5.0);
+    const double sqrt8 = std::sqrt(8.0);
+    const double dist_row_lower = sqrt2 + (sqrt5 - sqrt2) * col_ratio;
+    const double dist_row_upper = sqrt5 + (sqrt8 - sqrt5) * col_ratio;
+    const double expected_dist =
+        dist_row_lower + (dist_row_upper - dist_row_lower) * row_ratio;
+    // 梯度场由距离的有限差分构成（内部中心差分、边界单侧差分）：
+    // cell(1,1): ((sqrt5-1)/2, (sqrt5-1)/2)；cell(1,2): 右边界 (sqrt5-sqrt2, (sqrt8-2)/2)
+    // cell(2,1): 下边界 ((sqrt8-2)/2, sqrt5-sqrt2)；cell(2,2): 角点 (sqrt8-sqrt5, sqrt8-sqrt5)
+    const double gx_bl = (sqrt5 - 1.0) * 0.5;
+    const double gx_br = sqrt5 - sqrt2;
+    const double gx_tl = (sqrt8 - 2.0) * 0.5;
+    const double gx_tr = sqrt8 - sqrt5;
+    const double gy_bl = gx_bl;
+    const double gy_br = gx_tl;
+    const double gy_tl = gx_br;
+    const double gy_tr = gx_tr;
+    const double expected_gx =
+        (gx_bl + (gx_br - gx_bl) * col_ratio) * (1.0 - row_ratio) +
+        (gx_tl + (gx_tr - gx_tl) * col_ratio) * row_ratio;
+    const double expected_gy =
+        (gy_bl + (gy_br - gy_bl) * col_ratio) * (1.0 - row_ratio) +
+        (gy_tl + (gy_tr - gy_tl) * col_ratio) * row_ratio;
+
+    EXPECT_NEAR(dist, expected_dist, 1e-13);
+    EXPECT_NEAR(grad.x(), expected_gx, 1e-13);
+    EXPECT_NEAR(grad.y(), expected_gy, 1e-13);
+}
+
 // 测试仅查询符号距离与 getDistAndGrad 返回的距离一致。
 TEST(ESDFMapTest, GetDistanceMatchesDistAndGrad) {
     const GridMap grid_map(1.0, 3, 3, Position{0.0, 0.0}, {Position{0.0, 0.0}});
