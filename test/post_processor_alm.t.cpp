@@ -335,7 +335,10 @@ TEST_P(AlmDatasetAcceptanceTest, ProducesCollisionFreeSaneTrajectory) {
     ASSERT_EQ(DataLoader::LoadProtoFromJsonFile(dataset.file, request),
               LoadResult::SUCCESS);
     const auto vehicle_params = VehicleParams::FromProto(request.vehicle());
-    // 与生产入口一致的 footprint 默认构造（233/2/4）
+    // footprint 取代码默认构造（233/2/4）：与 ALM 生产配置
+    // （data/alm_config.json 的 outer_row_num=4）一致；NMPC 生产配置
+    // （data/nmpc_config.json 的 outer_row_num=2）不同源，其 [ALM-CMP]
+    // 对比行仅供算法间参考、不构成生产数字
     const VehicleFootprintModel footprint_model(vehicle_params);
     const auto grid_map = GridMap::FromProto(request.environment());
     const ESDFMap esdf_map(grid_map);

@@ -518,16 +518,17 @@ TEST(PreprocessingPipelineTest, PipelineOutputFeedsNmpcSolverEndToEnd) {
 // ============================================================
 
 // PreprocessingPipelineConfig 默认值一致性：collision_safety_margin 与
-// bspline.collision_margin 默认值应均为 0。
-// 触发原因：外圆已超出车辆矩形轮廓边界，无需物理安全裕度；Round 7 起
+// bspline.collision_margin 默认值应均为 EPSILON_PRECISE。
+// 触发原因：外圆已超出车辆矩形轮廓边界，无需物理安全裕度，仅保留
+// EPSILON_PRECISE（1e-6）兜底浮点舍入误差；Round 7 起
 // StaticCorridorBuilderConfig 不再有 hard_margin 字段（静态走廊只剩独立的
 // soft_margin，不再受 collision_safety_margin 驱动，安全职责完全交给 NMPC
 // 侧默认生效的迭代走廊），因此本测试不再校验 corridor 侧的一致性。
-// 预期行为：两者默认值严格相等（均为 0）。
+// 预期行为：两者默认值严格相等（均为 EPSILON_PRECISE）。
 TEST(PreprocessingPipelineTest, CollisionSafetyMarginDefaultsAreConsistent) {
     const PreprocessingPipelineConfig config;
-    EXPECT_DOUBLE_EQ(config.collision_safety_margin, 0.0);
-    EXPECT_DOUBLE_EQ(config.bspline.collision_margin, 0.0);
+    EXPECT_DOUBLE_EQ(config.collision_safety_margin, EPSILON_PRECISE);
+    EXPECT_DOUBLE_EQ(config.bspline.collision_margin, EPSILON_PRECISE);
     EXPECT_DOUBLE_EQ(config.collision_safety_margin,
                      config.bspline.collision_margin);
 }

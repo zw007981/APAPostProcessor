@@ -24,7 +24,7 @@
 
 ## 当前 Milestone（默认编号指针）
 
-**当前默认编号：001**（ALM/MINCO/PHR-ALM 模块 Milestone 序列起点，`milestone-001`~`milestone-008`，均处于「未开始」状态，尚无 Dev Agent 进场；系统设计见 [docs/architecture.md](architecture.md) 3.7 节与 [docs/ALM.md](ALM.md)，接口规划见 [docs/interfaces.md](interfaces.md)「待实现：ALM 模块核心接口」一节）
+**当前默认编号：012**（ALM/MINCO/PHR-ALM 模块 Milestone 序列 `milestone-001`~`milestone-011` 已全部完成（`milestone-009` PIVOT 修复 → `milestone-010` NMPC 依赖移除 → `milestone-011` 运动学可行性校验）；`milestone-012` 进入收尾阶段：四数据集调参，在合法前提下削减 ALM 机动段数与路径总长度。系统设计见 [docs/architecture.md](architecture.md) 3.7 节与 [docs/ALM.md](ALM.md)）
 
 Dev Agent / Review Agent 在人工没有于对话中显式指定 Milestone 编号时，一律以此处登记的编号作为默认的 `{N}`，不需要人工在每一次开场白里手动写明或来回改写编号。人工只需要在切换到不同 Milestone 时更新这一行数字（这是整个流程里唯一需要手动改编号的地方）；如需临时处理非当前编号的 Milestone（如战术改动、复审旧 Milestone），仍可在对话中显式指定，显式指定优先于此处的默认值。
 
@@ -32,14 +32,18 @@ Dev Agent / Review Agent 在人工没有于对话中显式指定 Milestone 编�
 
 | 编号 | 名称 | 状态 | 详情 |
 |---|---|---|---|
-| milestone-001 | MINCO 核心：多项式轨迹表示与块三对角求解器 | 未开始 | [spec.md](milestones/milestone-001/spec.md) |
-| milestone-002 | θ-s 空间到阿克曼状态的运动学映射与物理约束惩罚 | 未开始 | [spec.md](milestones/milestone-002/spec.md) |
-| milestone-003 | 前端 Hybrid A* 解析：换挡打断与初值提取 | 未开始 | [spec.md](milestones/milestone-003/spec.md) |
-| milestone-004 | ESDF 双重安全机制惩罚（margin_safe/margin_comf） | 未开始 | [spec.md](milestones/milestone-004/spec.md) |
-| milestone-005 | 预处理粗优化（两阶段流程第一阶段 Jpre） | 未开始 | [spec.md](milestones/milestone-005/spec.md) |
-| milestone-006 | PHR-ALM 主优化循环（AlmSolver 内外层） | 未开始 | [spec.md](milestones/milestone-006/spec.md) |
-| milestone-007 | 机动融化与拓扑修剪 | 未开始 | [spec.md](milestones/milestone-007/spec.md) |
-| milestone-008 | 端到端集成与四数据集验收 | 未开始 | [spec.md](milestones/milestone-008/spec.md) |
+| milestone-001 | MINCO 核心：多项式轨迹表示与块三对角求解器 | 已完成 | [spec.md](milestones/milestone-001/spec.md) |
+| milestone-002 | θ-s 空间到阿克曼状态的运动学映射与物理约束惩罚 | 已完成 | [spec.md](milestones/milestone-002/spec.md) |
+| milestone-003 | 前端 Hybrid A* 解析：换挡打断与初值提取 | 已完成 | [spec.md](milestones/milestone-003/spec.md) |
+| milestone-004 | ESDF 双重安全机制惩罚（margin_safe/margin_comf） | 已完成 | [spec.md](milestones/milestone-004/spec.md) |
+| milestone-005 | 预处理粗优化（两阶段流程第一阶段 Jpre） | 已完成 | [spec.md](milestones/milestone-005/spec.md) |
+| milestone-006 | PHR-ALM 主优化循环（AlmSolver 内外层） | 已完成 | [spec.md](milestones/milestone-006/spec.md) |
+| milestone-007 | 机动融化与拓扑修剪 | 已完成 | [spec.md](milestones/milestone-007/spec.md) |
+| milestone-008 | 端到端集成与四数据集验收 | 已完成 | [spec.md](milestones/milestone-008/spec.md) |
+| milestone-009 | 修复 AlmManeuverMelter PIVOT 处理与自行车模型的自相矛盾 | 已完成 | [spec.md](milestones/milestone-009/spec.md) |
+| milestone-010 | main.cpp 改为对比 ALM 自身预处理/优化后轨迹，去除对 NMPC 的依赖 | 已完成 | [spec.md](milestones/milestone-010/spec.md) |
+| milestone-011 | Trajectory::validate 新增基于梯形配点残差的运动学可行性校验 | 已完成 | [spec.md](milestones/milestone-011/spec.md) |
+| milestone-012 | 四数据集调参：合法前提下削减 ALM 机动段数与路径总长度 | 评审中 | [spec.md](milestones/milestone-012/spec.md) |
 
 ## 规模化：可选的阶段归档（大多数项目不需要）
 

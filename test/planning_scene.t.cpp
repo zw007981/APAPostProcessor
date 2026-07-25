@@ -64,6 +64,17 @@ TEST(PlanningSceneTest, FactoryRoutesToNmpcSceneWithDefaultOuterRowNum) {
     EXPECT_EQ(scene->footprintModel().getOuterRowNum(), 4);
 }
 
+// 测试场景：NMPC 详情 JSON 配置 outer_row_num=3。
+// 预期行为：基类覆盖项经 loadConfigDetails 生效，外圆行数透传为 3（与
+// ALM 场景同一解析入口，防止 proto 路由静默忽略基类字段）。
+TEST(PlanningSceneTest, NmpcSceneAppliesBaseConfigOverrides) {
+    auto scene =
+        LoadSceneWithDetails("{\"algorithm\": \"nmpc\", \"outer_row_num\": 3}");
+    ASSERT_NE(scene, nullptr);
+    EXPECT_EQ(scene->algorithmName(), "NMPC");
+    EXPECT_EQ(scene->footprintModel().getOuterRowNum(), 3);
+}
+
 // 测试场景：ALM 详情 JSON 未配置 outer_row_num。
 // 预期行为：外圆行数取 Config 基类默认值 4。
 TEST(PlanningSceneTest, OuterRowNumDefaultsToConfigDefaultWhenAbsent) {

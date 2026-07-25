@@ -28,10 +28,11 @@ struct Config {
     double control_effort_accel_weight = 1e-2;
     // 控制代价：前轮转角变化率 δ_dot
     double control_effort_steer_rate_weight = 1e-2;
-    // 顺滑代价：纵向加加速度 jerk
-    double smoothing_jerk_weight = 1.0;
-    // 顺滑代价：转向角加速度
-    double smoothing_steer_accel_weight = 1.0;
+    // 顺滑代价：纵向加加速度 jerk（四数据集调参验证值；1.0 会导致 data3
+    // 求解失败回退，勿直接放大）
+    double smoothing_jerk_weight = 1e-1;
+    // 顺滑代价：转向角加速度（同上调参验证值）
+    double smoothing_steer_accel_weight = 1e-1;
     // 内部机动段状态代价：速度 v
     double interior_speed_weight = 1e-2;
     // 内部机动段状态代价：前轮转角 δ

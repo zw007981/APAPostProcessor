@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "../spatial/esdf_map.h"
+#include "../util/constants.h"
 #include "../util/maneuver.h"
 #include "../vehicle/vehicle_footprint_model.h"
 #include "../vehicle/vehicle_params.h"
@@ -34,8 +35,8 @@ struct BSplineSmootherConfig {
     double max_kappa = 0.18;
     // 切向均匀化正则项权重
     double weight_reg = 0.1;
-    // 碰撞检测数值容差 (m)
-    double collision_margin = 0.0;
+    // 碰撞检测数值容差 (m)：纯浮点舍入兜底，不含物理安全裕度
+    double collision_margin = EPSILON_PRECISE;
     // 首尾控制点航向锚定延伸步长 (m)
     double anchor_extension_length = 0.3;
     // 短机动段退化阈值 (m)

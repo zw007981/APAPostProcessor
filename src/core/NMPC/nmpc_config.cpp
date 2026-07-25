@@ -118,6 +118,27 @@ void NMPCConfig::loadFromProto(
         const auto& c = proto.corridor();
         LOAD_SUB_(c, soft_margin, corridor.soft_margin);
     }
+    // 代价权重双源同步：Config 基类与 PathToOcpConfig 存在同名权重字段，
+    // 生产路径（PreprocessingToOcpConverter/PathToOcpConverter）只读
+    // path_to_ocp_config。过渡期约定以 Config 基类为唯一权威来源，proto
+    // 覆盖加载完成后无条件同步，杜绝 JSON 中配置基类权重被静默忽略。
+    path_to_ocp_config.control_effort_accel_weight =
+        control_effort_accel_weight;
+    path_to_ocp_config.control_effort_steer_rate_weight =
+        control_effort_steer_rate_weight;
+    path_to_ocp_config.smoothing_jerk_weight = smoothing_jerk_weight;
+    path_to_ocp_config.smoothing_steer_accel_weight =
+        smoothing_steer_accel_weight;
+    path_to_ocp_config.interior_speed_weight = interior_speed_weight;
+    path_to_ocp_config.interior_steer_weight = interior_steer_weight;
+    path_to_ocp_config.global_target_position_weight =
+        global_target_position_weight;
+    path_to_ocp_config.global_target_heading_weight =
+        global_target_heading_weight;
+    path_to_ocp_config.terminal_position_weight = terminal_position_weight;
+    path_to_ocp_config.terminal_heading_weight = terminal_heading_weight;
+    path_to_ocp_config.terminal_speed_weight = terminal_speed_weight;
+    path_to_ocp_config.terminal_steer_weight = terminal_steer_weight;
 }
 #undef LOAD_SUB_
 #undef LOAD_

@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "../../util/constants.h"
+
 namespace apa_post_processor {
 // 前向声明
 class ESDFMap;
@@ -19,7 +21,7 @@ class IterativeCorridorConstraint : public stc_SQP::Constraint {
         const ESDFMap& esdf_map,
         const std::vector<Eigen::Vector2d>& circle_local_positions,
         double circle_radius, int global_start_idx, int constraints_per_step,
-        double hard_margin = 0.0);
+        double hard_margin = EPSILON_PRECISE);
 
     // 每步输出的约束行数
     int ng() const override;

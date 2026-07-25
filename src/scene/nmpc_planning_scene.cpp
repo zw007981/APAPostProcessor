@@ -2,6 +2,7 @@
 
 #include "../core/NMPC/nmpc_config.h"
 #include "../core/post_processor.h"
+#include "../util/config_loader.h"
 #include "../util/data_loader.hpp"
 #include "../util/logger.h"
 
@@ -18,6 +19,13 @@ std::unique_ptr<NMPCPlanningScene> NMPCPlanningScene::LoadFromFile(
 
 void NMPCPlanningScene::loadConfigDetails(
     const std::string& config_details_path) {
+    // 算法无关的基类字段覆盖项（outer_row_num 等）与 ALM 场景同一解析
+    // 入口；proto 路由不识别这些字段，缺此会被静默忽略
+    if (!LoadBaseConfigOverrides(config_details_path, &config())) {
+        LOG_FMT_ERROR(
+            "NMPC config details load failed: {}, keep default config!!!",
+            config_details_path);
+    }
     ::apa::post_processor::NMPCConfigProto proto;
     const auto load_result =
         DataLoader::LoadProtoFromJsonFile(config_details_path, proto);

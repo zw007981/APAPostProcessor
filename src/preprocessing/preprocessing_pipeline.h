@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../spatial/esdf_map.h"
+#include "../util/constants.h"
 #include "../util/path.h"
 #include "../vehicle/vehicle_footprint_model.h"
 #include "../vehicle/vehicle_params.h"
@@ -30,8 +31,9 @@ struct PreprocessingPipelineConfig {
     StaticCorridorBuilderConfig corridor{};
     // 是否构建静态舒适走廊系数（仅影响舒适度偏好，与安全无关）
     bool use_static_corridor = false;
-    // 跨阶段统一的碰撞检测数值容差 (m)，自动传播到 bspline.collision_margin
-    double collision_safety_margin = 0.0;
+    // 跨阶段统一的碰撞检测数值容差 (m)，纯浮点舍入兜底，不含物理安全裕度；
+    // 自动传播到 bspline.collision_margin
+    double collision_safety_margin = EPSILON_PRECISE;
     // 调试输出开关：开启后 run() 在各阶段中间产物中填充调试数据
     bool enable_debug_output = false;
 };

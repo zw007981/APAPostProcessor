@@ -9,6 +9,7 @@
 #include "../../preprocessing/speed_profile_planner.h"
 #include "../../preprocessing/static_corridor_builder.h"
 #include "../../util/config.h"
+#include "../../util/constants.h"
 #include "nmpc_config.pb.h"
 #include "path_to_ocp_converter.h"
 
@@ -16,7 +17,8 @@ namespace apa_post_processor {
 // NMPC 求解器配置：继承通用 Config，追加 SQP / HPIPM / 迭代走廊等专有参数。
 struct NMPCConfig : public Config {
     // 过渡期：保留 PathToOcpConfig 以兼容现有业务代码（后续统一到 Config
-    // 基类后移除）
+    // 基类后移除）；其中与 Config 基类同名的代价权重字段以基类为唯一权威
+    // 来源，loadFromProto 末尾被基类字段无条件覆盖
     PathToOcpConfig path_to_ocp_config{};
     // 静态舒适走廊不等式系数矩阵 C * Z <= d（预处理管线产出，运行时填充）
     std::optional<Eigen::MatrixXd> static_corridor_C;
@@ -64,8 +66,9 @@ struct NMPCConfig : public Config {
     StaticCorridorBuilderConfig corridor;
     // 是否构建静态舒适走廊
     bool use_static_corridor = false;
-    // 跨阶段统一碰撞检测数值容差 (m)，自动传播到 bspline.collision_margin
-    double collision_safety_margin = 0.0;
+    // 跨阶段统一碰撞检测数值容差 (m)，纯浮点舍入兜底，不含物理安全裕度；
+    // 自动传播到 bspline.collision_margin
+    double collision_safety_margin = EPSILON_PRECISE;
 
     // 从 proto 消息覆盖配置值（仅覆盖已设置的 optional 字段）
     void loadFromProto(

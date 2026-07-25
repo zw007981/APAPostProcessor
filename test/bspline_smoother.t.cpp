@@ -104,7 +104,8 @@ ESDFMap MakeBackwardObstacleEsdfMap() {
 
 // 用于验证重试逻辑的轻障碍：单个占据单元位于(2.5, 1.1)，
 // 长直路径y=0从其下方穿过，车身外圆刚好轻微侵入。
-// 注意：collision_margin 已从 5cm 改为 0（外圆自身提供安全缓冲）。
+// 注意：collision_margin 已从 5cm 物理裕度改为纯数值容差
+// EPSILON_PRECISE=1e-6（外圆自身提供安全缓冲）。
 ESDFMap MakeRetryObstacleEsdfMap() {
     std::vector<Position> cells;
     cells.emplace_back(Position{2.5, 1.08});

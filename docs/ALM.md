@@ -1,14 +1,35 @@
-# ALM
+# 基于ALM的APA模块后处理方法
 
-## 第一章：原论文理论框架（基于差速模型与通用机器人）
+<!-- TOC tocDepth:2..3 chapterDepth:2..6 -->
+
+- [基于ALM的APA模块后处理方法](#基于alm的apa模块后处理方法)
+  - [1. 原论文理论框架](#1-原论文理论框架)
+    - [1.1. 1 轨迹参数化：运动状态空间 ($\\theta-s$)](#11-1-轨迹参数化运动状态空间-theta-s)
+    - [1.2. 2 初始映射与 MINCO 降维矩阵](#12-2-初始映射与-minco-降维矩阵)
+    - [1.3. 3 软化约束与基础代价目标](#13-3-软化约束与基础代价目标)
+    - [1.4. 4 ALM 精确时空优化](#14-4-alm-精确时空优化)
+  - [2. 自行车模型下的自动泊车 (APA) 轨迹后处理方法](#2-自行车模型下的自动泊车-apa-轨迹后处理方法)
+    - [2.1. 1 前端混合 A\* 路径解析与智能分段](#21-1-前端混合-a-路径解析与智能分段)
+    - [2.2. 2 自行车模型在 $\\theta-s$ 空间的无奇异映射](#22-2-自行车模型在-theta-s-空间的无奇异映射)
+    - [2.3. 3 泊车专属防奇异物理硬约束与优化目标](#23-3-泊车专属防奇异物理硬约束与优化目标)
+    - [2.4. 4 空心边界 ESDF 碰撞检测与双重安全机制](#24-4-空心边界-esdf-碰撞检测与双重安全机制)
+    - [2.5. 5 APA 终点对齐与 ALM 双层时空优化](#25-5-apa-终点对齐与-alm-双层时空优化)
+    - [2.6. 6 机动融化机制：全局联动、时间坍缩防护与拓扑修剪](#26-6-机动融化机制全局联动时间坍缩防护与拓扑修剪)
+      - [2.6.1. 1 融化的动力来源：跃度与时间惩罚](#261-1-融化的动力来源跃度与时间惩罚)
+      - [2.6.2. 2 时间坍缩奇异性与两层数值防护](#262-2-时间坍缩奇异性与两层数值防护)
+      - [2.6.3. 3 硬修剪：复用拓扑清洗后处理](#263-3-硬修剪复用拓扑清洗后处理)
+
+<!-- /TOC -->
+
+## 1. 原论文理论框架
 
 原论文提出了一种通用的时空轨迹优化框架，解决传统笛卡尔空间在面对机器人非完整性约束时极易产生的奇异性问题。
 
-> 原论文：Mengke Zhang, Nanhe Chen, Hu Wang, Jianxiong Qiu, Zhichao Han, Qiuyu Ren, Chao Xu, Fei Gao, Yanjun Cao. *Universal Trajectory Optimization Framework for Differential Drive Robot Class*. arXiv:2409.07924（浙江大学 FAST Lab，项目页 https://zju-fast-lab.github.io/DDR-opt/ ）。论文中将本章描述的轨迹表示法称为 **MS trajectory**（Motion State trajectory），外层精确收紧方法称为 **PHR-ALM**（Powell-Hestenes-Rockafellar Augmented Lagrangian Method），与本文档用词一致。
+> Mengke Zhang, Nanhe Chen, Hu Wang, Jianxiong Qiu, Zhichao Han, Qiuyu Ren, Chao Xu, Fei Gao, Yanjun Cao. *Universal Trajectory Optimization Framework for Differential Drive Robot Class*. arXiv:2409.07924
 
-### 1.1 轨迹参数化：运动状态空间 ($\theta-s$)
+### 1.1. 1 轨迹参数化：运动状态空间 ($\theta-s$)
 
-系统摒弃笛卡尔坐标的直接参数化，在“运动状态（Motion States）”空间中构建轨迹。将第 $i$ 段轨迹的朝向角 $\theta_i$ 和弧长 $s_i$ 建模为时间 $t$ 的 5 阶多项式（$h=3$）：
+原论文的一个核心方法是在运动状态（Motion States）空间中构建轨迹。将第 $i$ 段轨迹的朝向角 $\theta_i$ 和弧长 $s_i$ 建模为时间 $t$ 的 5 阶多项式（$h=3$）：
 
 $$\theta_i(t) = \beta^T(t)c_{\theta,i}$$
 
@@ -32,7 +53,7 @@ $$e_{max} = \frac{(b-a)^5}{180 n^4}\max_x|f^{(4)}(x)|$$
 
 $x_{Iv}$ 是 ICR 沿车体纵轴的偏移量，属于需要离线/在线标定的物理常数（依赖地面附着、履带张力、行驶速度等），并非优化决策变量；将其视为常数是对真实滑移特性的一阶近似，急转弯或复杂地面条件下存在误差，属于已知局限。另外，辛普森积分的梯度必须采用与代价评估完全相同的一组固定求积节点做“先离散、后求导”（discretize-then-differentiate），否则数值积分误差会与解析梯度不一致，导致 L-BFGS 搜索方向出现系统性偏差。
 
-### 1.2 初始映射与 MINCO 降维矩阵
+### 1.2. 2 初始映射与 MINCO 降维矩阵
 
 前端 JPS 提供离散点序列 $\{p_g\}$。系统在 $\{p_g\}$ 上降采样提取 $M$ 段的初始期望终点 $p_{w0}$。
 
@@ -64,7 +85,7 @@ $$\tau_i = \begin{cases} \sqrt{2T_i-1}-1 & T_i>1 \\ 1-\sqrt{2/T_i-1} & T_i\le1 \
 
 （该双射在 $T_i=1$ 处一阶连续可导，且相比单纯 $T_i=e^{\tau_i}$ 指数映射在 $T_i$ 较大时增长更缓、数值上更不容易溢出）。需要特别说明：2.6.2 节针对“机动融化”场景引入的 $T_i=e^{\tau_i}+T_{min}$ 是**本文档针对时间坍缩问题追加的工程变体**，与此处的分段双射是两种可独立使用的重参数化方案（前者服务于“防止 $T_i\to0$ 定义域失效”，后者是通用的正定化手段），实现时需要明确选择其中一种并保持全文档一致，不应混用。这也是 1.4 节“内层用 L-BFGS 优化 $^w\sigma'$、$\tau$ 和 $s_f$”这一说法能够成立的前提。
 
-### 1.3 软化约束与基础代价目标
+### 1.3. 3 软化约束与基础代价目标
 
 所有物理边界（速度、加速度限制）和 ESDF 安全距离均转化为惩罚函数 $I_d(c, T)$。差速车的耦合速度极限表达为 $\omega_{max}(v_x) = \frac{v_M - \vert{}v_x\vert{}}{v_M} \omega_M$，其本质是左右轮速各自不超限的菱形（L1）约束 $\frac{|v_x|}{v_M}+\frac{|\omega|}{\omega_M}\le 1$ 在固定 $v_x$ 时的切片表达。
 
@@ -76,7 +97,7 @@ $$\mathcal{J}_0 = \int_0^{T_s} \sigma^{(h)}(t)^T W \sigma^{(h)}(t) dt + \epsilon
 
 需要注意：该积分对多项式而言存在**闭式解**（是关于系数 $c$ 或等价关于 $T$ 的二次型，能量矩阵可解析算出），无需数值求积——这与 1.1 节世界坐标积分（因含 $\cos\theta,\sin\theta$ 非线性项而必须走辛普森数值积分）形成对比，二者不可混同。
 
-### 1.4 ALM 精确时空优化
+### 1.4. 4 ALM 精确时空优化
 
 $\theta,s$ 的边界值在 1.2 节的 $K(T)c=b$ 中是**线性硬边界条件**（$\sigma_0^{[h-1]},\sigma_f^{[h-1]}$ 直接指定），可以精确满足；但世界系终点 $x(T_s),y(T_s)$ 是对 $\cos\theta,\sin\theta$ 做非线性数值积分得到的**非线性泛函**，无法在 MINCO 的线性降维阶段被直接钉死。因此终点位置误差无法通过简单加大权重（软惩罚）彻底消除，必须引入增广拉格朗日方法（PHR-ALM）做外层精确收紧：
 
@@ -84,19 +105,17 @@ $$\mathcal{J}_\rho = \mathcal{J}_s' + \sum_{t=x,y} \frac{\rho}{2} \left\Vert{} \
 
 其中 $\mathcal{J}_s'$ 即 1.3 节基础平滑目标 $\mathcal{J}_0$ 与全部不等式软约束惩罚 $\sum I_d$ 之和；终点朝向 $\theta_f$ 作为 $\sigma_f^{[h-1]}$ 的一部分是硬边界条件、直接精确满足，不参与本节的 ALM 项（仅 $x,y$ 需要）。
 
-* **内层循环**：固定乘子 $\lambda$ 和权重 $\rho$，用 L-BFGS 无约束求解器优化 $^w\sigma'$、$\tau$（1.2 节重参数化后的时间变量）以及**终点弧长 $s_f$**（1.2 节已说明其为独立自由变量，梯度经 $K(T)^{-T}$ 伴随技巧求得），并从上一轮外层迭代的解热启动（warm start），以保证求解效率。
+- **内层循环**：固定乘子 $\lambda$ 和权重 $\rho$，用 L-BFGS 无约束求解器优化 $^w\sigma'$、$\tau$（1.2 节重参数化后的时间变量）以及**终点弧长 $s_f$**（1.2 节已说明其为独立自由变量，梯度经 $K(T)^{-T}$ 伴随技巧求得），并从上一轮外层迭代的解热启动（warm start），以保证求解效率。
 
-* **外层循环**：依据当前积分终点误差 $\mathcal{C}_{f}$，更新 $\lambda^{k+1} = \lambda^k + \rho^k \mathcal{C}_{f}$；原论文中 $\rho^{k+1} = \min[(1+\varrho)\rho^k, \rho_{max}]$ 是**每轮外层迭代无条件递增**的（不含任何门控条件）。本文档在此基础上追加了一条工程加固——充分下降判据：只有当 $\Vert\mathcal{C}_f^k\Vert$ 相对上一轮未充分减小（如 $>\kappa\Vert\mathcal{C}_f^{k-1}\Vert$，$\kappa<1$）时才提升 $\rho$，否则保持 $\rho$ 不变、只更新 $\lambda$，避免 $\rho$ 过快增长导致内层问题病态；**这一门控并非原论文内容**，属于本文档针对工程鲁棒性的额外补充，实现时可视情况选择是否启用。外层在满足终止阈值 $\Vert\mathcal{C}_f\Vert\le\varepsilon_{feas}$（或达到最大外层迭代次数上限，作为实时系统的兜底退出条件）后停止。
+- **外层循环**：依据当前积分终点误差 $\mathcal{C}_{f}$，更新 $\lambda^{k+1} = \lambda^k + \rho^k \mathcal{C}_{f}$；原论文中 $\rho^{k+1} = \min[(1+\varrho)\rho^k, \rho_{max}]$ 是**每轮外层迭代无条件递增**的（不含任何门控条件）。本文档在此基础上追加了一条工程加固——充分下降判据：只有当 $\Vert\mathcal{C}_f^k\Vert$ 相对上一轮未充分减小（如 $>\kappa\Vert\mathcal{C}_f^{k-1}\Vert$，$\kappa<1$）时才提升 $\rho$，否则保持 $\rho$ 不变、只更新 $\lambda$，避免 $\rho$ 过快增长导致内层问题病态；**这一门控并非原论文内容**，属于本文档针对工程鲁棒性的额外补充，实现时可视情况选择是否启用。外层在满足终止阈值 $\Vert\mathcal{C}_f\Vert\le\varepsilon_{feas}$（或达到最大外层迭代次数上限，作为实时系统的兜底退出条件）后停止。
 
 ---
 
-## 第二章：自行车模型下的自动泊车 (APA) 轨迹后处理方法
+## 2. 自行车模型下的自动泊车 (APA) 轨迹后处理方法
 
-本章彻底替换底盘模型为阿克曼自行车模型，并以带有齿轮挡位信息的高质量混合 A* 轨迹为优化输入，重新推导并构建适用于 APA 场景的高精度系统。
+本章彻底替换底盘模型为阿克曼自行车模型，并以带有齿轮挡位信息的高质量混合 A* 轨迹为优化输入，重新推导并构建适用于 APA 场景的运动学方程。
 
-> 本框架的求解器实现类命名为 `AlmSolver`，与仓库既有的 [`NmpcSolver`](../src/core/NMPC/nmpc_solver.h) 并列，作为两种可互相替换的轨迹后处理求解器接入 `PostProcessor`。
-
-### 2.1 前端混合 A* 路径解析与智能分段
+### 2.1. 1 前端混合 A* 路径解析与智能分段
 
 混合 A* 输出间距约为 $0.05\text{m}$ 且带挡位的离散点。直接使用会造成极大的维度灾难，需实施以下两步剥离与初值提取：
 
@@ -108,7 +127,7 @@ $$\mathcal{J}_\rho = \mathcal{J}_s' + \sum_{t=x,y} \frac{\rho}{2} \left\Vert{} \
 划分段数 $M = \lceil \frac{L}{d_{seg}} \rceil$。
 以步长 $K_{step} = \lfloor \frac{N-1}{M} \rfloor$ 抽取 A* 锚点，获取期望空间坐标 $p_{w0}^m$、初始累积弧长 $s_m$、初始朝向角 $\theta_m$。估算初始时间 $\tau_m$ 作为 L-BFGS 的精准 Initial Guess。
 
-### 2.2 自行车模型在 $\theta-s$ 空间的无奇异映射
+### 2.2. 2 自行车模型在 $\theta-s$ 空间的无奇异映射
 
 针对 `BicycleModelDelta`，我们需要提取无奇异的阿克曼状态与控制量。
 线速度与纵向加速度解析简单：
@@ -122,8 +141,10 @@ $$a(t) = \ddot{s}(t)$$
 
 $$\delta(t) = \arctan\left( L_{base} \frac{\dot{\theta}(t)}{\dot{s}(t)} \right)$$
 
+工程实现中对 $\delta$ 同样施加 $\epsilon_g$ 分母正则化：取 $\delta = \arctan\!\big( L_{base}\dot\theta\dot s / (\dot s^2 + \epsilon_g) \big)$，在 $\epsilon_g \to 0$ 且 $\dot s \neq 0$ 时严格退化为上式，同时避免 $(\dot s, \dot\theta) = (0,0)$ 处的 0/0 NaN（与下文 $\dot\delta$ 的"工程安全阀"同源、偏差同阶；注意正则化后的 $\dot\delta$ 并非正则化后 $\delta$ 的精确时间导数，二者只在 $\epsilon_g \to 0$ 时一致）。实现见 `src/core/ALM/bicycle_kinematics_extractor.h`。
+
 **方向盘打角速度 $\dot{\delta}$ 的高阶链式解析：**
-对 $\delta(t)$ 关于时间 $t$ 复合求导，完美抵消孤立分母，实现无奇异表达：
+对 $\delta(t)$ 关于时间 $t$ 复合求导以抵消分母，实现无奇异表达：
 
 $$\dot{\delta}(t) = L_{base} \frac{\ddot{\theta}(t)\dot{s}(t) - \dot{\theta}(t)\ddot{s}(t)}{\dot{s}^2(t) + L_{base}^2\dot{\theta}^2(t)}$$
 
@@ -135,18 +156,18 @@ $$\dot{\delta}(t) \approx L_{base} \frac{\ddot{\theta}(t)\dot{s}(t) - \dot{\thet
 
 该正则化必须**同时应用于代价函数值与其解析梯度**——即推导梯度时把 $\epsilon_g$ 当作分母的一部分一并求导，而不是先按无正则化的解析式求出梯度、再单独给数值分母加 $\epsilon_g$，否则梯度与代价评估会不一致，导致 L-BFGS 出现虚假下降方向。这一正则化在 2.6.1 节所述“融化”终点处（$\dot s,\dot\theta$ 同步趋于 0）尤为关键：若不加正则化，该处梯度会因分母趋零而数值爆炸，反而会阻止优化器继续压缩该段。
 
-### 2.3 泊车专属防奇异物理硬约束与优化目标
+### 2.3. 3 泊车专属防奇异物理硬约束与优化目标
 
 将所有的车辆能力边界转化为多项式内不可除零的二次形态惩罚不等式 $\mathcal{C}_d \le 0$。
 
 **底盘能力硬约束：**
 
-* **纵向极值约束**：$\mathcal{C}_v = \dot{s}^2 - v_{max}^2 \le 0$，以及 $\mathcal{C}_a = \ddot{s}^2 - a_{max}^2 \le 0$。
-* **前轮最大转角约束**（防奇异平方形态）：
+- **纵向极值约束**：$\mathcal{C}_v = \dot{s}^2 - v_{max}^2 \le 0$，以及 $\mathcal{C}_a = \ddot{s}^2 - a_{max}^2 \le 0$。
+- **前轮最大转角约束**（防奇异平方形态）：
 
 $$\mathcal{C}_\delta = L_{base}^2 \dot{\theta}^2 - \dot{s}^2 \tan^2(\delta_{max}) \le 0$$
 
-* **方向盘打角速度极限**（防奇异交叉乘积形态）：
+- **方向盘打角速度极限**（防奇异交叉乘积形态）：
 
 $$\mathcal{C}_{\dot{\delta}} = L_{base}^2 (\ddot{\theta}\dot{s} - \dot{\theta}\ddot{s})^2 - \dot{\delta}_{max}^2 (\dot{s}^2 + L_{base}^2\dot{\theta}^2)^2 \le 0$$
 
@@ -155,7 +176,7 @@ $$\mathcal{C}_{\dot{\delta}} = L_{base}^2 (\ddot{\theta}\dot{s} - \dot{\theta}\d
 
 $$\mathcal{J}_0 = \int_{0}^{T_s} \left( w_s \dddot{s}^2 + w_\theta \dddot{\theta}^2 \right) dt + \epsilon_T T_s$$
 
-### 2.4 空心边界 ESDF 碰撞检测与双重安全机制
+### 2.4. 4 空心边界 ESDF 碰撞检测与双重安全机制
 
 彻底摒弃全覆盖圆。仅在 OBB 最外层网格构建空心边界外圆集合 $\{C_1, \dots, C_{N_c}\}$，外圆半径为 $r_{outer}$。
 
@@ -163,11 +184,11 @@ $$\mathcal{J}_0 = \int_{0}^{T_s} \left( w_s \dddot{s}^2 + w_\theta \dddot{\theta
 
 为兼顾极限贴边与空间宽裕时的居中舒适度，设计双重松弛罚函数：
 
-* **极限安全红线惩罚 $\mathcal{C}_{safe}$**：设定 $margin_{safe} = 0.02\text{m}$。
+- **极限安全红线惩罚 $\mathcal{C}_{safe}$**：设定 $margin_{safe} = 0.02\text{m}$。
 
 $$\mathcal{C}_{safe, k}(t) = r_{outer} + margin_{safe} - d_k(t) \le 0$$
 
-* **舒适度缓冲惩罚 $\mathcal{C}_{comf}$**：设定 $margin_{comf} = 0.10\text{m}$。
+- **舒适度缓冲惩罚 $\mathcal{C}_{comf}$**：设定 $margin_{comf} = 0.10\text{m}$。
 
 $$\mathcal{C}_{comf, k}(t) = r_{outer} + margin_{comf} - d_k(t) \le 0$$
 
@@ -177,7 +198,7 @@ $$\mathcal{C}_{comf, k}(t) = r_{outer} + margin_{comf} - d_k(t) \le 0$$
 
 真正主导系统安全裕度的是外圆本身相对车辆 OBB 轮廓的几何保守性：以实测车辆参数（$5.0\text{m}\times1.9\text{m}$，后悬 $1.1\text{m}$）为例，`outer_row_num=2`（当前 NMPC 生产配置）时外圆相对 OBB 前/后向超出约 $0.215\text{m}$、左右向超出约 $0.157\text{m}$（共 12 个外圆）；提高到 `outer_row_num=4` 时超出量降至约 $0.10\text{m}$（26 个外圆）。由于 ALM 侧碰撞代价是逐圆软惩罚标量和（而非 NMPC 式逐点逐圆硬不等式约束），增加外圆数量只带来线性代价增长，不会像 NMPC 那样引发约束规模爆炸；因此 `outer_row_num` 在 ALM 中应作为独立于 NMPC 固定值的可调超参数，后续按“求解耗时 vs. 贴库精度”实测结果调优，无需在设计阶段强行与 NMPC 保持一致。
 
-### 2.5 APA 终点对齐与 ALM 双层时空优化
+### 2.5. 5 APA 终点对齐与 ALM 双层时空优化
 
 泊车对终点横纵向及姿态精度要求极为苛刻。我们利用 PHR-ALM 方法构建目标函数 $\mathcal{J}_\rho$：
 
@@ -200,17 +221,17 @@ $$\rho^0 = \text{clip}\left(\frac{\mathcal{J}_s'}{\max(\Vert\mathcal{C}_f\Vert^2
 **工业级收敛判定机制：**
 在此处，我们不仅要让 $(x, y)$ 误差衰减，还要进行严格的角度阈值检查：
 
-* **位置判定**：$e_{pos} = \sqrt{(\tilde{x}_f - x_{target})^2 + (\tilde{y}_f - y_{target})^2} \le 0.05\text{m}$。
-* **姿态判定**：$e_{heading} = \vert{}\text{Normalize}(\tilde{\theta}_f - \theta_{target})\vert{} \le 1.5^\circ$。
+- **位置判定**：$e_{pos} = \sqrt{(\tilde{x}_f - x_{target})^2 + (\tilde{y}_f - y_{target})^2} \le 0.05\text{m}$。
+- **姿态判定**：$e_{heading} = \vert{}\text{Normalize}(\tilde{\theta}_f - \theta_{target})\vert{} \le 1.5^\circ$。
 仅当双指标同时满足时，外层循环宣告 ALM 收敛。
 
 最终抽取的解析轨迹 $[x_r(t), y_r(t), \theta_r(t), v_r(t), \delta_r(t)]$ 完全满足无碰撞、无奇异、极端平滑，可直接下发至底层做闭环跟踪。
 
-### 2.6 机动融化机制：全局联动、时间坍缩防护与拓扑修剪
+### 2.6. 6 机动融化机制：全局联动、时间坍缩防护与拓扑修剪
 
 2.1 节要求所有 Maneuver 共享同一全局 $K(T)$ 系统，其根本目的是让优化器具备“融化”多余机动（如无意义的直行-倒车-直行）的能力。本节给出该机制成立所需的完整数学论证与配套工程防护，三者缺一不可。
 
-#### 2.6.1 融化的动力来源：跃度与时间惩罚
+#### 2.6.1. 1 融化的动力来源：跃度与时间惩罚
 
 驱动融化的能量来自 2.3 节已定义的基础目标：
 
@@ -222,7 +243,7 @@ $$\mathcal{J}_0 \sim \frac{\Delta s^2}{T^5}$$
 
 即代价随 $T^{-5}$ 呈**多项式（有理函数）陡峭增长**（并非指数增长，但增长速率已足够剧烈）。这意味着：若该段位移 $\Delta s$ 本身是路径规划冗余产生、并非绕障必需，优化器唯一能同时压低 $\mathcal{J}_0$ 与 $\epsilon_T T_s$ 两项的方向，就是把 $\Delta s\to0$ 与 $T\to0$ 同步压缩——这正是“融化”在梯度层面的数学含义，机制上与 NMPC 侧“无谓急刹带来巨大代价”是同一物理直觉的连续时间版本。
 
-#### 2.6.2 时间坍缩奇异性与两层数值防护
+#### 2.6.2. 2 时间坍缩奇异性与两层数值防护
 
 当某段 $T\to0$ 时，$K(T)$ 可能出现两类不同来源的数值风险，需要分别防护：
 
@@ -238,14 +259,10 @@ $$T_i = e^{\tau_i} + T_{min} \quad (\text{例如 } T_{min}=0.05\text{s})$$
 
 **求解器实现规范。** 装配后的 $K(T)$ 虽是分块三对角矩阵，但工程实现上不建议直接采用 `Eigen::SparseMatrix` + `SparseLU`——通用稀疏求解器对 CSC 格式的构建与分解本身存在堆内存分配与索引开销，且难以严格保证文档声称的 $O(M)$ 复杂度（分解阶段的 fill-in 处理会引入与具体稀疏模式相关的额外常数）。更贴合 MINCO 场景的做法是手写块 Thomas 算法（block tridiagonal solver）：以固定大小的 `Eigen::Matrix<double,6,6>`（对应 $h=3$ 时每段 6 个多项式系数）承载块内运算，全程栈上分配、无堆内存申请，前向消元与回代仅对每个块做固定大小矩阵求逆/LU 分解，可严格达到 $O(M)$ 且缓存友好。
 
-#### 2.6.3 硬修剪：复用拓扑清洗后处理
+#### 2.6.3. 3 硬修剪：复用拓扑清洗后处理
 
 即便 2.6.1、2.6.2 两步生效，融化后的 REV 段仍会在两端各保留一个 $\dot s=0$ 的结构性零速点（换挡边界条件是硬约束，无法通过连续优化消除本身），最终形态是“停-微动-停”而非真正意义上的连续穿过。因此 ALM 收敛后必须补一道后处理：
 
-1. 遍历各 Maneuver，若 $|\Delta s|$ 小于阈值（如 $0.05\text{m}$）且朝向变化量 $|\Delta\theta|$ 也低于阈值，判定为“压平废段”予以整体剔除，并将前后同方向 Maneuver 直接拼接；若 $|\Delta s|$ 很小但 $|\Delta\theta|$ 超过阈值（原地掉头式微动），判定为 PIVOT 单独保留，不参与合并。
+1. 遍历各 Maneuver，若 $|\Delta s|$ 小于阈值（如 $0.05\text{m}$）且朝向变化量 $|\Delta\theta|$ 也低于阈值，判定为“压平废段”予以整体剔除，并将前后同方向 Maneuver 直接拼接；若 $|\Delta s|$ 很小但 $|\Delta\theta|$ 超过阈值（原地掉头式微动），判定为 PIVOT 单独保留，不参与合并。**首/末 Maneuver 例外**：首段承载车辆当前位姿、末段承载已收敛的终点 $x,y,\theta$ 等式约束，二者无论判据量如何均不参与剔除与 PIVOT 重分类，仅允许同向合并（首末段的真实运动方向是输出语义的一部分：重分类为 PIVOT 会丢弃 FORWARD/BACKWARD 信息并阻断同向合并；终点不扰动要求见下方第 3 条）。
 2. **绝不合并方向相反的相邻段**——这一红线与 NMPC 侧 `TopologyCleaner`（[src/util/topology_cleaner.cpp](../src/util/topology_cleaner.cpp)）已验证的设计完全一致，应直接复用其两遍分类算法与判据结构（仅需按 ALM 输出的连续多项式采样点重新标定量纲/阈值），不建议另起炉灶重新实现一套等价逻辑。
 3. 若拼接处一阶导数（速度/朝向）存在微小跳变，仅做局部几何/样条微调过渡，**不得重新调用全局 ALM/MINCO 求解**（否则退化回“独立分段”问题），且该微调必须保持已收敛的终点 $x,y,\theta$ 等式约束不被扰动。
-
-#### 2.6.4 与多起点策略的关系
-
-本节机制依赖连续梯度自发压缩冗余机动，理论上仍可能收敛到保留次优机动的局部极小值。可选的补充保险是对同一全局链条使用多组不同的初始换挡点猜测（对应不同的候选拓扑）分别收敛，再依据最终 $\mathcal{J}_\rho$ 数值选优——该策略与本节机制不冲突，属于可选的互补加固手段，而非替代方案。
