@@ -1,5 +1,6 @@
 #pragma once
 
+#include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,8 @@
 #include "ALM/alm_maneuver_segmenter.h"
 #include "ALM/alm_preprocessor.h"
 #include "ALM/alm_solver.h"
+#include "DDP/apa_ddp_solver.h"
+#include "DDP/ddp_post_stage.h"
 #include "NMPC/nmpc_config.h"
 #include "NMPC/nmpc_solver.h"
 #include "NMPC/preprocessing_to_ocp_converter.h"
@@ -44,6 +47,10 @@ struct PostProcessorResult {
     // alm_traj 经同一套离散化管线产出，作为"优化前/优化后"对比的优化前
     // 基线；仅 ALM 路径填充
     Trajectory alm_preprocessed_traj;
+    // DDP 优化产出的轨迹（阶段二重解 + 驻留插入后的最终轨迹，含时间戳）；
+    // 仅 DDP 路径成功时填充，失败/回退时为空（回退不产出半成品，诊断
+    // 信息经 message 与日志携带）
+    Trajectory ddp_traj;
 };
 
 // 自适应间隔重试配置。
@@ -77,7 +84,52 @@ struct AlmConfig : public Config {
     double max_velocity = 2.0;
 };
 
-// 后处理器：Path → PreprocessingPipeline → NmpcSolver 完整链路。
+// DDP 路径配置：聚合 DDP 链路各阶段的配置结构体。状态幅值边界
+// （v_max/a_max/δ_max/ω_max）的唯一权威来源是 reference 子配置，η_max 的
+// 唯一权威来源是 solver.inner.steer_accel_max——cost/post_stage 中的同源
+// 字段由 synchronizeAmplitudeBounds() 自动同步（构造与 JSON 加载时各同步
+// 一次，optimizeDdp 在局部副本上再同步一次），禁止绕过同步独立改写，否则
+// 初值裁剪/AL 约束/驻留窗宽三者数值不自洽（Config 基类字段双源缺口历史
+// 教训的前置防御）。继承通用 Config 基类（与 AlmConfig 模式一致），供场景
+// 层统一管理配置；基类的代价权重字段为 NMPC 路径专用，DDP 路径不读取
+// （DDP 权重全部在 solver.cost 中），基类字段的 JSON 覆盖项（outer_row_num）
+// 由 LoadBaseConfigOverrides 统一承载。运动学参数（轴距）由 PostProcessor
+// 直接取 VehicleParams，不在此重复配置。
+struct DdpConfig : public Config {
+    // 构造时同步一次幅值边界，保证默认构造即自洽
+    DdpConfig() { synchronizeAmplitudeBounds(); }
+    // 把权威来源的幅值边界同步进全部消费方：reference.{v_max, a_max,
+    // delta_max, omega_max} → solver.cost 同名字段与 post_stage.omega_max，
+    // solver.inner.steer_accel_max → post_stage.eta_max
+    void synchronizeAmplitudeBounds() {
+        solver.cost.v_max = reference.v_max;
+        solver.cost.a_max = reference.a_max;
+        solver.cost.delta_max = reference.delta_max;
+        solver.cost.omega_max = reference.omega_max;
+        post_stage.omega_max = reference.omega_max;
+        post_stage.eta_max = solver.inner.steer_accel_max;
+    }
+    // 参考构建配置（重采样间距/固定步长/打靶间隔/初值裁剪盒边界）
+    DdpReferenceBuilderConfig reference;
+    // 阶段一/二求解编排配置（内层 MS-iLQR + 外层 AL + 代价求值三层）
+    ApaDdpSolverConfig solver;
+    // ESDF 双 margin 惩罚配置
+    DdpEsdfConstraintConfig esdf;
+    // 后处理与阶段二门控精化配置
+    DdpPostStageConfig post_stage;
+};
+
+// 由算法配置详情 JSON 加载 DdpConfig 专有字段覆盖项：仅覆盖显式出现的字段，
+// 未出现的保持构造默认值。JSON 节的组织与 C++ 子配置同构
+// （reference/solver.{inner,outer,cost}/esdf/post_stage），但 cost 节不接收
+// 幅值边界键、post_stage 节不接收 ω/η 上限键——它们在 JSON 层同样以
+// reference/inner 节为单一权威来源，加载完成后经 synchronizeAmplitudeBounds()
+// 同步进全部消费方。post_stage.cleanup/post_stage.validation 两个嵌套配置
+// 不在 JSON 映射范围内（工程标定量，代码侧配置）。config 为空指针抛
+// std::invalid_argument
+void LoadDdpConfigOverrides(const nlohmann::json& details, DdpConfig* config);
+
+// 后处理器：NMPC/ALM/DDP 三条并列后处理链路的完整编排器。
 class PostProcessor {
    public:
     // 使用车辆参数、车辆 footprint 模型与 ESDF 地图构造后处理器。
@@ -93,6 +145,14 @@ class PostProcessor {
     // 不修改任何 NMPC 配置状态）。
     PostProcessorResult optimizeAlm(
         const Path& init_path, const AlmConfig& alm_config = AlmConfig{}) const;
+    // 执行 DDP 后处理链路：Path → DdpReferenceBuilder（重采样/初值/打靶
+    // 布设）→ ApaDdpSolver 阶段一全局软化求解 → DdpPostStage 后处理与阶段二
+    // 门控精化 → 校验/回退，与 NMPC/ALM 路径并列且互不影响。后处理自带
+    // 回退原始 A* 路径出口（绝不输出半成品轨迹）：触发回退时 success=false、
+    // optimized_path/ddp_traj 为空，message 携带结构化诊断（失败阶段 +
+    // 失败项 + 量化值/阈值）
+    PostProcessorResult optimizeDdp(
+        const Path& init_path, const DdpConfig& ddp_config = DdpConfig{}) const;
 
    public:
     // 单次尝试的结果。

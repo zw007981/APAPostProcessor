@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <stdexcept>
 #include <string>
 
 #include "../preprocessing/preprocessing_pipeline.h"
@@ -44,6 +45,42 @@ Trajectory FlattenManeuvers(const std::vector<Maneuver>& maneuvers) {
         }
     }
     return trajectory;
+}
+// 按节按键覆盖：仅显式出现的字段被写入（缺失保持原值）
+template <typename T>
+void LoadJsonFieldIfPresent(const nlohmann::json& section, const char* key,
+                            T* out) {
+    if (section.contains(key)) {
+        *out = section[key].get<T>();
+    }
+}
+// 取 JSON 节：缺失时返回空对象（后续 contains 恒 false，不产生任何覆盖）
+const nlohmann::json& JsonSectionOrEmpty(const nlohmann::json& details,
+                                         const char* name) {
+    static const nlohmann::json kEmpty = nlohmann::json::object();
+    const auto it = details.find(name);
+    if (it == details.end()) {
+        return kEmpty;
+    }
+    return *it;
+}
+// DDP 后处理状态码的可读名称（失败诊断消息用）
+const char* DdpPostStageStatusName(DdpPostStageStatus status) {
+    switch (status) {
+        case DdpPostStageStatus::SUCCESS:
+            return "SUCCESS";
+        case DdpPostStageStatus::STAGE_ONE_NOT_CONVERGED:
+            return "STAGE_ONE_NOT_CONVERGED";
+        case DdpPostStageStatus::PIVOT_DETECTED:
+            return "PIVOT_DETECTED";
+        case DdpPostStageStatus::PRUNED_PATH_DEGENERATE:
+            return "PRUNED_PATH_DEGENERATE";
+        case DdpPostStageStatus::STAGE_TWO_NOT_CONVERGED:
+            return "STAGE_TWO_NOT_CONVERGED";
+        case DdpPostStageStatus::VALIDATION_FAILED:
+            return "VALIDATION_FAILED";
+    }
+    return "UNKNOWN";
 }
 }  // namespace
 PostProcessor::PostProcessor(const VehicleParams& vehicle_params,
@@ -291,6 +328,133 @@ NMPCConfig PostProcessor::applyRetryConfig(
     return config;
 }
 
+void LoadDdpConfigOverrides(const nlohmann::json& details, DdpConfig* config) {
+    if (config == nullptr) {
+        throw std::invalid_argument(
+            "LoadDdpConfigOverrides received null config!!!");
+    }
+    // 参考构建节：状态幅值边界（v_max/a_max/delta_max/omega_max）的唯一
+    // 权威来源，加载完成后统一同步进 cost/post_stage 的同源字段
+    const auto& reference = JsonSectionOrEmpty(details, "reference");
+    LoadJsonFieldIfPresent(reference, "sample_dist",
+                           &config->reference.sample_dist);
+    LoadJsonFieldIfPresent(reference, "dt", &config->reference.dt);
+    LoadJsonFieldIfPresent(reference, "shooting_interval",
+                           &config->reference.shooting_interval);
+    LoadJsonFieldIfPresent(reference, "v_max", &config->reference.v_max);
+    LoadJsonFieldIfPresent(reference, "a_max", &config->reference.a_max);
+    LoadJsonFieldIfPresent(reference, "delta_max",
+                           &config->reference.delta_max);
+    LoadJsonFieldIfPresent(reference, "omega_max",
+                           &config->reference.omega_max);
+    // 求解编排节（阶段二门控调度参数）
+    const auto& solver = JsonSectionOrEmpty(details, "solver");
+    LoadJsonFieldIfPresent(solver, "stage_two_max_outer_iterations",
+                           &config->solver.stage_two_max_outer_iterations);
+    LoadJsonFieldIfPresent(solver, "gating_mu_initial",
+                           &config->solver.gating_mu_initial);
+    LoadJsonFieldIfPresent(solver, "gating_mu_max",
+                           &config->solver.gating_mu_max);
+    LoadJsonFieldIfPresent(solver, "gating_tol", &config->solver.gating_tol);
+    // 内层 MS-iLQR 节：steer_accel_max 是 eta_max 的唯一权威来源
+    const auto& inner = JsonSectionOrEmpty(solver, "inner");
+    LoadJsonFieldIfPresent(inner, "jerk_max", &config->solver.inner.jerk_max);
+    LoadJsonFieldIfPresent(inner, "steer_accel_max",
+                           &config->solver.inner.steer_accel_max);
+    LoadJsonFieldIfPresent(inner, "max_iterations",
+                           &config->solver.inner.max_iterations);
+    LoadJsonFieldIfPresent(inner, "cost_change_tol",
+                           &config->solver.inner.cost_change_tol);
+    LoadJsonFieldIfPresent(inner, "gradient_tol",
+                           &config->solver.inner.gradient_tol);
+    LoadJsonFieldIfPresent(inner, "reg_initial",
+                           &config->solver.inner.reg_initial);
+    LoadJsonFieldIfPresent(inner, "reg_min", &config->solver.inner.reg_min);
+    LoadJsonFieldIfPresent(inner, "reg_max", &config->solver.inner.reg_max);
+    LoadJsonFieldIfPresent(inner, "reg_increase",
+                           &config->solver.inner.reg_increase);
+    LoadJsonFieldIfPresent(inner, "reg_decrease",
+                           &config->solver.inner.reg_decrease);
+    LoadJsonFieldIfPresent(inner, "armijo_gamma",
+                           &config->solver.inner.armijo_gamma);
+    LoadJsonFieldIfPresent(inner, "backtrack_beta",
+                           &config->solver.inner.backtrack_beta);
+    LoadJsonFieldIfPresent(inner, "max_backtracks",
+                           &config->solver.inner.max_backtracks);
+    LoadJsonFieldIfPresent(inner, "merit_mu0", &config->solver.inner.merit_mu0);
+    LoadJsonFieldIfPresent(inner, "merit_rho", &config->solver.inner.merit_rho);
+    LoadJsonFieldIfPresent(inner, "merit_kappa_d",
+                           &config->solver.inner.merit_kappa_d);
+    LoadJsonFieldIfPresent(inner, "inter_segment_weight",
+                           &config->solver.inner.inter_segment_weight);
+    // 外层 AL 节
+    const auto& outer = JsonSectionOrEmpty(solver, "outer");
+    LoadJsonFieldIfPresent(outer, "max_outer_iterations",
+                           &config->solver.outer.max_outer_iterations);
+    LoadJsonFieldIfPresent(outer, "terminal_position_tol",
+                           &config->solver.outer.terminal_position_tol);
+    LoadJsonFieldIfPresent(outer, "terminal_heading_tol_deg",
+                           &config->solver.outer.terminal_heading_tol_deg);
+    LoadJsonFieldIfPresent(outer, "inequality_tol",
+                           &config->solver.outer.inequality_tol);
+    LoadJsonFieldIfPresent(outer, "defect_tol",
+                           &config->solver.outer.defect_tol);
+    LoadJsonFieldIfPresent(outer, "mu_min", &config->solver.outer.mu_min);
+    LoadJsonFieldIfPresent(outer, "mu_max", &config->solver.outer.mu_max);
+    LoadJsonFieldIfPresent(outer, "first_round_mu",
+                           &config->solver.outer.first_round_mu);
+    LoadJsonFieldIfPresent(outer, "amplitude_mu_initial",
+                           &config->solver.outer.amplitude_mu_initial);
+    LoadJsonFieldIfPresent(outer, "epsilon_mu",
+                           &config->solver.outer.epsilon_mu);
+    LoadJsonFieldIfPresent(outer, "mu_gate_kappa",
+                           &config->solver.outer.mu_gate_kappa);
+    LoadJsonFieldIfPresent(outer, "mu_growth_factor",
+                           &config->solver.outer.mu_growth_factor);
+    LoadJsonFieldIfPresent(outer, "anneal_gamma",
+                           &config->solver.outer.anneal_gamma);
+    // 代价节：不接收幅值边界键（由 reference 节统一供给）
+    const auto& cost = JsonSectionOrEmpty(solver, "cost");
+    LoadJsonFieldIfPresent(cost, "weight_jerk",
+                           &config->solver.cost.weight_jerk);
+    LoadJsonFieldIfPresent(cost, "weight_steer_accel",
+                           &config->solver.cost.weight_steer_accel);
+    LoadJsonFieldIfPresent(cost, "weight_ref_base",
+                           &config->solver.cost.weight_ref_base);
+    LoadJsonFieldIfPresent(cost, "weight_theta",
+                           &config->solver.cost.weight_theta);
+    LoadJsonFieldIfPresent(cost, "weight_shift",
+                           &config->solver.cost.weight_shift);
+    LoadJsonFieldIfPresent(cost, "shift_beta", &config->solver.cost.shift_beta);
+    // ESDF 双 margin 惩罚节
+    const auto& esdf = JsonSectionOrEmpty(details, "esdf");
+    LoadJsonFieldIfPresent(esdf, "margin_safe", &config->esdf.margin_safe);
+    LoadJsonFieldIfPresent(esdf, "margin_comf", &config->esdf.margin_comf);
+    LoadJsonFieldIfPresent(esdf, "weight_safe", &config->esdf.weight_safe);
+    LoadJsonFieldIfPresent(esdf, "weight_comf", &config->esdf.weight_comf);
+    LoadJsonFieldIfPresent(esdf, "stride", &config->esdf.stride);
+    // 后处理节：不接收 omega_max/eta_max 键（由 reference/inner 节统一
+    // 供给）；cleanup/validation 两个嵌套配置不在 JSON 映射范围内
+    const auto& post_stage = JsonSectionOrEmpty(details, "post_stage");
+    LoadJsonFieldIfPresent(post_stage, "epsilon_v",
+                           &config->post_stage.epsilon_v);
+    LoadJsonFieldIfPresent(post_stage, "v_dwell", &config->post_stage.v_dwell);
+    LoadJsonFieldIfPresent(post_stage, "shift_delay",
+                           &config->post_stage.shift_delay);
+    LoadJsonFieldIfPresent(post_stage, "kappa_pad",
+                           &config->post_stage.kappa_pad);
+    LoadJsonFieldIfPresent(post_stage, "seam_speed_tol",
+                           &config->post_stage.seam_speed_tol);
+    LoadJsonFieldIfPresent(post_stage, "dwell_omega_tol",
+                           &config->post_stage.dwell_omega_tol);
+    LoadJsonFieldIfPresent(post_stage, "amplitude_check_tol",
+                           &config->post_stage.amplitude_check_tol);
+    LoadJsonFieldIfPresent(post_stage, "control_overshoot_tol",
+                           &config->post_stage.control_overshoot_tol);
+    // 幅值边界由权威来源同步进全部消费方（JSON 层单一来源的最终兑现）
+    config->synchronizeAmplitudeBounds();
+}
+
 BicycleKinematicsConfig PostProcessor::DeriveKinematicsConfig(
     const VehicleParams& vehicle_params, double max_velocity) {
     BicycleKinematicsConfig config;
@@ -443,6 +607,109 @@ PostProcessorResult PostProcessor::optimizeAlm(
     } catch (const std::exception& e) {
         LOG_FMT_WARN("optimizeAlm exception: {}", e.what());
         result.message = std::string("ALM attempt failed: ") + e.what();
+    }
+    return finish();
+}
+
+PostProcessorResult PostProcessor::optimizeDdp(
+    const Path& init_path, const DdpConfig& ddp_config) const {
+    PostProcessorResult result;
+    const auto t_start = std::chrono::steady_clock::now();
+    // 统一收尾：填充耗时与结果统计后返回（失败分支 optimized_path 为空）
+    const auto finish = [&result, t_start]() {
+        result.total_time_ms = std::chrono::duration<double, std::milli>(
+                                   std::chrono::steady_clock::now() - t_start)
+                                   .count();
+        // 物理方向段数（v 变号）为默认口径；轨迹缺失（失败/回退分支）时
+        // 回退为 Path 机动段标签数
+        result.final_maneuvers =
+            result.ddp_traj.empty()
+                ? static_cast<int>(result.optimized_path.numManeuvers())
+                : result.ddp_traj.countDirectionRuns();
+        // 失败/回退分支 optimized_path 为空：显式守卫取 0，不依赖
+        // Path::length() 对空路径行为的实现细节
+        result.final_length = result.optimized_path.empty()
+                                  ? 0.0
+                                  : result.optimized_path.length();
+        return result;
+    };
+    try {
+        // 空路径无法构建参考，直接显式失败
+        if (init_path.empty()) {
+            result.message = "DDP input path is empty";
+            return finish();
+        }
+        // 局部配置副本：幅值边界在副本上再同步一次（调用方可能绕过
+        // synchronizeAmplitudeBounds 直接改写字段），不触碰调用方配置
+        DdpConfig config = ddp_config;
+        config.synchronizeAmplitudeBounds();
+        // 1) 前端参考构建：等弧长重采样 + 初值提取 + 打靶节点布设
+        // （退化输入抛 std::invalid_argument，由外层 catch 转显式失败）
+        const DdpReferenceBuilder reference_builder(config.reference,
+                                                    vehicle_params_);
+        const DdpReference reference = reference_builder.build(init_path);
+        // 2) 求解组件装配：动力学/ESDF 惩罚/代价求值层与求解器共用同一份
+        // 配置副本（幅值边界已经单一来源同步，乘子更新与终止判据不失配）
+        const BicycleDynamics dynamics(vehicle_params_.wheelbase);
+        const DdpEsdfConstraint esdf_constraint(esdf_map_, footprint_model_,
+                                                config.esdf);
+        const DdpCostEvaluator cost_evaluator(config.solver.cost,
+                                              &esdf_constraint);
+        ApaDdpSolver solver(config.solver, &dynamics, &cost_evaluator);
+        // 3) 阶段一全局软化求解（任何出口均带最后可用轨迹与结构化报告）
+        const auto stage_one = solver.solveStageOne(reference);
+        LOG_FMT_INFO(
+            "DDP stage one: status={}, outer={}, inner_total={}, restarts={}, "
+            "term_err={:.4f} m/{:.3f} deg, ineq={:.4f}, defect={:.2e}, "
+            "mu_final={:.1f}",
+            static_cast<int>(stage_one.report.status),
+            stage_one.report.outer_iterations,
+            stage_one.report.total_inner_iterations,
+            stage_one.report.inner_restarts,
+            stage_one.report.terminal_position_error,
+            stage_one.report.terminal_heading_error_deg,
+            stage_one.report.max_amplitude_violation,
+            stage_one.report.defect_norm_inf, stage_one.report.mu_final);
+        // 4) 后处理与阶段二门控精化（游程分析/修剪/重解/驻留/校验/回退六
+        // 步全部由其内部编排），终点目标取初始路径末点位姿（停车目标）
+        DdpPostStage post_stage(config.post_stage, &reference_builder, &solver,
+                                vehicle_params_);
+        const auto& goal_pt = init_path.back();
+        const TrajectoryPoint goal(goal_pt.x, goal_pt.y, goal_pt.theta);
+        auto post = post_stage.run(init_path, reference, stage_one, goal,
+                                   esdf_map_, footprint_model_);
+        LOG_FMT_INFO("DDP post stage: status={}, maneuvers {}->{}, seams={}",
+                     static_cast<int>(post.status),
+                     post.diagnostics.input_maneuver_count,
+                     post.diagnostics.output_maneuver_count,
+                     post.diagnostics.seams.size());
+        if (post.status != DdpPostStageStatus::SUCCESS) {
+            // 回退不产出半成品（optimized_path/ddp_traj 均为空），但必须
+            // 带结构化诊断：失败阶段 + 失败项 + 量化值/阈值
+            result.message =
+                std::string("DDP post stage ") +
+                DdpPostStageStatusName(post.status) + ": " +
+                post.diagnostics.failed_check +
+                " measured=" + std::to_string(post.diagnostics.measured_value) +
+                " threshold=" + std::to_string(post.diagnostics.threshold) +
+                ", fell back to original path";
+            LOG_FMT_WARN("{}", result.message);
+            return finish();
+        }
+        // 5) 成功：最终轨迹转 Path（几何口径），ddp_traj 承载含驻留与时间
+        // 戳的完整轨迹（供可视化与下游消费）
+        Path optimized;
+        for (const auto& pt : post.trajectory.points()) {
+            optimized.addPoint(pt);
+        }
+        optimized.finalize();
+        result.ddp_traj = std::move(post.trajectory);
+        result.optimized_path = std::move(optimized);
+        result.success = true;
+        result.message = "DDP converged";
+    } catch (const std::exception& e) {
+        LOG_FMT_WARN("optimizeDdp exception: {}", e.what());
+        result.message = std::string("DDP attempt failed: ") + e.what();
     }
     return finish();
 }

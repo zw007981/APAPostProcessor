@@ -278,23 +278,79 @@ flowchart LR
 管线内部真正意义上的"优化前/优化后"对比；`main.cpp` 不再构造或调用 `NMPCPlanningScene`
 （NMPC 路径本身保留，仍可经 `NMPCPlanningScene`/`PostProcessor::optimize` 独立调用）。
 
-**收尾与独立化进展（milestone-009~012，见 [docs/milestones.md](milestones.md)）**：一次代码
+**收尾与独立化进展（见 [docs/milestones.md](milestones.md)）**：一次代码
 复核发现 `AlmManeuverMelter` 的 `PIVOT` 处理与自行车模型自相矛盾（详见
 [docs/known-limitations.md](known-limitations.md) 对应条目与 [docs/ALM.md](ALM.md) 3.4 节），
-milestone-009 已修复；`main.cpp` 此前需要运行一次完整 NMPC 求解才能获取其预处理管线
-产出作为对比基线，milestone-010 已改为直接对比 ALM 自身"预处理粗优化轨迹"与"主优化+机动
+该问题已修复；`main.cpp` 此前需要运行一次完整 NMPC 求解才能获取其预处理管线
+产出作为对比基线，现已改为直接对比 ALM 自身"预处理粗优化轨迹"与"主优化+机动
 融化后轨迹"（离散化能力从 `AlmManeuverMelter` 拆出为独立工具 `SampleMincoTrajectory`），
 `main.cpp` 不再依赖 `NMPCPlanningScene`，ALM 成为真正独立的优化器；
-milestone-011 已为 `Trajectory::validate()` 补充基于梯形配点残差的运动学可行性校验，与既有
+此外已为 `Trajectory::validate()` 补充基于梯形配点残差的运动学可行性校验，与既有
 碰撞安全/终点收敛两项校验并列（Δt 过大的换挡停驻补丁步因 O(Δt³) 截断主导而跳过，
 标定依据见 [docs/interfaces.md](interfaces.md) 变更记录）；
-milestone-012 已完成四数据集调参：ALM 采样轨迹补齐时间戳使运动学门对其生效、
+最后完成四数据集调参：ALM 采样轨迹补齐时间戳使运动学门对其生效、
 运动学门适配换挡尖点低速伪影后，`weight_jerk_s`（1.0→5.0）与 `weight_gear_cusp`
 （1000.0→50.0）经 25 组变体扫描标定为新默认值——四数据集全部满足"运动学可行 +
 碰撞安全 + 终点收敛"三门，段数 ≤ 既有基线（3/2/2/4 段）、长度全面低于既有基线
-（11.77/6.98/13.87/27.80 m），过程与批次数据见
-[docs/milestones/milestone-012/tuning-notes.md](milestones/milestone-012/tuning-notes.md)
-与 [docs/ALM.md](ALM.md) 第四章。
+（11.77/6.98/13.87/27.80 m），过程与批次数据见 [docs/ALM.md](ALM.md) 第四章。
+
+### 3.8 DDP（MS-iLQR + AL）优化领域模型（第三条算法路径，求解链路已落地、端到端调参进行中）
+
+与 3.4 节 NMPC、3.7 节 ALM 并列的第三条后处理算法路径，完整数学推导与工程约定见
+[docs/DDP.md](DDP.md)（理论基础：Tassa 2014 Box-DDP、Howell 2019 ALTRO、Li 2023
+Unified MS-DDP 三篇论文的机制拼装）。核心定位：**内层 MS-iLQR（Gauss-Newton，缺陷
+感知回推 + 非线性滚动）消化混合 A\* 注入的状态初值；每个回推步用 box-QP 精确处理控制
+盒约束（严禁 clamping/squashing）；一般状态约束、ESDF 避障与终点对齐交给 ALTRO 式
+AL 外层渐硬收紧**。由此天然满足「轨迹恒动力学可行、初值直接可注入、控制硬限不软化」
+三项 APA 后处理核心诉求。
+
+**与既有两条路径的建模差异**：
+
+- 参数化：不再是 ALM 的 θ-s 多项式（时间为优化变量），而是固定 $dt=0.1\,\text{s}$、
+  $N=399$ 步的离散状态链——七维状态 $x=[x,y,\theta,v,a,\delta,\omega]^T$、二维控制
+  $u=[j,\eta]^T$，半隐式 Euler + 中点朝向角积分（无偏、二阶旋转精度），$\delta$ 为显式
+  状态从根上消除 ALM 的 0/0 奇异反解；代价中无时间项，时间效率交下游速度重规划兜底。
+- 换挡建模：Reeds-Shepp 有符号速度观点，档位不是决策变量，cusp 处**不施加 $v=0$ 硬边界**
+  （对照 ALM 的结构性 $\dot s_k=0$ 边界）——速度可全程不变号连续穿过原换挡点，这是
+  「在连续优化内部融化无效 maneuver」的结构性前提；档位由后处理按 $\mathrm{sign}(v)$ 恢复。
+- 初值注入：多重打靶（打靶节点 = 每 $n_s$ 步 ∪ cusp ∪ 末点），打靶状态是独立决策变量、
+  允许初始缺陷 $d\neq0$，直接吸收 A\* 的「只知其形」初值；线搜索用带自适应罚 $\mu_m$ 的
+  merit function（与 AL 罚权重 $\mu$ 严格独立）。
+
+**三阶段流程**：
+
+```mermaid
+flowchart LR
+    A["Hybrid A* 路径"] --> P["预处理<br/>等弧长重采样/初值提取/打靶布设"]
+    P --> S1["阶段一：全局软化 DDP<br/>跃度主导 + 退火跟踪 + AL 约束<br/>（融化无效 maneuver）"]
+    S1 --> PR["后处理<br/>符号游程分析 + 拓扑修剪<br/>（复用 TopologyCleaner）"]
+    PR --> S2["阶段二：门控精化 DDP<br/>符号门控 + 接缝静止窗 + 热启动重解"]
+    S2 --> D["驻留插入 + 六项校验"]
+    D -->|全部通过| O["输出轨迹"]
+    D -->|任一失败| F["回退原始 A* 路径"]
+```
+
+**规划中的组件划分**（`src/core/DDP/`，接口规划见 [docs/interfaces.md](interfaces.md)，
+Milestone 拆分见 [docs/milestones.md](milestones.md)）：
+
+- 预处理/参考构建：等弧长重采样到 0.05 m、cusp 检测、差分初值提取、打靶节点布设（对应 DDP.md 2.1 节）。
+- 七维自行车动力学：半隐式 Euler + 中点朝向角离散化、解析雅可比 $A_k/B_k$，可选完整二阶张量
+  编译期开关（对应 2.2/2.5 节）。
+- box-QP 求解器：投影牛顿 + 活动集热启动，返回自由维 Hessian 分解（对应 1.2/2.4 节）。
+- 代价/约束求值层：平滑主项、退火跟踪、可选换挡代理、状态幅值平方 AL 不等式、ESDF 双 margin
+  惩罚（复用 `ESDFMap`/`VehicleFootprintModel` 外圆集合与 discretize-then-differentiate 约定）、
+  终点 AL 等式（对应 2.3/2.4 节）。
+- MS-iLQR 内层：缺陷感知 Riccati 回推（右端索引约定）、LM 正则化调度、线性 rollout 缓存
+  $EC_1/EC_2$ + 非线性 rollout 线搜索、可选段间惩罚（对应 1.4/2.5 节）。
+- AL 外层与求解编排：自适应 $\mu^0$、门控增长、跟踪权重退火、阶段一/阶段二统一入口（对应 2.5 节）。
+- 后处理：符号游程分析（滞回）、拓扑修剪（复用 `util::topology_cleaner`，红线同 ALM）、逐接缝
+  $T_{resteer}$ 驻留插入、校验清单与回退（对应 2.6 节）。
+- 场景接入（已落地）：`PostProcessor::optimizeDdp()` 编排入口 + `DDPPlanningScene` + `data/ddp_config.json`
+  （`"algorithm"` 路由字段，沿用 3.7 节确立的「每算法一个配置详情 JSON」约定）。
+
+性能画像（DDP.md 2.5 节复杂度评估）：纯求解每轮 $O(N(n^3+\dots))\approx10^6$ 标量运算，
+微秒~毫秒级；**运行时被 ESDF 查询主导**，插值缓存友好性是第一优化对象；SoA 存储 +
+Eigen 对齐分配器 + 严禁热循环堆分配为强制实现规范。
 
 ## 4. 模块划分
 
@@ -307,7 +363,8 @@ milestone-012 已完成四数据集调参：ALM 采样轨迹补齐时间戳使�
 | NMPC 子模块 | `src/core/NMPC/` | `ApaEsdfMapAdapter`（ESDF 适配器）、`vehicle_circle_geometry`（圆心几何提取）、`PathToOcpConverter`（Path→OCP 转换）、`PreprocessingToOcpConverter`（预处理管线输出 → OCP + Warm Start，M020）、`NmpcSolver`（求解编排 + 机动段裁剪）、`ThetaTrustRegionConstraint`（信赖域约束，M012）、`StaticCorridorLinearConstraint`（静态走廊线性不等式约束，M012），基于 `third_party/StcSQP` 实现 |
 | 预处理管线 | `src/preprocessing/` | NMPC 预处理管线：分 5 个独立阶段类（`BSplineSmoother`/`SpeedProfilePlanner`/`DifferentialFlatnessSolver`/`AdaptiveResampler`/`StaticCorridorBuilder`）+ 1 个组装类（`PreprocessingPipeline`），对应 [docs/NMPC.md](NMPC.md) 第 3 节，把 Hybrid A* 粗糙路径转换为动力学平滑、拓扑安全的 Warm Start；各阶段均已落地 |
 | ALM 子模块 | `src/core/ALM/` | 与 `NMPC` 子模块并列的第二条后处理算法路径（已落地并接入 `PostProcessor::optimizeAlm`）：`MincoTrajectory`（多项式轨迹与 $K(T)$ 求解）、`BlockTridiagonalSolver`（块 Thomas 求解器）、`BicycleKinematicsExtractor`（阿克曼状态解析）、`AlmManeuverSegmenter`（前端解析与分段）、`AlmEsdfPenalty`（双重安全惩罚）、`AlmPreprocessor`（预处理粗优化）、`AlmSolver`（PHR-ALM 主求解器）、`SampleMincoTrajectory`（θ-s 轨迹离散化工具）、`AlmManeuverMelter`（机动融化与拓扑修剪），详见 3.7 节与 [docs/ALM.md](ALM.md) |
-| 场景组装 | `src/scene/` | `PlanningScene` 基类（持有一次后处理任务的完整上下文：环境+车辆+路径+配置）与两个并列场景实现：`NMPCPlanningScene`（NMPC 链路）、`ALMPlanningScene`（ALM 链路，效仿前者结构）；基类静态工厂 `LoadFromFile` 按场景配置的 `config_details_path` 所指详情 JSON 的 `"algorithm"` 字段运行时路由场景。配置约定：**每个算法一个配置详情 JSON**（`data/alm_config.json`/`data/nmpc_config.json`，含 `"algorithm"` 路由字段与算法字段覆盖项），场景级 `data/config.json` 只承载 `data_file_path` 与 `config_details_path`，切换算法只改后者；算法无关的基类字段覆盖项由 `src/util/config_loader.h` 统一解析（当前映射 `outer_row_num`） |
+| DDP 子模块 | `src/core/DDP/` | 与 NMPC/ALM 并列的第三条后处理算法路径（Milestone 001~008 已落地并接入 `PostProcessor::optimizeDdp`，端到端调参见 [docs/milestones.md](milestones.md)）：`DdpReferenceBuilder`（预处理/参考构建）、`BicycleDynamics`（七维自行车动力学与解析雅可比）、`BoxQpSolver`（投影牛顿）、`DdpCostEvaluator`/`DdpEsdfConstraint`（代价/约束求值层）、`MsIlqrSolver`（内层）、`AlOuterLoop`/`ApaDdpSolver`（AL 外层与求解编排）、`DdpPostStage`（后处理与门控精化），详见 3.8 节与 [docs/DDP.md](DDP.md) |
+| 场景组装 | `src/scene/` | `PlanningScene` 基类（持有一次后处理任务的完整上下文：环境+车辆+路径+配置）与三个并列场景实现：`NMPCPlanningScene`（NMPC 链路）、`ALMPlanningScene`（ALM 链路，效仿前者结构）、`DDPPlanningScene`（DDP 链路，同结构）；基类静态工厂 `LoadFromFile` 按场景配置的 `config_details_path` 所指详情 JSON 的 `"algorithm"` 字段运行时路由场景。配置约定：**每个算法一个配置详情 JSON**（`data/alm_config.json`/`data/nmpc_config.json`/`data/ddp_config.json`，含 `"algorithm"` 路由字段与算法字段覆盖项），场景级 `data/config.json` 只承载 `data_file_path` 与 `config_details_path`，切换算法只改后者；算法无关的基类字段覆盖项由 `src/util/config_loader.h` 统一解析（当前映射 `outer_row_num`） |
 | 通用 SQP/OCP 引擎（第三方） | `third_party/StcSQP/` | vendored 的通用数值优化框架，对物理世界无感知，通过固定维度参数向量与业务层交互；按第三方依赖对待，不计入本仓库业务代码规范（该框架自身的编码风格由 `third_party/StcSQP/AGENTS.md`/`design_document.md` 治理）；3.5 节所述的一段内部工程优化是本仓库主动发起、对其内部实现的性能优化，改动需同步更新该框架自身文档 |
 | 测试 | `test/` | 单元测试，命名 `*.t.cpp` |
 | 压测 | `bench/` | 性能压测，命名 `bench_*.cpp`，入口 `bench/main.bench.cpp` |
@@ -329,7 +386,11 @@ flowchart TB
     spatial --> alm[core/ALM]
     vehicle --> alm
     util --> alm
+    spatial --> ddp[core/DDP 规划中]
+    vehicle --> ddp
+    util --> ddp
     alm --> scene[scene: PlanningScene/ALMPlanningScene/NMPCPlanningScene]
+    ddp --> scene
     nmpc --> scene
     scene --> main[main.cpp]
     util --> main
@@ -341,7 +402,7 @@ flowchart TB
 （`alm_planning_scene.h`）与 `util` 头文件，经场景层接入 ALM 路径；`alm --> scene`/
 `nmpc --> scene` 为场景层对两条算法路径的并列依赖（`planning_scene.h` →
 `post_processor.h` → ALM/NMPC 头文件）。`main.cpp` 不再直接调用 NMPC 链路，
-`nmpc --> main`/`preprocess --> main`/`alm --> main` 边已随 milestone-010 移除；
+`nmpc --> main`/`preprocess --> main`/`alm --> main` 边已随 `main.cpp` 去除 NMPC 依赖的改造移除；
 NMPC 路径继续由 `NMPCPlanningScene`、单元测试与 benchmark 独立调用。
 
 `preprocessing_pipeline` 内部 5 个阶段严格按 [docs/NMPC.md](NMPC.md) 第 3.1~3.5 节顺序单向依赖，最终由组装阶段的 `PreprocessingPipeline` 编排：
@@ -377,11 +438,12 @@ flowchart LR
 | 2026-07-09 | benchmark 排查确认预处理管线耗时大头在 `BSplineSmoother`（第 5 节"预处理管线"模块）：落地文档 5.5 节已设计但未落地的密集配点 OMP 并行化，并对 L-BFGS 收敛参数（`lbfgs_max_iterations`/`lbfgs_max_linesearch`）按调参-验证-回滚流程做安全范围内的收紧探索；纯内部实现优化，不改变 `BSplineSmoother`/`BSplineSmootherConfig` 对外签名 |
 | 2026-07-09 | 启动"NMPC 算法最终重构"系列：新增第 3.6 节（框架审查重构→预处理管线接入 NMPC→四数据集调参与自适应间隔重试→端到端验收收尾），弥合"预处理管线已完成但 `main.cpp`/`NmpcSolver` 从未真正消费其输出"的架构差距 |
 | 2026-07-09 | 完成 `src/core/NMPC/` 框架审查与解耦重构：`PathToOcpConverter` 拆分为 `computeSegmentProfiles()`/`generateInitialGuess()`/`buildOcp()`，`NmpcSolver` 新增 `optimize(MultiStageOCP, Trajectory, ESDFMap)` 扩展点；非均匀 `delta_t` 已预留 `SegmentProfile::dt_array`/`StageSegment::dt_array` 但未接入，留给后续接线 |
-| 2026-07-19 | 新增第二条后处理算法路径规划：3.7 节 ALM/MINCO/PHR-ALM 优化领域模型（与 3.4 节 NMPC 并列，彻底改造自 arXiv:2409.07924）；第 4 节模块划分表新增 `src/core/ALM/` 行；具体 Milestone 拆分见 [docs/milestones.md](milestones.md) `milestone-001`~`milestone-008`，接口规划见 [docs/interfaces.md](interfaces.md) |
+| 2026-07-19 | 新增第二条后处理算法路径规划：3.7 节 ALM/MINCO/PHR-ALM 优化领域模型（与 3.4 节 NMPC 并列，彻底改造自 arXiv:2409.07924）；第 4 节模块划分表新增 `src/core/ALM/` 行；具体 Milestone 拆分见 [docs/milestones.md](milestones.md)，接口规划见 [docs/interfaces.md](interfaces.md) |
 | 2026-07-21 | ALM 路径全部落地并接入 `PostProcessor`：3.7 节标题移除"规划中"标记、收尾段落更新为真实链路（`PostProcessor::optimizeAlm` 编排五大组件，与 NMPC 路径并列互不干扰，`main.cpp` 生产入口行为不变）；第 4 节模块划分表 `src/core/ALM/` 行更新为已实现组件清单；模块依赖图新增 `core/ALM` 节点与 `alm --> main` 传递依赖边；四数据集验收对比见 [docs/ALM.md](ALM.md) 第三章 |
 | 2026-07-21 | `main.cpp` 生产入口接入 ALM 路径：新增 `ALMPlanningScene`（效仿 `NMPCPlanningScene`），main 同时执行两条路径并生成三条轨迹对比图；第 4 节模块划分表"场景组装"行更新为 `PlanningScene` 基类 + 两个并列场景实现（顺带修正该行"空文件尚未实现"的过期描述）；3.7 节收尾段落同步更新 |
 | 2026-07-21 | `main.cpp` 对比图内容调整：只绘制预处理轨迹与 ALM 优化轨迹两条，NMPC 优化结果不再纳入横向对比（NMPC 场景仅为产出预处理轨迹保留）；3.7 节收尾段落同步 |
-| 2026-07-22 | 一次代码复核发现 `AlmManeuverMelter` 的 `PIVOT` 处理与自行车模型自相矛盾，立项 `milestone-009`~`milestone-012` 收尾与独立化系列（PIVOT 修复→`main.cpp` 改为对比 ALM 自身预处理/优化后轨迹并去除对 NMPC 的依赖→`Trajectory::validate()` 新增运动学可行性校验→四数据集调参）；3.7 节收尾段落新增规划说明，接口层面的计划变更登记见 [docs/interfaces.md](interfaces.md)，PIVOT 问题分析见 [docs/known-limitations.md](known-limitations.md) 与 [docs/ALM.md](ALM.md) 3.4 节 |
+| 2026-07-22 | 一次代码复核发现 `AlmManeuverMelter` 的 `PIVOT` 处理与自行车模型自相矛盾，立项"收尾与独立化"系列改造（PIVOT 修复→`main.cpp` 改为对比 ALM 自身预处理/优化后轨迹并去除对 NMPC 的依赖→`Trajectory::validate()` 新增运动学可行性校验→四数据集调参）；3.7 节收尾段落新增规划说明，接口层面的计划变更登记见 [docs/interfaces.md](interfaces.md)，PIVOT 问题分析见 [docs/known-limitations.md](known-limitations.md) 与 [docs/ALM.md](ALM.md) 3.4 节 |
 | 2026-07-22 | `main.cpp` 移除对 `NMPCPlanningScene` 的依赖：离散化能力从 `AlmManeuverMelter` 拆出为独立纯函数工具 `SampleMincoTrajectory`（新增 `src/core/ALM/alm_trajectory_sampler.h/.cpp`），`PostProcessorResult` 新增 `alm_preprocessed_traj` 字段、`ALMPlanningScene` 新增 `almPreprocessedTraj()` 访问器；对比图改为 ALM 自身"预处理粗优化轨迹（优化前） vs 主优化+机动融化后轨迹（优化后）"；3.7 节收尾段落与规划进展、3.6 节依赖说明、第 4 节模块划分表（ALM 行新增离散化工具）与模块依赖图（新增 `scene` 节点，移除 `nmpc --> main`/`preprocess --> main`/`alm --> main` 边）同步更新 |
 | 2026-07-22 | `Trajectory::validate()` 新增第三门"运动学可行性"校验（梯形配点残差，详见 [docs/interfaces.md](interfaces.md) 变更记录的标定依据）；前置修复：`NmpcSolver::ToPath`/`PostProcessor::runSingleAttempt` 对状态增广结果的 `a`/`delta_dot` 回填张冠李戴（误从控制序列取 jerk/转向角加速度）按状态维度分支修正，`VehicleFootprintModel` 新增 `getWheelbase()` 只读访问器 |
-| 2026-07-22 | milestone-012 四数据集调参完成：ALM 采样轨迹补齐时间戳（运动学门对 ALM 产出生效的前置）、运动学门新增低速跳过适配换挡尖点伪影、`AlmSolverConfig::weight_jerk_s`（1.0→5.0）与 `weight_gear_cusp`（1000.0→50.0）默认值标定，四数据集全部满足三门合法性且段数/长度全面优于既有基线；新增 `tool/tune_alm.cpp` 调参驱动工具与 `apa_tune_alm` 构建目标，批次数据见 [docs/milestones/milestone-012/tuning-notes.md](milestones/milestone-012/tuning-notes.md)，[docs/ALM.md](ALM.md) 第四章验收总表同步更新（新增"运动学可行"列） |
+| 2026-07-22 | 四数据集调参完成：ALM 采样轨迹补齐时间戳（运动学门对 ALM 产出生效的前置）、运动学门新增低速跳过适配换挡尖点伪影、`AlmSolverConfig::weight_jerk_s`（1.0→5.0）与 `weight_gear_cusp`（1000.0→50.0）默认值标定，四数据集全部满足三门合法性且段数/长度全面优于既有基线；新增 `tool/tune_alm.cpp` 调参驱动工具与 `apa_tune_alm` 构建目标，[docs/ALM.md](ALM.md) 第四章验收总表同步更新（新增"运动学可行"列） |
+| 2026-07-28 | 新增第三条后处理算法路径规划：3.8 节 DDP（MS-iLQR + AL）优化领域模型（与 3.4 节 NMPC、3.7 节 ALM 并列，理论与工程约定见 [docs/DDP.md](DDP.md)）；第 4 节模块划分表新增 `src/core/DDP/` 行、模块依赖图新增 `core/DDP` 节点；Milestone 拆分（001~009）见 [docs/milestones.md](milestones.md)，接口规划见 [docs/interfaces.md](interfaces.md) |

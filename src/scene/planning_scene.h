@@ -20,7 +20,7 @@ class PlanningScene {
     PlanningScene(const PlanningScene&) = delete;
     PlanningScene& operator=(const PlanningScene&) = delete;
     // 场景工厂：读取场景配置文件中的 config_details_path，按算法配置详情
-    // JSON 的 "algorithm" 字段（"alm"/"nmpc"）路由到对应算法场景并完成
+    // JSON 的 "algorithm" 字段（"alm"/"nmpc"/"ddp"）路由到对应算法场景并完成
     // 加载；文件缺失/字段缺失/算法无法识别时返回 nullptr（错误已记日志）。
     // 生产入口据此按配置运行时选择算法，无需改动代码
     static std::unique_ptr<PlanningScene> LoadFromFile(

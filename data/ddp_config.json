@@ -1,0 +1,78 @@
+{
+  "algorithm": "ddp",
+  "outer_row_num": 2,
+  "reference": {
+    "sample_dist": 0.05,
+    "dt": 0.1,
+    "shooting_interval": 25,
+    "v_max": 1.5,
+    "a_max": 1.0,
+    "delta_max": 0.55,
+    "omega_max": 0.5
+  },
+  "solver": {
+    "stage_two_max_outer_iterations": 8,
+    "gating_mu_initial": 10.0,
+    "gating_mu_max": 1000000.0,
+    "gating_tol": 0.01,
+    "inner": {
+      "jerk_max": 1.5,
+      "steer_accel_max": 1.0,
+      "max_iterations": 50,
+      "cost_change_tol": 1e-9,
+      "gradient_tol": 1e-8,
+      "reg_initial": 0.0001,
+      "reg_min": 1e-9,
+      "reg_max": 1e9,
+      "reg_increase": 10.0,
+      "reg_decrease": 0.5,
+      "armijo_gamma": 0.1,
+      "backtrack_beta": 0.5,
+      "max_backtracks": 50,
+      "merit_mu0": 100.0,
+      "merit_rho": 0.5,
+      "merit_kappa_d": 1e9,
+      "inter_segment_weight": 0.0
+    },
+    "outer": {
+      "max_outer_iterations": 20,
+      "terminal_position_tol": 0.05,
+      "terminal_heading_tol_deg": 1.5,
+      "inequality_tol": 0.01,
+      "defect_tol": 0.001,
+      "mu_min": 100.0,
+      "mu_max": 1000000.0,
+      "first_round_mu": 1.0,
+      "amplitude_mu_initial": 1.0,
+      "epsilon_mu": 0.0001,
+      "mu_gate_kappa": 0.9,
+      "mu_growth_factor": 10.0,
+      "anneal_gamma": 0.5
+    },
+    "cost": {
+      "weight_jerk": 1.0,
+      "weight_steer_accel": 1.0,
+      "weight_ref_base": 10.0,
+      "weight_theta": 5.0,
+      "weight_shift": 0.0,
+      "shift_beta": 0.1
+    }
+  },
+  "esdf": {
+    "margin_safe": 0.02,
+    "margin_comf": 0.1,
+    "weight_safe": 100.0,
+    "weight_comf": 1.0,
+    "stride": 1
+  },
+  "post_stage": {
+    "epsilon_v": 0.02,
+    "v_dwell": 0.05,
+    "shift_delay": 0.4,
+    "kappa_pad": 1.2,
+    "seam_speed_tol": 0.02,
+    "dwell_omega_tol": 0.1,
+    "amplitude_check_tol": 0.05,
+    "control_overshoot_tol": 0.3
+  }
+}
