@@ -1,6 +1,7 @@
 #include "apa_ddp_solver.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -21,6 +22,15 @@ ApaDdpSolver::ApaDdpSolver(ApaDdpSolverConfig config,
 
 ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
     const DdpReference& reference) {
+    // 冷启动入口：首轮以参考自带的前端初值启动（委托给热启动实现）
+    return solveStageOne(reference, reference.initial_states,
+                         reference.initial_controls);
+}
+
+ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
+    const DdpReference& reference,
+    const DdpAlignedVec<DdpState>& warm_start_states,
+    const DdpAlignedVec<DdpControl>& warm_start_controls) {
     const std::size_t num_poses = reference.poses.size();
     if (num_poses < 2) {
         throw std::invalid_argument("ApaDdpSolver: 参考位姿数量必须 >= 2");
@@ -31,6 +41,11 @@ ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
         throw std::invalid_argument(
             "ApaDdpSolver: 状态/控制初值尺寸必须为 N+1 / N");
     }
+    if (warm_start_states.size() != num_poses ||
+        warm_start_controls.size() != num_steps) {
+        throw std::invalid_argument(
+            "ApaDdpSolver: 热启动状态/控制尺寸必须为 N+1 / N");
+    }
     ApaDdpStageOneResult result;
     ApaDdpReport& report = result.report;
     report.history.reserve(
@@ -39,15 +54,27 @@ ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
     outer_loop_.reset();
     auto multipliers = outer_loop_.makeInitialMultipliers(num_steps);
     const auto exempt_mask = outer_loop_.makeAnnealExemptMask(reference);
+    // 候选待融段掩码（按融化平衡式临界比生成，整轮求解期间不变）
+    const auto candidate_mask = outer_loop_.makeMeltCandidateMask(reference);
     // 零乘子求值用于逐轮基础代价 J_s′（μ⁰ 标定与诊断）
     const auto zero_multipliers = DdpCostMultiplierState::MakeZero(num_steps);
-    // 首轮以前端初值启动，后续轮次以上轮收敛轨迹（经 δ 投影）热启动
-    DdpAlignedVec<DdpState> warm_states = reference.initial_states;
-    DdpAlignedVec<DdpControl> warm_controls = reference.initial_controls;
+    // 首轮以调用方给定的轨迹启动（冷启动入口传入的是参考自带的前端
+    // 初值），后续轮次以上轮收敛轨迹（经 δ 投影）热启动
+    DdpAlignedVec<DdpState> warm_states = warm_start_states;
+    DdpAlignedVec<DdpControl> warm_controls = warm_start_controls;
+    // 逃逸指标：上一轮解长度（环比基线，首轮为 0 表示尚无历史）
+    double prev_solution_length = 0.0;
     for (int round = 0; round < config_.outer.max_outer_iterations; ++round) {
         DdpCostInput cost_input;
         cost_input.tracking_weight = outer_loop_.trackingWeight();
         cost_input.anneal_exempt_mask = &exempt_mask;
+        // 换挡代理门宽随外层退火（weight_shift=0 时该字段不被求值层消费，
+        // 赋值无副作用）
+        cost_input.shift_beta = outer_loop_.shiftBeta();
+        // 候选待融段的深退火权重（掩码为空时求值层不消费，无副作用）
+        cost_input.melt_candidate_mask = &candidate_mask;
+        cost_input.candidate_tracking_weight =
+            outer_loop_.candidateTrackingWeight();
         // 内层求解（固定 λ/μ 的增广问题）
         const double mu_round = outer_loop_.mu();
         MsIlqrResult inner_result = inner_solver_->solve(
@@ -64,6 +91,7 @@ ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
                 reference, multipliers, cost_input, warm_states, warm_controls);
         }
         report.total_inner_iterations += inner_result.iterations;
+        report.domain_guard_rejections += inner_result.domain_guard_rejections;
         if (inner_result.status == MsIlqrStatus::REGULARIZATION_OVERFLOW) {
             // anytime 性质：内层名义轨迹仍是最后接受的可行迭代点
             report.status = ApaDdpStatus::INNER_SOLVER_FAILED;
@@ -72,6 +100,44 @@ ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
         // 内层迭代超限不致命：沿用当前迭代点继续外层调度（诊断入记录）
         const auto snapshot = outer_loop_.measure(
             reference, inner_solver_->states(), inner_solver_->defects());
+        // 退火终点自适应：逃逸指标量测与上报（默认全关、零开销）——解长度
+        // 环比、相对参考位姿的最大横向偏离、打靶缺陷范数，任一越阈即
+        // 冻结退火（守护「解仍在同伦类内」）
+        if (config_.outer.anneal_freeze_length_growth > 0.0 ||
+            config_.outer.anneal_freeze_lateral_deviation > 0.0 ||
+            config_.outer.anneal_freeze_defect > 0.0 ||
+            config_.outer.anneal_freeze_ref_length_ratio > 0.0) {
+            double solution_length = 0.0;
+            double max_deviation = 0.0;
+            for (std::size_t k = 1; k < inner_solver_->states().size(); ++k) {
+                solution_length +=
+                    std::hypot(inner_solver_->states()[k](DDP_IDX_X) -
+                                   inner_solver_->states()[k - 1](DDP_IDX_X),
+                               inner_solver_->states()[k](DDP_IDX_Y) -
+                                   inner_solver_->states()[k - 1](DDP_IDX_Y));
+            }
+            for (std::size_t k = 0; k < reference.poses.size(); ++k) {
+                max_deviation =
+                    std::max(max_deviation,
+                             std::hypot(inner_solver_->states()[k](DDP_IDX_X) -
+                                            reference.poses[k].x,
+                                        inner_solver_->states()[k](DDP_IDX_Y) -
+                                            reference.poses[k].y));
+            }
+            const double growth = prev_solution_length > 0.0
+                                      ? solution_length / prev_solution_length
+                                      : 1.0;
+            prev_solution_length = solution_length;
+            // 参考总长 = 网格步数 × 实际间距（全长归一后的均匀网格）
+            const double reference_length =
+                static_cast<double>(num_steps) * reference.ds;
+            const double ref_length_ratio =
+                reference_length > 0.0 ? solution_length / reference_length
+                                       : 1.0;
+            outer_loop_.reportEscapeIndicators(growth, max_deviation,
+                                               snapshot.defect_norm_inf,
+                                               ref_length_ratio);
+        }
         const double base_cost =
             cost_evaluator_
                 ->evaluate(reference, inner_solver_->states(),
@@ -156,6 +222,11 @@ ApaDdpStageTwoResult ApaDdpSolver::solveStageTwo(
         throw std::invalid_argument(
             "ApaDdpSolver: 阶段二跟踪权重必须为非负有限值");
     }
+    if (!std::isfinite(config_.seed_mu_cap_ratio) ||
+        config_.seed_mu_cap_ratio < 0.0) {
+        throw std::invalid_argument(
+            "ApaDdpSolver: 种子 μ 上限比率必须为非负有限值（0 = 关闭）");
+    }
     // 门控计划完整性：尺寸/查表自洽（残缺计划会让三类门控静默错位）
     if (gating_plan.sign_gate.size() != num_poses ||
         gating_plan.seam_lookup.size() != num_poses ||
@@ -193,8 +264,42 @@ ApaDdpStageTwoResult ApaDdpSolver::solveStageTwo(
         // 阶段一建立的终端平衡由 λ/μ 承载，标定公式在小尺度问题上会把
         // μ⁰ 重新压回下限（实测把已收敛的终端平衡重新打开）
         const double seed_mu = dual_seed->terminal_mu.maxCoeff();
-        outer_config.first_round_mu = seed_mu;
-        outer_config.mu_min = std::max(outer_config.mu_min, seed_mu);
+        double effective_seed = seed_mu;
+        if (config_.seed_mu_cap_ratio > 0.0) {
+            // 量级自适应上限：以阶段二自身在热启动轨迹上按 ALTRO clip
+            // 公式量测的标定初值 μ̂（不经种子抬升的版本）为参照，只截断
+            // 「种子已达 μ_max」的病态情形，正常量级的种子照常抬升。
+            // 量测与逐轮诊断的 base_cost 同口径（零乘子 + 门控计划在场）
+            const auto zero_multipliers =
+                DdpCostMultiplierState::MakeStageTwoZero(
+                    num_steps, gating_plan.seam_indices.size());
+            DdpCostInput cal_input;
+            cal_input.tracking_weight = tracking_weight;
+            cal_input.gating_plan = &gating_plan;
+            const double base_cost0 =
+                cost_evaluator_
+                    ->evaluate(reference, warm_states, warm_controls,
+                               zero_multipliers, cal_input)
+                    .total_cost;
+            // 终端残差范数与外层量测同一公式（c=[x−xg,y−yg,wrap(θ−θg),v,a]）
+            const DdpState& x_final = warm_states.back();
+            const Pose& goal = reference.poses.back();
+            const double c_norm = std::sqrt(
+                std::pow(x_final(DDP_IDX_X) - goal.x, 2.0) +
+                std::pow(x_final(DDP_IDX_Y) - goal.y, 2.0) +
+                std::pow(WrapAngle(x_final(DDP_IDX_THETA) - goal.theta), 2.0) +
+                std::pow(x_final(DDP_IDX_V), 2.0) +
+                std::pow(x_final(DDP_IDX_A), 2.0));
+            const double mu_hat = std::min(
+                std::max(base_cost0 /
+                             std::max(c_norm * c_norm, outer_config.epsilon_mu),
+                         outer_config.mu_min),
+                outer_config.mu_max);
+            effective_seed =
+                std::min(seed_mu, config_.seed_mu_cap_ratio * mu_hat);
+        }
+        outer_config.first_round_mu = effective_seed;
+        outer_config.mu_min = std::max(outer_config.mu_min, effective_seed);
     }
     AlOuterLoop outer(outer_config, config_.cost);
     auto multipliers = DdpCostMultiplierState::MakeStageTwoZero(
@@ -249,6 +354,7 @@ ApaDdpStageTwoResult ApaDdpSolver::solveStageTwo(
                                      round_warm_states, round_warm_controls);
         }
         report.total_inner_iterations += inner_result.iterations;
+        report.domain_guard_rejections += inner_result.domain_guard_rejections;
         if (inner_result.status == MsIlqrStatus::REGULARIZATION_OVERFLOW) {
             report.status = ApaDdpStatus::INNER_SOLVER_FAILED;
             break;

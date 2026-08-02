@@ -1,5 +1,3 @@
-#include "core/DDP/apa_ddp_solver.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -8,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "core/DDP/apa_ddp_solver.h"
 #include "core/DDP/ddp_reference_builder.h"
 #include "core/DDP/esdf_constraint.h"
 #include "core/NMPC/vehicle_circle_geometry.h"
@@ -306,6 +305,39 @@ TEST(ApaDdpSolverTest, TerminalStateConvergesWithFreeFinalSteer) {
     EXPECT_NEAR(final_state(DDP_IDX_Y), goal.y, 0.05);
     EXPECT_NEAR(WrapAngle(final_state(DDP_IDX_THETA) - goal.theta), 0.0,
                 1.5 * PI / 180.0);
+}
+
+// 阶段一热启动重载（continuation/救援重试的基础设施）：以调用方给定的
+// 状态/控制轨迹启动首轮（而非参考自带的前端初值），已收敛解热启动
+// 重解应当秒收敛且轮数不超过冷启动；尺寸不符必须显式抛出
+TEST(ApaDdpSolverTest, StageOneWarmStartReconvergesQuickly) {
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = BuildReference(path);
+    const auto cold = SolveStageOne(reference, nullptr);
+    ASSERT_EQ(cold.report.status, ApaDdpStatus::CONVERGED);
+    const BicycleDynamics dynamics(kWheelbase);
+    const ApaDdpSolverConfig config = MakeSyntheticConfig();
+    const DdpCostEvaluator evaluator(config.cost, nullptr);
+    ApaDdpSolver warm_solver(config, &dynamics, &evaluator);
+    const auto warm =
+        warm_solver.solveStageOne(reference, cold.states, cold.controls);
+    EXPECT_EQ(warm.report.status, ApaDdpStatus::CONVERGED)
+        << "outer=" << warm.report.outer_iterations
+        << " pos_err=" << warm.report.terminal_position_error;
+    // 热启动首轮即接近收敛：外层轮数不超过冷启动
+    EXPECT_LE(warm.report.outer_iterations, cold.report.outer_iterations);
+    EXPECT_LE(warm.report.terminal_position_error, 0.05);
+    // 尺寸契约：N+1 / N 不符显式抛出
+    auto bad_states = cold.states;
+    bad_states.pop_back();
+    EXPECT_THROW(
+        warm_solver.solveStageOne(reference, bad_states, cold.controls),
+        std::invalid_argument);
+    auto bad_controls = cold.controls;
+    bad_controls.pop_back();
+    EXPECT_THROW(
+        warm_solver.solveStageOne(reference, cold.states, bad_controls),
+        std::invalid_argument);
 }
 
 // 内层迭代超限不致命（显式钉住）：把内层迭代上限压到 1，每一轮内层

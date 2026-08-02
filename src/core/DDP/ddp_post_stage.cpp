@@ -1,6 +1,7 @@
 #include "ddp_post_stage.h"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <stdexcept>
 #include <utility>
@@ -22,9 +23,14 @@ DdpPostStage::DdpPostStage(DdpPostStageConfig config,
         !(config_.shift_delay > 0.0) || !(config_.kappa_pad >= 1.0) ||
         !(config_.omega_max > 0.0) || !(config_.eta_max > 0.0) ||
         !(config_.seam_speed_tol > 0.0) || !(config_.dwell_omega_tol > 0.0) ||
-        !(config_.amplitude_check_tol > 0.0)) {
+        !(config_.amplitude_check_tol > 0.0) ||
+        !(config_.amplitude_check_rel_tol > 0.0)) {
         throw std::invalid_argument(
             "DdpPostStage: 滞回/驻留/执行器/容差参数必须为正且 κ_pad>=1");
+    }
+    if (!(config_.prune.min_arc_length > 0.0) ||
+        !(config_.prune.pivot_heading_threshold > 0.0)) {
+        throw std::invalid_argument("DdpPostStage: 融化/修剪判据阈值必须为正");
     }
     if (!(vehicle_params_.wheelbase > 0.0)) {
         throw std::invalid_argument("DdpPostStage: 车辆轴距必须为正");
@@ -124,16 +130,32 @@ bool DdpPostStage::pruneManeuvers(std::vector<Maneuver>* maneuvers) const {
     if (maneuvers == nullptr || maneuvers->empty()) {
         return true;
     }
-    // 首/末 maneuver 保护：分类前先记录原始方向，分类后无条件恢复——
-    // 首段承载起点状态、末段承载终点语义，无论判据量如何均不参与剔除
-    // 与 PIVOT 重分类（红线，同 ALM 侧 detectMelting 的保护语义）
-    const Direction first_direction = maneuvers->front().direction;
-    const Direction last_direction = maneuvers->back().direction;
-    ClassifyAndResetManeuvers(*maneuvers, config_.cleanup);
-    maneuvers->front().direction = first_direction;
-    maneuvers->back().direction = last_direction;
-    // PIVOT 即失败：默认车辆无钟摆泊车能力，检出原地打轮式微动按求解
-    // 失败语义上报（除非人工另有指定），绝不带病输出
+    // 自有分类（Δθ 语义，与 ALM 侧 detectMelting 同一物理含义）：极小
+    // 弧长的中间游程中，|Δθ| 超阈判 PIVOT、否则判融化残余（UNKNOWN
+    // 剔除标记，由 ReconstructPath 在第二遍剔除）。只打方向标签、绝不
+    // 改写采样点数据——压平位置/清零速度会产生 v≡0 但 θ 变化的状态，
+    // 与全链路唯一承认的运动学关系 θ̇=v·tanδ/L 直接矛盾（ALM 侧已废弃
+    // 的做法）。首/末 maneuver 无论判据量如何均不参与剔除与 PIVOT 重
+    // 分类（红线：首段承载起点状态、末段承载终点语义）
+    for (std::size_t i = 1; i + 1 < maneuvers->size(); ++i) {
+        auto& maneuver = (*maneuvers)[i];
+        if (maneuver.length() >= config_.prune.min_arc_length) {
+            continue;
+        }
+        if (maneuver.points.size() < 2) {
+            continue;
+        }
+        const double delta_theta = std::abs(WrapAngle(
+            maneuver.points.back().theta - maneuver.points.front().theta));
+        if (delta_theta > config_.prune.pivot_heading_threshold) {
+            maneuver.direction = Direction::PIVOT;
+        } else {
+            maneuver.direction = Direction::UNKNOWN;
+        }
+    }
+    // PIVOT 即失败：动力学一致解在微弧长游程内的 |Δθ| 受 θ̇=v·tanδ/L
+    // 上界约束（爬行速度下远小于阈值），检出 PIVOT 说明解携带未愈合
+    // 缺陷或收敛声明不实，按求解失败语义上报，绝不带病输出
     for (std::size_t i = 1; i + 1 < maneuvers->size(); ++i) {
         if ((*maneuvers)[i].direction == Direction::PIVOT) {
             return false;
@@ -166,6 +188,10 @@ DdpGatingPlanBuild DdpPostStage::buildGatingPlan(
     build.seams.reserve(plan.seam_indices.size());
     const double dt = stage_two_reference.dt;
     const std::size_t num_seams = plan.seam_indices.size();
+    // 前一窗口的右边界+1（窗口裁剪的下界）：驻留插入按窗口顺序单调装配，
+    // 窗口重叠会造成状态点重复发射与时间戳回退——裁剪必须以前一窗口
+    // 边界为界（而非仅以前一接缝为界），保证逐接缝窗口严格互不重叠
+    std::size_t prev_window_end_plus_one = 0;
     for (std::size_t j = 0; j < num_seams; ++j) {
         const std::size_t seam = plan.seam_indices[j];
         plan.sign_gate[seam] = 0;
@@ -179,15 +205,17 @@ DdpGatingPlanBuild DdpPostStage::buildGatingPlan(
         // 不小于重转向需求，优化器才能在窗内排出满足 ω/η 边界的摆动
         const auto half = static_cast<std::size_t>(std::ceil(
             std::max(t_resteer, config_.shift_delay) / (2.0 * dt) - 1e-9));
-        // 窗口裁剪：不越界、不跨相邻接缝（保证逐接缝驻留插入互不重叠）
-        const std::size_t prev_bound =
-            (j == 0) ? 0 : plan.seam_indices[j - 1] + 1;
+        // 窗口裁剪：不越界、不跨相邻接缝（右端不含下一接缝点）、与前一
+        // 窗口互不重叠（左端不越过前一窗口右边界）。前一窗口右端被下一
+        // 接缝点裁住（≤ seam_j−1），故 window_begin 必然 <= seam，窗口
+        // 恒包含自身接缝
         const std::size_t next_bound =
             (j + 1 < num_seams) ? plan.seam_indices[j + 1] - 1 : num_poses - 1;
         const std::size_t window_begin =
-            std::max(seam > half ? seam - half : 0, prev_bound);
+            std::max(seam > half ? seam - half : 0, prev_window_end_plus_one);
         const std::size_t window_end =
             std::min(std::min(seam + half, num_poses - 1), next_bound);
+        prev_window_end_plus_one = window_end + 1;
         for (std::size_t k = window_begin; k <= window_end; ++k) {
             plan.dwell_v_cap[k] = config_.v_dwell;
         }
@@ -251,6 +279,20 @@ void DdpPostStage::buildStageTwoWarmStart(
         [&points](const TrajectoryPoint& point) { points.push_back(point); });
     if (points.size() < 2) {
         throw std::invalid_argument("DdpPostStage: 修剪后路径点数必须 >= 2");
+    }
+    // 状态量数据来源链（隐式契约）：buildManeuvers 全量 set v/a/δ/ω →
+    // pruneManeuvers 只打方向标签不改点 → ReconstructPath 移动语义保留
+    // 点数据。该契约跨四个函数且穿透 topology_cleaner，若任一环节的
+    // 数据处理逻辑变化而未同步此处，getV() 等会在深层抛出缺乏现场信息
+    // 的异常——入口显式校验一次，把契约违例转化为带明确位置的错误
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        if (!points[i].hasV() || !points[i].hasA() || !points[i].hasDelta() ||
+            !points[i].hasDeltaDot()) {
+            throw std::logic_error(
+                "DdpPostStage: 修剪后路径点缺少阶段一状态量（热启动依赖 "
+                "v/a/δ/ω，首个缺失点索引 " +
+                std::to_string(i) + "）");
+        }
     }
     std::vector<double> arc_length(points.size(), 0.0);
     for (std::size_t i = 1; i < points.size(); ++i) {
@@ -338,7 +380,71 @@ double DdpPostStage::MeasureSeamDeltaDeltaFromStates(
     return std::abs(delta_right - delta_left);
 }
 
+std::vector<std::size_t> DdpPostStage::collectKeptSeamIndices(
+    const std::vector<DdpSignRun>& runs,
+    const std::vector<Maneuver>& maneuvers) const {
+    if (runs.size() != maneuvers.size()) {
+        throw std::invalid_argument(
+            "DdpPostStage: 游程与 maneuver 数量必须一致");
+    }
+    std::vector<std::size_t> seam_indices;
+    seam_indices.reserve(maneuvers.size());
+    // 相邻游程共享边界点（后一游程的 begin_index）；两侧游程均保留时
+    // 该边界是一个真实换挡接缝。被剔除游程两侧的邻居同向合并、不产生
+    // 接缝；相邻保留游程的方向必然相反（游程按符号切换构造）
+    for (std::size_t i = 1; i < maneuvers.size(); ++i) {
+        if (maneuvers[i].direction == Direction::UNKNOWN ||
+            maneuvers[i - 1].direction == Direction::UNKNOWN) {
+            continue;
+        }
+        seam_indices.push_back(runs[i].begin_index);
+    }
+    return seam_indices;
+}
+
+std::vector<DdpSeamPlan> DdpPostStage::buildStageOneSeamPlans(
+    const DdpAlignedVec<DdpState>& states,
+    const std::vector<std::size_t>& seam_indices, double dt) const {
+    if (states.size() < 2 || !(dt > 0.0)) {
+        throw std::invalid_argument(
+            "DdpPostStage: 状态数量必须 >= 2 且 dt 为正");
+    }
+    std::vector<DdpSeamPlan> plans;
+    plans.reserve(seam_indices.size());
+    // 窗口定宽公式与门控计划同源：m_j=⌈max(T_resteer,T_shift)/(2dt)⌉，
+    // 裁剪到 [0,N]、不跨相邻接缝且与前一窗口互不重叠（逐接缝驻留插入
+    // 按窗口顺序单调装配，重叠会造成状态点重复发射与时间戳回退）
+    std::size_t prev_window_end_plus_one = 0;
+    for (std::size_t j = 0; j < seam_indices.size(); ++j) {
+        const std::size_t seam = seam_indices[j];
+        if (seam >= states.size()) {
+            throw std::invalid_argument("DdpPostStage: 接缝索引越界");
+        }
+        const double delta_delta =
+            MeasureSeamDeltaDeltaFromStates(states, seam, config_.v_dwell);
+        const double t_resteer =
+            ComputeResteerTime(delta_delta, config_.omega_max, config_.eta_max);
+        const auto half = static_cast<std::size_t>(std::ceil(
+            std::max(t_resteer, config_.shift_delay) / (2.0 * dt) - 1e-9));
+        const std::size_t next_bound = (j + 1 < seam_indices.size())
+                                           ? seam_indices[j + 1] - 1
+                                           : states.size() - 1;
+        const std::size_t window_begin =
+            std::max(seam > half ? seam - half : 0, prev_window_end_plus_one);
+        const std::size_t window_end =
+            std::min(std::min(seam + half, states.size() - 1), next_bound);
+        prev_window_end_plus_one = window_end + 1;
+        plans.push_back(DdpSeamPlan{
+            seam, window_begin, window_end, delta_delta, t_resteer,
+            config_.kappa_pad * std::max(t_resteer, config_.shift_delay)});
+    }
+    return plans;
+}
+
 TrajectoryPoint DdpPostStage::stateToPoint(const DdpState& x, double t) const {
+    // δ 取自收敛解的状态（已过幅值门），tanδ 必有限；断言防御未来
+    // 调用方把未收敛/注入状态直接传入
+    assert(std::isfinite(x(DDP_IDX_DELTA)));
     TrajectoryPoint point(x(DDP_IDX_X), x(DDP_IDX_Y), x(DDP_IDX_THETA));
     point.setV(x(DDP_IDX_V));
     point.setA(x(DDP_IDX_A));
@@ -422,8 +528,12 @@ Trajectory DdpPostStage::insertDwells(
 Trajectory DdpPostStage::assembleRetimedTrajectory(
     const DdpAlignedVec<DdpState>& states, double dt,
     const std::vector<DdpDwellEdit>& edits) const {
-    // 装配输出轨迹：接缝窗外为阶段二状态原样转化（时间戳随前方窗口
-    // 拉伸量平移），窗内内容按 拉伸时长/窗口原长 线性重定时
+    // 装配输出轨迹：接缝窗外按状态原样转化（时间戳随前方窗口拉伸量平移），
+    // 窗内内容做边缘斜坡重定时——局部时间倍率 ρ(τ) 在窗口两端经斜坡从 1
+    // 平滑过渡到 r、避免 ρ 阶跃：阶跃会让边界点对一侧保持原速、另一侧
+    // v→v/r，梯形配点速度残差在窗速未受帽约束的候选（阶段一降级解）上可
+    // 顶穿运动学门（实测 0.06~0.12，门限 0.05）；斜坡过渡把速率变化摊入
+    // 边缘区，边界点对的残差退回原轨迹的一致值
     std::vector<TrajectoryPoint> points;
     points.reserve(states.size() +
                    edits.size() *
@@ -451,13 +561,54 @@ Trajectory DdpPostStage::assembleRetimedTrajectory(
             }
             continue;
         }
-        const double ratio = edit.stretched_duration / window_duration;
+        // 边缘斜坡重定时：ρ(τ) 在 [0,R] 从 1 线性升到 r、平台区恒 r、
+        // [W−R,W] 对称降回 1，新时刻 σ(τ)=∫ρ。由目标拉伸时长 S 反解
+        // r：S=σ(W)=rW−R(r−1) ⇒ r=(S−R)/(W−R)（S≥W 保证 r≥1）；
+        // 斜坡宽度取 2 个采样步（短窗口退化为 W/2 的三角斜坡）
+        const double stretched = edit.stretched_duration;
+        const double ramp = std::min(2.0 * dt, 0.5 * window_duration);
+        const double ratio = (window_duration - ramp > 1e-9)
+                                 ? (stretched - ramp) / (window_duration - ramp)
+                                 : stretched / window_duration;
+        // σ 的分段常数：σ(R)=R(1+r)/2；σ(W−R)=σ(R)+r(W−2R)
+        const double sigma_ramp = ramp * (1.0 + ratio) / 2.0;
+        const double sigma_plateau_end =
+            sigma_ramp + ratio * (window_duration - 2.0 * ramp);
+        // 逆映射 τ=σ⁻¹(t)：t∈[0,σ(R)] 解二次（斜坡区），平台区线性，
+        // 末端对称二次；r→1 时退化为 τ=t
+        const auto inverse_map = [&](double t) -> std::pair<double, double> {
+            if (ratio - 1.0 < 1e-9) {
+                return {t, 1.0};
+            }
+            if (t <= sigma_ramp) {
+                // t = τ + (r−1)τ²/(2R) ⇒ τ = R(√(1+2(r−1)t/R)−1)/(r−1)
+                const double tau =
+                    ramp *
+                    (std::sqrt(1.0 + 2.0 * (ratio - 1.0) * t / ramp) - 1.0) /
+                    (ratio - 1.0);
+                return {tau, 1.0 + (ratio - 1.0) * tau / ramp};
+            }
+            if (t <= sigma_plateau_end) {
+                return {ramp + (t - sigma_ramp) / ratio, ratio};
+            }
+            // 末端斜坡：t = σ(W−R) + r·u − (r−1)u²/(2R)，u∈[0,R]，取小根
+            const double s_end = sigma_plateau_end;
+            const double discriminant =
+                ratio * ratio - 2.0 * (ratio - 1.0) * (t - s_end) / ramp;
+            const double u = ramp *
+                             (ratio - std::sqrt(std::max(discriminant, 0.0))) /
+                             (ratio - 1.0);
+            // 末样本的时间戳量化可超出 σ(W) 最多半个采样步，钳制回窗内
+            const double u_clamped = std::min(std::max(u, 0.0), ramp);
+            return {window_duration - ramp + u_clamped,
+                    ratio - (ratio - 1.0) * u_clamped / ramp};
+        };
         const auto intervals =
-            static_cast<std::size_t>(std::lround(edit.stretched_duration / dt));
+            static_cast<std::size_t>(std::lround(stretched / dt));
         for (std::size_t i = 0; i <= intervals; ++i) {
-            // 新采样时刻 σ → 原窗口时刻 τ=σ/ratio（线性重定时）；
-            // 位姿/朝向/前轮转角按原剖面取值，v/ω/a 随时间尺度同比缩放
-            const double tau = std::min(i * dt / ratio, window_duration);
+            // 新采样时刻 t → 旧窗口时刻 τ 与局部倍率 ρ(τ)；位姿/朝向/前轮
+            // 转角按原剖面取值，v/ω/a 随局部时间倍率同比缩放
+            const auto [tau, rho] = inverse_map(i * dt);
             const double position = tau / dt;
             const auto base =
                 std::min<std::size_t>(static_cast<std::size_t>(position),
@@ -469,12 +620,12 @@ Trajectory DdpPostStage::assembleRetimedTrajectory(
             sample(DDP_IDX_THETA) =
                 from(DDP_IDX_THETA) +
                 WrapAngle(to(DDP_IDX_THETA) - from(DDP_IDX_THETA)) * frac;
-            sample(DDP_IDX_V) /= ratio;
-            sample(DDP_IDX_A) /= ratio * ratio;
-            sample(DDP_IDX_OMEGA) /= ratio;
+            sample(DDP_IDX_V) /= rho;
+            sample(DDP_IDX_A) /= rho * rho;
+            sample(DDP_IDX_OMEGA) /= rho;
             points.push_back(stateToPoint(sample, t_begin + i * dt));
         }
-        time_offset += edit.stretched_duration - window_duration;
+        time_offset += stretched - window_duration;
         cursor = edit.window_end + 1;
     }
     for (; cursor < states.size(); ++cursor) {
@@ -485,136 +636,161 @@ Trajectory DdpPostStage::assembleRetimedTrajectory(
 }
 
 bool DdpPostStage::validateOutput(const Trajectory& output,
-                                  const ApaDdpStageTwoResult& stage_two,
+                                  const DdpAlignedVec<DdpState>& states,
+                                  const DdpAlignedVec<DdpControl>& controls,
+                                  double input_length,
                                   const TrajectoryPoint& goal,
                                   const ESDFMap& esdf_map,
                                   const VehicleFootprintModel& footprint_model,
                                   DdpPostStageDiagnostics* diagnostics) const {
-    const auto fail = [diagnostics](const std::string& check, double measured,
-                                    double threshold) {
-        diagnostics->failed_check = check;
-        diagnostics->measured_value = measured;
-        diagnostics->threshold = threshold;
-        return false;
+    if (diagnostics == nullptr) {
+        throw std::invalid_argument("DdpPostStage: 诊断输出指针必须非空");
+    }
+    diagnostics->gate_checks.clear();
+    diagnostics->metric_checks.clear();
+    const auto record_gate = [diagnostics](const std::string& name,
+                                           double measured, double threshold) {
+        diagnostics->gate_checks.push_back(DdpCheckMeasurement{
+            name, measured, threshold, measured <= threshold});
     };
-    // ① 碰撞复检 + ② 终点双指标 + ③ 运动学一致性（Trajectory::validate
-    // 三门，与 NMPC/ALM 路径共用同一生产质量门）
+    const auto record_metric = [diagnostics](const std::string& name,
+                                             double measured, double threshold,
+                                             bool passed) {
+        diagnostics->metric_checks.push_back(
+            DdpCheckMeasurement{name, measured, threshold, passed});
+    };
+    // ==================== 合法性门（任一项不过即不可输出，不得放宽）====
+    // 碰撞复检 + 终点双指标 + 运动学四残差（Trajectory::validate，与
+    // NMPC/ALM 路径共用同一生产质量门）
     const auto validation =
         output.validate(goal, esdf_map, footprint_model, config_.validation);
-    if (!validation.collision_safe) {
-        return fail("collision", validation.max_intrusion_depth,
-                    config_.validation.max_collision_depth);
-    }
-    if (!validation.terminal_position_ok) {
-        return fail("terminal_position", validation.terminal_position_error,
-                    config_.validation.max_terminal_position_error);
-    }
-    if (!validation.terminal_heading_ok) {
-        return fail("terminal_heading", validation.terminal_heading_error_deg,
-                    config_.validation.max_terminal_heading_error_deg);
-    }
-    if (!validation.kinematic_feasible) {
-        // 四项残差取相对超标最严重的一项作为量化诊断
-        const std::pair<const char*, double> residuals[4] = {
-            {"kinematic_position",
-             validation.max_kinematic_position_residual /
-                 config_.validation.max_kinematic_position_residual},
-            {"kinematic_heading",
-             validation.max_kinematic_heading_residual_deg /
-                 config_.validation.max_kinematic_heading_residual_deg},
-            {"kinematic_velocity",
-             validation.max_kinematic_velocity_residual /
-                 config_.validation.max_kinematic_velocity_residual},
-            {"kinematic_steer",
-             validation.max_kinematic_steer_residual /
-                 config_.validation.max_kinematic_steer_residual}};
-        const auto* worst = std::max_element(
-            std::begin(residuals), std::end(residuals),
-            [](const auto& a, const auto& b) { return a.second < b.second; });
-        return fail(worst->first, worst->second, 1.0);
-    }
-    // ④ 控制幅值复检：δ/ω/a/v 状态量与 j/η 控制量全时限值（驻留插入只
-    // 缩不增，以阶段二输出为复检对象；限值与求解配置同源）。状态量按
-    // AL 平衡态容差复检；控制量按盒过冲专项容差复检——前向滚动按设计
-    // 不截断控制，最终序列可经反馈项产生有限盒过冲
+    record_gate("collision", validation.max_intrusion_depth,
+                config_.validation.max_collision_depth);
+    record_gate("terminal_position", validation.terminal_position_error,
+                config_.validation.max_terminal_position_error);
+    record_gate("terminal_heading", validation.terminal_heading_error_deg,
+                config_.validation.max_terminal_heading_error_deg);
+    record_gate("kinematic_position",
+                validation.max_kinematic_position_residual,
+                config_.validation.max_kinematic_position_residual);
+    record_gate("kinematic_heading",
+                validation.max_kinematic_heading_residual_deg,
+                config_.validation.max_kinematic_heading_residual_deg);
+    record_gate("kinematic_velocity",
+                validation.max_kinematic_velocity_residual,
+                config_.validation.max_kinematic_velocity_residual);
+    record_gate("kinematic_steer", validation.max_kinematic_steer_residual,
+                config_.validation.max_kinematic_steer_residual);
+    // 状态幅值复检（按量分设容差，输出轨迹契约直接消费的量）：
+    // v/a 保持绝对容差（AL 平衡包络）；δ 只在行驶点（|v|≥v_dwell）复检
+    // 并按相对容差——低速/驻留点的 δ 不产生曲率，与「停稳后前轮转角无
+    // 物理要求」同一设计语义，且 0.05 绝对容差在 δ 量纲上等价于允许
+    // κ=113%·κ_max（比验收门还松，校验门不得比验收门宽）；ω 全点复检
+    // （执行器速率在驻留转向中同样工作）。驻留插入只缩不增，以产生输出
+    // 轨迹的状态序列为复检对象
     const auto& solver_config = solver_->config();
-    double amplitude_violation = 0.0;
+    double amp_va = 0.0;
+    double amp_delta = 0.0;
+    double amp_omega = 0.0;
+    for (const auto& x : states) {
+        amp_va =
+            std::max(amp_va, std::abs(x(DDP_IDX_V)) - solver_config.cost.v_max);
+        amp_va =
+            std::max(amp_va, std::abs(x(DDP_IDX_A)) - solver_config.cost.a_max);
+        if (std::abs(x(DDP_IDX_V)) >= config_.v_dwell) {
+            amp_delta =
+                std::max(amp_delta, std::abs(x(DDP_IDX_DELTA)) /
+                                            solver_config.cost.delta_max -
+                                        1.0);
+        }
+        amp_omega = std::max(
+            amp_omega,
+            std::abs(x(DDP_IDX_OMEGA)) / solver_config.cost.omega_max - 1.0);
+    }
+    record_gate("amplitude", amp_va, config_.amplitude_check_tol);
+    record_gate("amplitude_delta", amp_delta, config_.amplitude_check_rel_tol);
+    record_gate("amplitude_omega", amp_omega, config_.amplitude_check_rel_tol);
+    // ==================== 质量指标（全量记录，不作为回退触发条件）====
+    // 控制盒过冲：j/η 不进入输出轨迹契约（下游执行消费 v/a/δ/ω 剖面），
+    // 前向滚动按设计不截断控制，已收敛解的过冲实测集中出现在终端静止
+    // 等式收紧的边界层（最后一个控制步）；物理可执行性由状态幅值门
+    // 独立保证，本项作为求解器发散级探针记录
     double control_violation = 0.0;
-    for (std::size_t k = 0; k < stage_two.states.size(); ++k) {
-        const DdpState& x = stage_two.states[k];
-        amplitude_violation =
-            std::max(amplitude_violation,
-                     std::abs(x(DDP_IDX_V)) - solver_config.cost.v_max);
-        amplitude_violation =
-            std::max(amplitude_violation,
-                     std::abs(x(DDP_IDX_A)) - solver_config.cost.a_max);
-        amplitude_violation =
-            std::max(amplitude_violation,
-                     std::abs(x(DDP_IDX_DELTA)) - solver_config.cost.delta_max);
-        amplitude_violation =
-            std::max(amplitude_violation,
-                     std::abs(x(DDP_IDX_OMEGA)) - solver_config.cost.omega_max);
-        if (k < stage_two.controls.size()) {
-            control_violation =
-                std::max(control_violation,
-                         std::abs(stage_two.controls[k](DDP_IDX_JERK)) -
-                             solver_config.inner.jerk_max);
-            control_violation =
-                std::max(control_violation,
-                         std::abs(stage_two.controls[k](DDP_IDX_ETA)) -
-                             solver_config.inner.steer_accel_max);
-        }
+    for (const auto& u : controls) {
+        control_violation =
+            std::max(control_violation,
+                     std::abs(u(DDP_IDX_JERK)) - solver_config.inner.jerk_max);
+        control_violation = std::max(
+            control_violation,
+            std::abs(u(DDP_IDX_ETA)) - solver_config.inner.steer_accel_max);
     }
-    if (amplitude_violation > config_.amplitude_check_tol) {
-        return fail("amplitude", amplitude_violation,
-                    config_.amplitude_check_tol);
-    }
-    if (control_violation > config_.control_overshoot_tol) {
-        return fail("control_amplitude", control_violation,
-                    config_.control_overshoot_tol);
-    }
-    // ⑤ 接缝零速与驻留完整性：逐接缝核对零速、T_dwell≥T_resteer、
-    // 实际静止时长、窗内速度帽与窗端 ω 余量
+    record_metric("control_amplitude", control_violation,
+                  config_.control_overshoot_tol,
+                  control_violation <= config_.control_overshoot_tol);
+    // 接缝与驻留完整性子项：阶段二收敛解由门控结构保证（接缝等式/
+    // 驻留帽），阶段一降级候选未施加门控（换挡在蠕动速度内完成、驻留
+    // 仍由插入提供转向时间）——度量换挡质量而非路径合法性
+    double max_seam_speed = 0.0;
+    double min_dwell_margin = 0.0;
+    double max_window_speed = 0.0;
+    double max_window_end_omega = 0.0;
+    bool first_seam = true;
     for (const auto& seam : diagnostics->seams) {
-        if (seam.seam_speed > config_.seam_speed_tol) {
-            return fail("seam_zero_speed", seam.seam_speed,
-                        config_.seam_speed_tol);
-        }
-        if (seam.t_dwell < seam.t_resteer) {
-            return fail("dwell_resteer", seam.t_dwell, seam.t_resteer);
-        }
-        if (seam.dwell_duration < seam.t_dwell) {
-            return fail("dwell_duration", seam.dwell_duration, seam.t_dwell);
-        }
-        if (seam.window_max_speed > config_.v_dwell + config_.seam_speed_tol) {
-            return fail("dwell_window_speed", seam.window_max_speed,
-                        config_.v_dwell + config_.seam_speed_tol);
-        }
-        if (seam.window_end_omega > config_.dwell_omega_tol) {
-            return fail("dwell_window_end_omega", seam.window_end_omega,
-                        config_.dwell_omega_tol);
-        }
+        max_seam_speed = std::max(max_seam_speed, seam.seam_speed);
+        max_window_speed = std::max(max_window_speed, seam.window_max_speed);
+        max_window_end_omega =
+            std::max(max_window_end_omega, seam.window_end_omega);
+        const double dwell_margin = seam.dwell_duration - seam.t_dwell;
+        min_dwell_margin = first_seam
+                               ? dwell_margin
+                               : std::min(min_dwell_margin, dwell_margin);
+        first_seam = false;
     }
-    // ⑥ maneuver 数不增：输出物理方向段数不得超过输入 A* maneuver 数
+    const bool has_seam = !diagnostics->seams.empty();
+    record_metric("seam_zero_speed", max_seam_speed, config_.seam_speed_tol,
+                  max_seam_speed <= config_.seam_speed_tol);
+    record_metric("dwell_duration", has_seam ? -min_dwell_margin : 0.0, 0.0,
+                  !has_seam || min_dwell_margin >= 0.0);
+    record_metric("dwell_window_speed", max_window_speed,
+                  config_.v_dwell + config_.seam_speed_tol,
+                  max_window_speed <= config_.v_dwell + config_.seam_speed_tol);
+    record_metric("dwell_window_end_omega", max_window_end_omega,
+                  config_.dwell_omega_tol,
+                  max_window_end_omega <= config_.dwell_omega_tol);
+    // maneuver 数不增（效果指标，记录供方案比较；曾作为合法性门存在
+    // 逻辑倒挂——触发时回退目标的 maneuver 数只会更多）
     diagnostics->output_maneuver_count = output.countDirectionRuns(
-        config_.epsilon_v, config_.cleanup.min_arc_length);
-    if (diagnostics->output_maneuver_count >
-        diagnostics->input_maneuver_count) {
-        return fail("maneuver_count",
-                    static_cast<double>(diagnostics->output_maneuver_count),
-                    static_cast<double>(diagnostics->input_maneuver_count));
+        config_.epsilon_v, config_.prune.min_arc_length);
+    record_metric("maneuver_count",
+                  static_cast<double>(diagnostics->output_maneuver_count),
+                  static_cast<double>(diagnostics->input_maneuver_count),
+                  diagnostics->output_maneuver_count <=
+                      diagnostics->input_maneuver_count);
+    // 长度比（路径蠕变探针；1.05 与端到端验收口径一致）
+    const double length_ratio =
+        input_length > 0.0 ? output.length() / input_length : 1.0;
+    record_metric("length_ratio", length_ratio, 1.05, length_ratio <= 1.05);
+    // 门结论：首个未过门项填入诊断（全量量测已记录，不短路）
+    for (const auto& check : diagnostics->gate_checks) {
+        if (!check.passed) {
+            diagnostics->failed_check = check.name;
+            diagnostics->measured_value = check.measured;
+            diagnostics->threshold = check.threshold;
+            return false;
+        }
     }
+    diagnostics->failed_check.clear();
     return true;
 }
 
 void DdpPostStage::makeFallback(DdpPostStageResult* result,
                                 DdpPostStageStatus status,
-                                std::string failed_check, double measured,
-                                double threshold,
+                                const std::string& failed_check,
+                                double measured, double threshold,
                                 const Path& original_path) const {
     result->status = status;
     result->used_fallback = true;
-    result->diagnostics.failed_check = std::move(failed_check);
+    result->diagnostics.failed_check = failed_check;
     result->diagnostics.measured_value = measured;
     result->diagnostics.threshold = threshold;
     // 回退轨迹：原始 A* 路径经梯形加减速时间参数化补全为可执行轨迹
@@ -631,7 +807,8 @@ DdpPostStageResult DdpPostStage::run(
         stage_one_reference.maneuvers.empty()
             ? static_cast<int>(original_path.numManeuvers())
             : static_cast<int>(stage_one_reference.maneuvers.size());
-    // 阶段一未收敛不得带病后处理（融化/修剪/门控均建立在收敛解之上）
+    // 阶段一未收敛不得带病后处理（融化/修剪/门控均建立在收敛解之上，
+    // 此时没有任何候选可评估）
     if (stage_one_result.report.status != ApaDdpStatus::CONVERGED) {
         makeFallback(&result, DdpPostStageStatus::STAGE_ONE_NOT_CONVERGED,
                      "stage_one_convergence",
@@ -640,55 +817,124 @@ DdpPostStageResult DdpPostStage::run(
                      original_path);
         return result;
     }
-    // 步骤 1+2：符号游程分析与拓扑修剪（PIVOT 即失败）
+    // 步骤 1+2：符号游程分析与拓扑修剪（PIVOT 即失败：检出说明解携带
+    // 未愈合缺陷，两个候选都由该解构造，不存在可输出的候选）
     const auto runs = analyzeSignRuns(stage_one_result.states);
     auto maneuvers = buildManeuvers(stage_one_result.states, runs);
     if (!pruneManeuvers(&maneuvers)) {
         makeFallback(&result, DdpPostStageStatus::PIVOT_DETECTED, "pivot",
-                     config_.cleanup.pivot_delta_threshold,
-                     config_.cleanup.pivot_delta_threshold, original_path);
+                     config_.prune.pivot_heading_threshold,
+                     config_.prune.pivot_heading_threshold, original_path);
         return result;
     }
+    // ============ 候选一：阶段二门控精化（必须重解，禁止直接拼接）====
     // 修剪后重采样重排网格（保持 0.05 m 间距与 dt=0.1 s 不变）：
     // 复用前端构建器，cusp/打靶节点/maneuver 元数据与阶段一同源
     const Path pruned_path = ReconstructPath(maneuvers);
     DdpReference stage_two_reference;
+    bool stage_two_reference_ok = true;
     try {
         stage_two_reference = reference_builder_->build(pruned_path);
     } catch (const std::invalid_argument&) {
         // 退化诊断精细化：区分"点数不足"与"弧长不足一个重采样间距"
         // 两种子情形（后者典型为融化过度把有用段也压没），供人工排障
+        stage_two_reference_ok = false;
+        result.diagnostics.degraded_reason = "pruned_path_degenerate";
         if (pruned_path.size() < 2) {
-            makeFallback(&result, DdpPostStageStatus::PRUNED_PATH_DEGENERATE,
-                         "pruned_points",
-                         static_cast<double>(pruned_path.size()), 2.0,
-                         original_path);
+            result.diagnostics.failed_check = "pruned_points";
+            result.diagnostics.measured_value =
+                static_cast<double>(pruned_path.size());
+            result.diagnostics.threshold = 2.0;
         } else {
-            makeFallback(&result, DdpPostStageStatus::PRUNED_PATH_DEGENERATE,
-                         "pruned_length", pruned_path.length(),
-                         reference_builder_->sampleDist(), original_path);
+            result.diagnostics.failed_check = "pruned_length";
+            result.diagnostics.measured_value = pruned_path.length();
+            result.diagnostics.threshold = reference_builder_->sampleDist();
         }
+    }
+    if (stage_two_reference_ok) {
+        const auto gating = buildGatingPlan(stage_two_reference, pruned_path);
+        // 以阶段一解在修剪后网格上的映射热启动（而非前端初值提取的 bang
+        // 速度剖面）；跟踪权重冻结在阶段一末轮的退火后取值（不再退火≠
+        // 重置回 w_ref,0：强跟踪会与终端 AL 罚权重形成失衡平衡，实测收敛
+        // 轮数翻倍），阶段一无历史（首轮即收敛）时退化为基准权重
+        DdpAlignedVec<DdpState> warm_states;
+        DdpAlignedVec<DdpControl> warm_controls;
+        buildStageTwoWarmStart(pruned_path, stage_two_reference, &warm_states,
+                               &warm_controls);
+        const double stage_one_final_weight =
+            stage_one_result.report.history.empty()
+                ? solver_->config().cost.weight_ref_base
+                : stage_one_result.report.history.back().tracking_weight;
+        // 跟踪权重地板（默认 0 = 不启用）：深退火调度下阶段一末轮权重
+        // 可能远低于精化所需的保持量级，钳到地板避免门控失稳
+        const double stage_two_weight = std::max(
+            stage_one_final_weight, config_.stage_two_min_tracking_weight);
+        auto& stage_two_solver =
+            (stage_two_solver_ != nullptr) ? *stage_two_solver_ : *solver_;
+        auto stage_two = stage_two_solver.solveStageTwo(
+            stage_two_reference, gating.plan, warm_states, warm_controls,
+            stage_two_weight, &stage_one_result.final_multipliers);
+        if (stage_two.report.status == ApaDdpStatus::CONVERGED) {
+            // 驻留插入（逐接缝时间拉伸 + 时间戳线性重排）后过合法性门
+            Trajectory stage_two_output =
+                insertDwells(stage_two.states, stage_two_reference.dt,
+                             gating.seams, &result.diagnostics.seams);
+            result.stage_two = std::move(stage_two);
+            if (validateOutput(stage_two_output, result.stage_two->states,
+                               result.stage_two->controls,
+                               original_path.length(), goal, esdf_map,
+                               footprint_model, &result.diagnostics)) {
+                result.status = DdpPostStageStatus::SUCCESS;
+                result.used_fallback = false;
+                result.trajectory = std::move(stage_two_output);
+                return result;
+            }
+            // 阶段二解不过门：记录失败门项后继续尝试降级候选
+            result.diagnostics.degraded_reason =
+                "stage_two_gate:" + result.diagnostics.failed_check;
+        } else {
+            result.stage_two = std::move(stage_two);
+            result.diagnostics.degraded_reason = "stage_two_convergence";
+        }
+    }
+    // ============ 候选二：阶段一降级（阶段一解 + 修剪 + 驻留插入）====
+    // 阶段二不可用（未收敛/不过门/参考退化）时，已收敛的阶段一解本身
+    // 是合法的优化成果：接缝取修剪后保留游程的共享边界，驻留插入提供
+    // 转向时间，与候选一共用同一合法性门——收益虽不及阶段二，但一定
+    // 优于整体回退
+    if (stage_one_result.states.size() >= 2 && stage_one_reference.dt > 0.0) {
+        const auto seam_indices = collectKeptSeamIndices(runs, maneuvers);
+        const auto seam_plans = buildStageOneSeamPlans(
+            stage_one_result.states, seam_indices, stage_one_reference.dt);
+        Trajectory stage_one_output =
+            insertDwells(stage_one_result.states, stage_one_reference.dt,
+                         seam_plans, &result.diagnostics.seams);
+        if (validateOutput(stage_one_output, stage_one_result.states,
+                           stage_one_result.controls, original_path.length(),
+                           goal, esdf_map, footprint_model,
+                           &result.diagnostics)) {
+            result.status = DdpPostStageStatus::SUCCESS_STAGE_ONE_ONLY;
+            result.used_fallback = false;
+            result.trajectory = std::move(stage_one_output);
+            return result;
+        }
+        // 降级候选也不过门：两个候选均失败，以降级候选的失败门项回退
+        makeFallback(&result, DdpPostStageStatus::VALIDATION_FAILED,
+                     result.diagnostics.failed_check,
+                     result.diagnostics.measured_value,
+                     result.diagnostics.threshold, original_path);
         return result;
     }
-    const auto gating = buildGatingPlan(stage_two_reference, pruned_path);
-    // 步骤 3：阶段二门控重解（必须重解，禁止直接拼接修剪结果）——
-    // 以阶段一解在修剪后网格上的映射热启动（而非前端初值提取的 bang
-    // 速度剖面）；跟踪权重冻结在阶段一末轮的退火后取值（不再退火≠
-    // 重置回 w_ref,0：强跟踪会与终端 AL 罚权重形成失衡平衡，实测收敛
-    // 轮数翻倍），阶段一无历史（首轮即收敛）时退化为基准权重
-    DdpAlignedVec<DdpState> warm_states;
-    DdpAlignedVec<DdpControl> warm_controls;
-    buildStageTwoWarmStart(pruned_path, stage_two_reference, &warm_states,
-                           &warm_controls);
-    const double stage_one_final_weight =
-        stage_one_result.report.history.empty()
-            ? solver_->config().cost.weight_ref_base
-            : stage_one_result.report.history.back().tracking_weight;
-    auto stage_two = solver_->solveStageTwo(
-        stage_two_reference, gating.plan, warm_states, warm_controls,
-        stage_one_final_weight, &stage_one_result.final_multipliers);
-    if (stage_two.report.status != ApaDdpStatus::CONVERGED) {
-        result.stage_two = std::move(stage_two);
+    // 降级候选不可用（状态不足或参考 dt 非法，仅异常注入场景可达）：
+    // 以候选一的失败原因回退
+    if (result.diagnostics.degraded_reason == "pruned_path_degenerate") {
+        makeFallback(&result, DdpPostStageStatus::PRUNED_PATH_DEGENERATE,
+                     result.diagnostics.failed_check,
+                     result.diagnostics.measured_value,
+                     result.diagnostics.threshold, original_path);
+        return result;
+    }
+    if (result.diagnostics.degraded_reason == "stage_two_convergence") {
         makeFallback(&result, DdpPostStageStatus::STAGE_TWO_NOT_CONVERGED,
                      "stage_two_convergence",
                      static_cast<double>(result.stage_two->report.status),
@@ -696,24 +942,11 @@ DdpPostStageResult DdpPostStage::run(
                      original_path);
         return result;
     }
-    // 步骤 4：驻留插入（逐接缝时间拉伸 + 时间戳线性重排）
-    Trajectory output = insertDwells(stage_two.states, stage_two_reference.dt,
-                                     gating.seams, &result.diagnostics.seams);
-    // 步骤 5：六项校验清单（任一不过 → 回退出口）
-    if (!validateOutput(output, stage_two, goal, esdf_map, footprint_model,
-                        &result.diagnostics)) {
-        result.stage_two = std::move(stage_two);
-        makeFallback(&result, DdpPostStageStatus::VALIDATION_FAILED,
-                     result.diagnostics.failed_check,
-                     result.diagnostics.measured_value,
-                     result.diagnostics.threshold, original_path);
-        return result;
-    }
-    // 步骤 6：全部通过，输出最终轨迹
-    result.status = DdpPostStageStatus::SUCCESS;
-    result.used_fallback = false;
-    result.trajectory = std::move(output);
-    result.stage_two = std::move(stage_two);
+    // 候选一已过门是不可能的（过门即已返回），剩余情形为候选一门不过
+    makeFallback(&result, DdpPostStageStatus::VALIDATION_FAILED,
+                 result.diagnostics.failed_check,
+                 result.diagnostics.measured_value,
+                 result.diagnostics.threshold, original_path);
     return result;
 }
 }  // namespace apa_post_processor

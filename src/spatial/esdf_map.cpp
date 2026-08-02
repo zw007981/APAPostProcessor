@@ -27,8 +27,22 @@ ESDFMap::ESDFMap(const GridMap& grid_map) {
                       occ_data.size(), size_);
         throw std::logic_error("ESDFMap occupancy data size is invalid!!!");
     }
+    // L8.2：EDT 之前把地图最外圈栅格标记为占据——图内距离场在接近边界时
+    // 自然衰减到 ~0，与图外穿透深度（L8.1）连成处处连续的场；边界在图内
+    // 一侧就产生斥力，轨迹在跨出去之前就被推回。可用区域每边缩小一个
+    // 栅格（四数据集路径离边界 ≥7 m，零实际影响；贴边障碍至多被加厚一
+    // 格，已逐集核实无路径经过）
+    std::vector<uint8_t> occ_bordered = occ_data;
+    for (int col = 0; col < width_; ++col) {
+        occ_bordered[static_cast<GridIndex>(getIndex(0, col))] = 1;
+        occ_bordered[static_cast<GridIndex>(getIndex(height_ - 1, col))] = 1;
+    }
+    for (int row = 0; row < height_; ++row) {
+        occ_bordered[static_cast<GridIndex>(getIndex(row, 0))] = 1;
+        occ_bordered[static_cast<GridIndex>(getIndex(row, width_ - 1))] = 1;
+    }
     const auto signed_distance =
-        BuildSignedDistData(occ_data, width_, height_, resolution_);
+        BuildSignedDistData(occ_bordered, width_, height_, resolution_);
     cell_data_.resize(size_);
     distance_data_.resize(size_);
     for (GridIndex i = 0; i < size_; ++i) {
@@ -38,12 +52,8 @@ ESDFMap::ESDFMap(const GridMap& grid_map) {
     calGradField();
 }
 
-std::pair<double, Eigen::Vector2d> ESDFMap::getDistAndGrad(double x,
-                                                           double y) const {
-    if (!this->inMap(x, y)) {
-        LOG_FMT_WARN("ESDFMap query out of bounds: ({}, {})!", x, y);
-        return {0.0, Eigen::Vector2d::Zero()};
-    }
+std::pair<double, Eigen::Vector2d> ESDFMap::interpolateDistAndGrad(
+    double x, double y) const {
     // 双线性插值：从 AoS 缓存取四个角点，双精度 lerp
     const auto params = this->calBilinearParams(x, y);
     const auto& cell_bl = cell_data_[params.idx_bl];
@@ -71,6 +81,55 @@ std::pair<double, Eigen::Vector2d> ESDFMap::getDistAndGrad(double x,
     const auto grad_y =
         grad_y_row_lower + (grad_y_row_upper - grad_y_row_lower) * row_ratio;
     return {dist, Eigen::Vector2d(grad_x, grad_y)};
+}
+
+double ESDFMap::interpolateDist(double x, double y) const {
+    // 仅对距离做双线性插值。使用独立 distance_data_ 保持紧凑 stride，
+    // 避免 AoS 布局对纯距离查询的 cache 密度损失。
+    const auto params = this->calBilinearParams(x, y);
+    const auto col_ratio = params.col_ratio;
+    const auto row_ratio = params.row_ratio;
+    const PhysicalDist* dist_data = distance_data_.data();
+    const auto dist_row_lower =
+        dist_data[params.idx_bl] +
+        (dist_data[params.idx_br] - dist_data[params.idx_bl]) * col_ratio;
+    const auto dist_row_upper =
+        dist_data[params.idx_tl] +
+        (dist_data[params.idx_tr] - dist_data[params.idx_tl]) * col_ratio;
+    return dist_row_lower + (dist_row_upper - dist_row_lower) * row_ratio;
+}
+
+std::pair<double, Eigen::Vector2d> ESDFMap::recoveredFieldOutside(
+    double x, double y) const {
+    // p = clamp(q, 地图矩形)：q 在矩形上的最近点
+    const double max_x = origin_.x + static_cast<double>(width_) * resolution_;
+    const double max_y = origin_.y + static_cast<double>(height_) * resolution_;
+    const double px = std::clamp(x, origin_.x, max_x);
+    const double py = std::clamp(y, origin_.y, max_y);
+    const double dx = x - px;
+    const double dy = y - py;
+    const double s = std::hypot(dx, dy);
+    if (s <= EPSILON) {
+        // 恰在边界上（远侧闭边）：梯度方向未定义，按连续延拓取图内侧的
+        // 既有场值与梯度（L8.2 已使边界处图内场 ≈0 且梯度指向图内），
+        // 不得再返回零向量
+        return interpolateDistAndGrad(px, py);
+    }
+    // d(q) = d_map(p) − ‖q−p‖（随穿透深度线性下降 ⟹ C_safe 线性增长、
+    // 罚三次增长）；∇d = (p−q)/‖q−p‖ 恒指向图内。基值沿边界的切向变化
+    // 被忽略（恢复场的建模近似：贴边障碍附近的图外梯度方向有微小切向
+    // 误差，恢复方向的主导项不变）
+    const double base = interpolateDist(px, py);
+    return {base - s, Eigen::Vector2d(-dx / s, -dy / s)};
+}
+
+std::pair<double, Eigen::Vector2d> ESDFMap::getDistAndGrad(double x,
+                                                           double y) const {
+    if (!this->inMap(x, y)) {
+        out_of_map_queries_.fetch_add(1, std::memory_order_relaxed);
+        return recoveredFieldOutside(x, y);
+    }
+    return interpolateDistAndGrad(x, y);
 }
 
 void ESDFMap::getDistAndGradBatch(const double* xs, const double* ys, int n,
@@ -118,13 +177,16 @@ void ESDFMap::getDistAndGradBatch(const double* xs, const double* ys, int n,
         }
     }
 
-    // 第二遍：对所有有效点做双线性插值（纯浮点，编译器可自动向量化）
+    // 第二遍：对所有有效点做双线性插值（纯浮点，编译器可自动向量化）；
+    // 越界点走 L8.1 恢复场（d = d_map(p) − ‖q−p‖，梯度恒指向图内）
     const ESDFCell* cell_base = cell_data_.data();
     for (int i = 0; i < n; ++i) {
         if (!params[i].valid) {
-            dists_out[i] = 0.0;
-            grad_x_out[i] = 0.0;
-            grad_y_out[i] = 0.0;
+            out_of_map_queries_.fetch_add(1, std::memory_order_relaxed);
+            const auto [dist, grad] = recoveredFieldOutside(xs[i], ys[i]);
+            dists_out[i] = dist;
+            grad_x_out[i] = grad.x();
+            grad_y_out[i] = grad.y();
             continue;
         }
         const auto& p = params[i];
@@ -134,8 +196,10 @@ void ESDFMap::getDistAndGradBatch(const double* xs, const double* ys, int n,
         const auto& cell_tr = cell_base[p.idx_tr];
         const double cr = p.col_ratio;
         const double rr = p.row_ratio;
-        const double dist_lo = cell_bl.dist + (cell_br.dist - cell_bl.dist) * cr;
-        const double dist_hi = cell_tl.dist + (cell_tr.dist - cell_tl.dist) * cr;
+        const double dist_lo =
+            cell_bl.dist + (cell_br.dist - cell_bl.dist) * cr;
+        const double dist_hi =
+            cell_tl.dist + (cell_tr.dist - cell_tl.dist) * cr;
         const double gx_lo =
             cell_bl.grad_x + (cell_br.grad_x - cell_bl.grad_x) * cr;
         const double gx_hi =
@@ -152,22 +216,10 @@ void ESDFMap::getDistAndGradBatch(const double* xs, const double* ys, int n,
 
 double ESDFMap::getDist(double x, double y) const {
     if (!this->inMap(x, y)) {
-        LOG_FMT_WARN("ESDFMap query out of bounds: ({}, {})!", x, y);
-        return 0.0;
+        out_of_map_queries_.fetch_add(1, std::memory_order_relaxed);
+        return recoveredFieldOutside(x, y).first;
     }
-    // 仅对距离做双线性插值。使用独立 distance_data_ 保持紧凑 stride，
-    // 避免 AoS 布局对纯距离查询的 cache 密度损失。
-    const auto params = this->calBilinearParams(x, y);
-    const auto col_ratio = params.col_ratio;
-    const auto row_ratio = params.row_ratio;
-    const PhysicalDist* dist_data = distance_data_.data();
-    const auto dist_row_lower =
-        dist_data[params.idx_bl] +
-        (dist_data[params.idx_br] - dist_data[params.idx_bl]) * col_ratio;
-    const auto dist_row_upper =
-        dist_data[params.idx_tl] +
-        (dist_data[params.idx_tr] - dist_data[params.idx_tl]) * col_ratio;
-    return dist_row_lower + (dist_row_upper - dist_row_lower) * row_ratio;
+    return interpolateDist(x, y);
 }
 
 // 调用方必须保证 (x, y) 在地图范围内。static_cast<int> 对正数截断等价于 floor。
@@ -187,12 +239,14 @@ ESDFMap::BilinearParams ESDFMap::calBilinearParams(double x, double y) const {
     params.idx_tl = upper_offset + params.col_lower;
     params.idx_tr = upper_offset + params.col_upper;
     // 计算双线性插值的权重系数
-    params.col_ratio = (params.col_lower == params.col_upper)
-                           ? 0.0
-                           : (col_float - static_cast<double>(params.col_lower));
-    params.row_ratio = (params.row_lower == params.row_upper)
-                           ? 0.0
-                           : (row_float - static_cast<double>(params.row_lower));
+    params.col_ratio =
+        (params.col_lower == params.col_upper)
+            ? 0.0
+            : (col_float - static_cast<double>(params.col_lower));
+    params.row_ratio =
+        (params.row_lower == params.row_upper)
+            ? 0.0
+            : (row_float - static_cast<double>(params.row_lower));
     return params;
 }
 
@@ -320,7 +374,8 @@ void ElementWiseSqrtSubMul_AVX2(const SquaredDist* a, const SquaredDist* b,
         const __m256d b_vec_hi = _mm256_sqrt_pd(_mm256_cvtepi32_pd(b_hi));
 
         _mm256_storeu_pd(
-            out + i, _mm256_mul_pd(_mm256_sub_pd(a_vec_lo, b_vec_lo), scale_vec));
+            out + i,
+            _mm256_mul_pd(_mm256_sub_pd(a_vec_lo, b_vec_lo), scale_vec));
         _mm256_storeu_pd(
             out + i + 4,
             _mm256_mul_pd(_mm256_sub_pd(a_vec_hi, b_vec_hi), scale_vec));

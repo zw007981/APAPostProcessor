@@ -1,5 +1,3 @@
-#include "core/ALM/alm_trajectory_sampler.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -7,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "core/ALM/alm_trajectory_sampler.h"
 #include "core/ALM/bicycle_kinematics_extractor.h"
 #include "util/maneuver.h"
 
@@ -122,10 +121,10 @@ TEST(AlmTrajectorySamplerTest, SingleManeuverSamplingMatchesTrajectory) {
     }
     // 末点为轨迹全局终点：θ 取轨迹精确值、端点速度为 0（K(T) 边界精确满足）
     const auto& last = maneuvers[0].points.back();
-    EXPECT_DOUBLE_EQ(last.theta,
-                     scene.trajectory
-                         .evaluateSegment(1, scene.trajectory.duration(1), 0)
-                         .x());
+    EXPECT_DOUBLE_EQ(
+        last.theta,
+        scene.trajectory.evaluateSegment(1, scene.trajectory.duration(1), 0)
+            .x());
     EXPECT_NEAR(last.getV(), 0.0, 1e-9);
     // 梯形积分还原的终点 x ≈ 起点 x + 构造位移 2.0
     EXPECT_NEAR(last.x, 3.0, 0.02);
@@ -258,10 +257,10 @@ TEST(AlmTrajectorySamplerTest, InvalidInputsThrow) {
                                        kinematics, kSamplesPerSegment),
                  std::invalid_argument);
     // 空 segments 的 Maneuver
-    EXPECT_THROW(SampleMincoTrajectory(scene.trajectory,
-                                       {AlmManeuverEstimate{}}, {0.0, 0.0},
-                                       kinematics, kSamplesPerSegment),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        SampleMincoTrajectory(scene.trajectory, {AlmManeuverEstimate{}},
+                              {0.0, 0.0}, kinematics, kSamplesPerSegment),
+        std::invalid_argument);
     // 段数不一致：估计 1 段 vs 轨迹 2 段
     std::vector<AlmManeuverEstimate> mismatched = scene.estimates;
     mismatched.pop_back();
@@ -269,16 +268,16 @@ TEST(AlmTrajectorySamplerTest, InvalidInputsThrow) {
                                        kinematics, kSamplesPerSegment),
                  std::invalid_argument);
     // 非有限起点世界坐标
-    EXPECT_THROW(SampleMincoTrajectory(
-                     scene.trajectory, scene.estimates,
-                     {std::numeric_limits<double>::quiet_NaN(), 0.0},
-                     kinematics, kSamplesPerSegment),
-                 std::invalid_argument);
-    EXPECT_THROW(SampleMincoTrajectory(
-                     scene.trajectory, scene.estimates,
-                     {std::numeric_limits<double>::infinity(), 0.0},
-                     kinematics, kSamplesPerSegment),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        SampleMincoTrajectory(scene.trajectory, scene.estimates,
+                              {std::numeric_limits<double>::quiet_NaN(), 0.0},
+                              kinematics, kSamplesPerSegment),
+        std::invalid_argument);
+    EXPECT_THROW(
+        SampleMincoTrajectory(scene.trajectory, scene.estimates,
+                              {std::numeric_limits<double>::infinity(), 0.0},
+                              kinematics, kSamplesPerSegment),
+        std::invalid_argument);
     // 非法采样数
     EXPECT_THROW(SampleMincoTrajectory(scene.trajectory, scene.estimates,
                                        {0.0, 0.0}, kinematics, 1),

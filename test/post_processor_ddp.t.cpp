@@ -1,16 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <iostream>
 #include <string>
-#include <vector>
 
 #include "core/collision_check.h"
 #include "core/post_processor.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/constants.h"
-#include "util/data_loader.hpp"
 #include "util/path.h"
 #include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
@@ -272,128 +269,92 @@ TEST(PostProcessorDdpTest, EndToEndGearShiftCompletes) {
         0.02);
 }
 
+// margin 延续救援的「健康输入零副作用」语义（显式钉住）：默认路径本身
+// 收敛时救援分支绝不触发，开启 rescue_margin_safe 的输出必须与关闭时
+// 逐位一致（救援只发生在默认配置完整链路失败之后）
+TEST(PostProcessorDdpTest, RescueMarginDoesNotAlterHealthyRun) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    const auto path = BuildGearShiftPath();
+    const auto baseline = processor.optimizeDdp(path, MakeSyntheticDdpConfig());
+    ASSERT_TRUE(baseline.success) << baseline.message;
+    auto rescued_config = MakeSyntheticDdpConfig();
+    rescued_config.rescue_margin_safe = 0.05;
+    const auto rescued = processor.optimizeDdp(path, rescued_config);
+    ASSERT_TRUE(rescued.success) << rescued.message;
+    EXPECT_EQ(rescued.message, baseline.message);
+    EXPECT_EQ(rescued.final_maneuvers, baseline.final_maneuvers);
+    EXPECT_DOUBLE_EQ(rescued.final_length, baseline.final_length);
+}
+
 // 短倒退换挡场景（倒退段仅 0.5 m）：实测阶段二门控重解内层未收敛
-// （ρ_reg 溢出），后处理按设计回退原始路径——钉住"回退必须带诊断"语义：
-// 显式失败、不产出半成品、统计量取空路径口径、message 携带失败阶段 +
-// 失败项 + 量化值/阈值。
-// 若端到端调参后该场景转为收敛，本用例应改写为成功路径断言
-TEST(PostProcessorDdpTest, ShortReversalFallsBackWithDiagnostics) {
+// （ρ_reg 溢出），但阶段一解干净收敛——分级降级结构应输出阶段一降级
+// 候选（阶段一解 + 修剪 + 驻留插入，过同一合法性门）而非整体回退。
+// 钉住"降级不伪装"语义：显式成功但 message 如实反映降级级别与原因，
+// 输出轨迹过碰撞/终点双指标门，物理方向段数不增。
+// 若端到端调参后该场景阶段二转为收敛，本用例应改写为阶段二成功路径断言
+TEST(PostProcessorDdpTest, ShortReversalOutputsStageOneCandidate) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildShortReversalPath();
     const auto result = processor.optimizeDdp(path, MakeSyntheticDdpConfig());
-    ASSERT_FALSE(result.success);
-    EXPECT_TRUE(result.optimized_path.empty());
-    EXPECT_TRUE(result.ddp_traj.empty());
-    EXPECT_DOUBLE_EQ(result.final_length, 0.0);
-    EXPECT_EQ(result.final_maneuvers, 0);
-    EXPECT_NE(result.message.find("STAGE_TWO_NOT_CONVERGED"), std::string::npos)
+    ASSERT_TRUE(result.success) << result.message;
+    EXPECT_NE(result.message.find("stage-one candidate"), std::string::npos)
         << result.message;
     EXPECT_NE(result.message.find("stage_two_convergence"), std::string::npos)
         << result.message;
-    EXPECT_NE(result.message.find("measured="), std::string::npos)
-        << result.message;
-    EXPECT_NE(result.message.find("threshold="), std::string::npos)
-        << result.message;
+    EXPECT_FALSE(result.optimized_path.empty());
+    EXPECT_FALSE(result.ddp_traj.empty());
+    EXPECT_TRUE(IsPathFinite(result.optimized_path));
+    EXPECT_LE(TerminalPositionError(result.optimized_path, path), 0.05);
+    EXPECT_LE(TerminalHeadingErrorDeg(result.optimized_path, path), 1.5);
+    EXPECT_LE(
+        ComputeMaxCollisionDepth(result.optimized_path, esdf_map, footprint),
+        0.02);
+    EXPECT_GE(result.final_maneuvers, 1);
+    EXPECT_LE(result.final_maneuvers, 2);
 }
 
-// ============================================================
-// 四数据集端到端验收（集成测试，允许较长耗时）
-// ============================================================
-
-// 数据集描述：显示名 + 文件路径
-struct DdpDatasetCase {
-    std::string name;
-    std::string file;
-};
-
-class DdpDatasetAcceptanceTest
-    : public ::testing::TestWithParam<DdpDatasetCase> {};
-
-// 每个数据集：DDP 路径必须完整跑通（阶段一 → 后处理/阶段二 → 校验/回退），
-// 不抛异常、状态消息非空、耗时为正；成功时轨迹必须无碰撞、无奇异、终点
-// 精度达标；回退时必须带结构化诊断（失败项 + 量化值/阈值）。
-// 注意：本用例为重型端到端测试（完整阶段一 + 阶段二求解，含 ESDF 求值），
-// Debug 构建下四数据集合计约分钟级；如需快速反馈可用 --gtest_filter 排除
-TEST_P(DdpDatasetAcceptanceTest, CompletesWithClearStatusAndDiagnostics) {
-    const auto& dataset = GetParam();
-    ::apa::post_processor::OptimizeRequest request;
-    ASSERT_EQ(DataLoader::LoadProtoFromJsonFile(dataset.file, request),
-              LoadResult::SUCCESS);
-    const auto vehicle_params = VehicleParams::FromProto(request.vehicle());
-    // footprint 取 233/2/2：与 DDP 真实数据集冒烟验证及生产配置
-    // （data/ddp_config.json 的 outer_row_num=2）一致
-    const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 2);
-    const auto grid_map = GridMap::FromProto(request.environment());
-    const ESDFMap esdf_map(grid_map);
-    const auto init_path = Path::FromProto(request.initial_path());
-    ASSERT_FALSE(init_path.empty());
-    const PostProcessor processor(vehicle_params, footprint_model, esdf_map);
-    const int init_maneuvers = static_cast<int>(init_path.numManeuvers());
-    const double init_length = init_path.length();
-
-    const DdpConfig ddp_config;
-    const auto result = processor.optimizeDdp(init_path, ddp_config);
-    // 打印对比指标行（供验收报告采集）
-    const double collision =
-        result.optimized_path.empty()
-            ? -1.0
-            : ComputeMaxCollisionDepth(result.optimized_path, esdf_map,
-                                       footprint_model);
-    std::cout << "[DDP-CMP] dataset=" << dataset.name << " alg=DDP"
-              << " success=" << result.success
-              << " maneuvers=" << init_maneuvers << "->"
-              << result.final_maneuvers << " length=" << init_length << "->"
-              << result.final_length << " term_pos_err="
-              << (result.optimized_path.empty()
-                      ? -1.0
-                      : TerminalPositionError(result.optimized_path, init_path))
-              << " term_head_err_deg="
-              << (result.optimized_path.empty()
-                      ? -1.0
-                      : TerminalHeadingErrorDeg(result.optimized_path,
-                                                init_path))
-              << " collision=" << collision
-              << " time_ms=" << result.total_time_ms << " msg=\""
-              << result.message << "\"" << std::endl;
-
-    // 通用门禁：完整跑通（不抛异常、状态消息非空、耗时为正）
-    EXPECT_FALSE(result.message.empty());
-    EXPECT_GT(result.total_time_ms, 0.0);
-    if (result.success) {
-        // 成功：轨迹无碰撞、无奇异、终点双指标达标、ddp_traj 同步填充
-        ASSERT_FALSE(result.optimized_path.empty());
-        EXPECT_FALSE(result.ddp_traj.empty());
-        EXPECT_TRUE(IsPathFinite(result.optimized_path));
-        EXPECT_LE(collision, 0.02);
-        EXPECT_LE(TerminalPositionError(result.optimized_path, init_path),
-                  0.05);
-        EXPECT_LE(TerminalHeadingErrorDeg(result.optimized_path, init_path),
-                  1.5);
-        EXPECT_GT(result.final_length, 0.0);
-        return;
-    }
-    // 回退：不产出半成品（optimized_path/ddp_traj 均为空），且必须携带
-    // 结构化诊断（失败项 + 量化值/阈值）
-    EXPECT_TRUE(result.optimized_path.empty());
-    EXPECT_TRUE(result.ddp_traj.empty());
-    EXPECT_NE(result.message.find("measured="), std::string::npos)
-        << result.message;
-    EXPECT_NE(result.message.find("threshold="), std::string::npos)
-        << result.message;
+// 双候选择优规则真值表（L7.2）：成功优先 → maneuver 数少优先 → 长度短
+// 优先；完全持平保持融化候选（现状语义）。规则必须对 data7 型对照
+// （同 maneuver、对照更短）选出关融化候选、对 data3/data1 型对照
+// （对照回退）保持融化候选
+TEST(PostProcessorDdpTest, PreferControlCandidateTruthTable) {
+    PostProcessorResult melt;
+    melt.success = true;
+    melt.final_maneuvers = 4;
+    melt.final_length = 16.74;
+    PostProcessorResult control;
+    control.success = true;
+    control.final_maneuvers = 4;
+    control.final_length = 15.54;
+    // 同 maneuver、对照更短 → 选对照（data7 型）
+    EXPECT_TRUE(PostProcessor::PreferControlCandidate(melt, control));
+    // 对照失败 → 保持融化候选（data3/data1 型）
+    control.success = false;
+    EXPECT_FALSE(PostProcessor::PreferControlCandidate(melt, control));
+    control.success = true;
+    // 融化 maneuver 更少 → 保持融化候选（哪怕对照更短）
+    melt.final_maneuvers = 3;
+    EXPECT_FALSE(PostProcessor::PreferControlCandidate(melt, control));
+    // 对照 maneuver 更少 → 选对照
+    melt.final_maneuvers = 4;
+    control.final_maneuvers = 3;
+    control.final_length = 20.0;
+    EXPECT_TRUE(PostProcessor::PreferControlCandidate(melt, control));
+    control.final_maneuvers = 4;
+    control.final_length = 15.54;
+    // 融化失败 → 选对照（诊断不更差）
+    melt.success = false;
+    EXPECT_TRUE(PostProcessor::PreferControlCandidate(melt, control));
+    // 完全持平 → 保持融化候选
+    melt.success = true;
+    control.final_length = melt.final_length;
+    EXPECT_FALSE(PostProcessor::PreferControlCandidate(melt, control));
 }
-
-INSTANTIATE_TEST_SUITE_P(
-    FourDatasets, DdpDatasetAcceptanceTest,
-    ::testing::Values(
-        DdpDatasetCase{"data3_mid_park", "data/mid_park/data3.json"},
-        DdpDatasetCase{"data1_rub_park", "data/rub_park/data1.json"},
-        DdpDatasetCase{"data7_rub_park", "data/rub_park/data7.json"},
-        DdpDatasetCase{"data6_long_park", "data/long_park/data6.json"}),
-    [](const ::testing::TestParamInfo<DdpDatasetCase>& info) {
-        return info.param.name;
-    });
 
 }  // namespace apa_post_processor

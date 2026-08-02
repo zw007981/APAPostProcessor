@@ -1,5 +1,3 @@
-#include "core/DDP/ddp_reference_builder.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -9,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "core/DDP/ddp_reference_builder.h"
 #include "util/constants.h"
 #include "util/data_loader.hpp"
 
@@ -154,20 +153,23 @@ TEST(DdpReferenceBuilderTest, StraightLineInitialGuessMatchesAnalyticValues) {
 }
 
 // 测试定曲率圆弧上的差分初值与解析值一致。
-// 因为圆弧上 θ 随弧长严格线性变化（κ = 1/R = 0.2），所以重采样后的
-// 差分曲率必须复现解析值：δ = atan(L_base · κ) = atan(0.6)，v 恒为名义值，
+// 圆弧上 θ 随弧长严格线性变化（κ = 1/R = 0.15，取低于车辆物理上限
+// 0.1724 /m 的安全工作点——超过上限的参考初值会被 δ_max 裁剪，不属于
+// 本用例的验证范围），所以重采样后的差分曲率必须复现解析值：
+// δ = atan(L_base · κ) = atan(0.45)，v 恒为名义值，
 // 中心差分得到的 a/ω 在定常 v/δ 下必须为零。
 TEST(DdpReferenceBuilderTest, CircularArcInitialGuessMatchesAnalyticCurvature) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
-    AppendArc(&path, 5.0, 0.5);
+    AppendArc(&path, 1.0 / 0.15, 0.375);
     path.finalize();
     const DdpReference reference =
         DdpReferenceBuilder(DdpReferenceBuilderConfig{}, MakeVehicleParams())
             .build(path);
     // 弧长 2.5 m → N = 50 步
     ASSERT_EQ(reference.initial_states.size(), 51);
-    const double expected_delta = std::atan(3.0 * 0.2);
+    // κ=0.15（低于车辆物理上限 0.1724 的安全工作点），δ 反解不被裁剪
+    const double expected_delta = std::atan(3.0 * 0.15);
     for (const auto& state : reference.initial_states) {
         // 密集弦采样使总长相对理想圆弧短约 4e-8（相对量），容差随之标定
         EXPECT_NEAR(state(DDP_IDX_V), 0.5, 1e-6);

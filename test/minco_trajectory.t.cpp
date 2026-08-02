@@ -1,11 +1,11 @@
-#include "core/ALM/minco_trajectory.h"
-
 #include <gtest/gtest.h>
 
 #include <Eigen/Core>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
+
+#include "core/ALM/minco_trajectory.h"
 
 namespace apa_post_processor {
 namespace {

@@ -34,8 +34,10 @@ struct ApaDdpSolverConfig {
     AlOuterLoopConfig outer;
     DdpCostConfig cost;
     // 以下为阶段二门控精化的配置项（不影响阶段一行为）：
-    // 阶段二外层迭代上限（热启动精化通常数轮即收敛，预算远小于阶段一）
-    int stage_two_max_outer_iterations{8};
+    // 阶段二外层迭代上限（热启动精化通常数轮即收敛，预算远小于阶段一；
+    // 真实长视窗数据集（N≈400~700、多接缝）实测 8 轮预算不足——data3/
+    // data7 在 10~11 轮收敛，取 16 留有余量）
+    int stage_two_max_outer_iterations{16};
     // 门控乘子的初始罚权重与增长上限（符号门/接缝等式/驻留帽共用一套
     // 调度）。初值取 10 的考虑：门控约束局域在接缝邻域（点数少、热启动
     // 已接近可行），弱启动时 λ 累积驱动的慢速下降会被门控判为"充分
@@ -45,6 +47,15 @@ struct ApaDdpSolverConfig {
     // 门控违反度容差（阶段二联合终止判据）：符号门/驻留帽线性违反度与
     // 接缝 |v| 的上限
     double gating_tol{1e-2};
+    // 对偶热启动种子 μ 的量级自适应上限 κ（0 = 关闭，抬升行为不变）：
+    // 种子量级正常时照常抬升（μ⁰ 标定下限抬到种子水平是已收敛终端平衡
+    // 的必要条件）；种子已达 μ_max 的病态情形（阶段一终端 μ 被门控一路
+    // 推到上限）截断为 κ·μ̂——μ̂ 是阶段二自身按 ALTRO clip 公式在热启动
+    // 轨迹上量测的标定初值（不经种子抬升 μ_min 的版本）。实测依据：
+    // 种子=μ_max=1e6 时阶段二内层从第 0 轮即强病态（线搜索拒绝一切
+    // 移动、打靶缺陷降不动），而完全移除抬升会让正常量级种子的场景
+    // 不收敛——只截断病态情形、保留正常抬升
+    double seed_mu_cap_ratio{0.0};
 };
 // 阶段一求解状态：失败语义经状态码上报（供后处理/回退逻辑消费）
 enum class ApaDdpStatus {
@@ -82,6 +93,9 @@ struct ApaDdpReport {
     // 实际外层轮数与累计内层迭代数
     int outer_iterations{0};
     int total_inner_iterations{0};
+    // 累计定义域守卫（L8.3）拒绝的试探候选数（L8.4 分项归因：
+    // 「出界被拦住」的直接计数证据）
+    std::int64_t domain_guard_rejections{0};
     // 内层溢出后的冷重启重试次数（box-QP 陈旧活动集僵局的兜底计数）
     int inner_restarts{0};
     // 首轮标定的 μ⁰ 与最终罚权重
@@ -146,6 +160,14 @@ class ApaDdpSolver {
     // 控制初值 N），不符抛 std::invalid_argument；任何出口（含失败）
     // 均返回最后可用轨迹与完整求解报告
     ApaDdpStageOneResult solveStageOne(const DdpReference& reference);
+    // 阶段一热启动重载（margin 延续/救援重试等场景）：首轮以调用方给定
+    // 的轨迹启动（典型为另一次求解的收敛解），而非参考自带的前端初值；
+    // warm_states 尺寸 N+1、warm_controls 尺寸 N，不符抛
+    // std::invalid_argument
+    ApaDdpStageOneResult solveStageOne(
+        const DdpReference& reference,
+        const DdpAlignedVec<DdpState>& warm_states,
+        const DdpAlignedVec<DdpControl>& warm_controls);
     // 阶段二门控精化重解（设计文档 2.6 节第 3 步，必须重解、禁止直接
     // 拼接修剪结果）：以修剪后轨迹热启动，施加符号门/接缝零速/驻留帽
     // 三类门控 AL 约束，外层调度与阶段一同源（自适应 μ⁰ 标定 + 分组

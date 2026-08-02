@@ -101,14 +101,14 @@ bench_apa_post_processor
 
 ## 2. ALM
 
-详细设计文档见 [docs/ALM.md](docs/ALM.md)基于NMPC的方法优化 HybridA* 等方法生成的初始轨迹。在不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/ALM.md](docs/ALM.md)基于NMPC的方法优化 HybridA* 等方法生成的初始轨迹。在不同数据集上的优化效果如下表所示（2026-07-31 ESDF 边界语义修复后复测口径，见 docs/DDP.md 2.4 节：长度较修复前 −0.7%~+1.9%，data7 的 +1.9% 来自其西边界贴边障碍被边界圈加厚一格；maneuver 数逐位不变）：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 |---|---|---|---|---|
-| `data/long_park/data6.json` | 36.862→32.524m | 6→4 | 0.43s | 收敛 |
-| `data/mid_park/data3.json` | 24.582→21.601m | 9→7 | 0.75s | 收敛 |
-| `data/rub_park/data1.json` | 12.988→10.673m | 10→4 | 0.27s | 收敛 |
-| `data/rub_park/data7.json` | 18.744→16.143m | 6→4 | 0.61s | 收敛 |
+| `data/long_park/data6.json` | 36.862→32.303m | 6→4 | 0.44s | 收敛 |
+| `data/mid_park/data3.json` | 24.582→21.574m | 9→7 | 0.44s | 收敛 |
+| `data/rub_park/data1.json` | 12.988→10.644m | 10→4 | 0.12s | 收敛 |
+| `data/rub_park/data7.json` | 18.744→16.440m | 6→4 | 0.23s | 收敛 |
 
 各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 ALM 优化后轨迹，顺序与上表一致）：
 
@@ -160,3 +160,26 @@ bench_apa_post_processor
 data7中的效果如下图所示，maneuver段数由原来的6段削减为5段：
 
 ![rub_park_data7](fig/nmpc_data7.png)
+
+---
+
+## 4. DDP
+
+详细设计文档见 [docs/DDP.md](docs/DDP.md)。基于 MS-iLQR（多重打靶微分动态规划，缺陷感知回推 + box-QP 精确控制约束）+ ALTRO 式增广拉格朗日外层的第三条后处理路径：阶段一全局软化求解（允许冗余 maneuver 在连续优化内部融化），后处理符号游程分析 + 拓扑修剪，阶段二门控精化 + 逐接缝驻留插入，任一硬校验不过则回退原始 A* 路径。四数据集端到端验收结果（最终默认参数，详见 [docs/DDP.md](docs/DDP.md) 第 3 章实测结果）：
+
+| 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
+|---|---|---|---|---|
+| `data/mid_park/data3.json` | 24.582→17.565m | 9→7 | 0.75s | 收敛（碰撞 0.0035m、终点 0.0002m/0.0001°、max κ=1.000×车辆真值上限） |
+| `data/rub_park/data7.json` | 18.744→15.541m | 6→4 | 0.53s | 收敛（双候选择优：关融化候选更优——碰撞 0、max κ=1.000×真值上限） |
+| `data/rub_park/data1.json` | 12.988→12.317m | 10→4 | 0.47s | 阶段一降级输出（碰撞 0、max κ=0.997×真值上限） |
+| `data/long_park/data6.json` | 回退原始路径 | — | 1.53s | 阶段一可形式收敛但解不可用（跑飞根因为固定时域代价缺项；ESDF 边界缺陷修复（L8）后阶段一已能形式收敛，但 69 m 跑飞解仍过不了合法性门。M011 L6/L7 层对策已全部证伪留档，docs/DDP.md 3.8~3.10 节） |
+
+> 注：2026-07-30 的 L5 口径修正（docs/DDP.md 3.8 节）发现 DDP 幅值上限曾与车辆物理参数脱钩（放大 18.5%），本表此前数字（data3 14.94m、data7 14.47m、data1 11.29m）均为假上限口径、非车辆可执行解；现数字为车辆真值上限口径（输出 κ=0.99~1.02×真值上限，与 ALM 既有 ~4% 包络一致）。2026-07-31 起生产默认开启**融化开/关双候选择优**（`dual_candidate_select`，docs/DDP.md 3.10 节）：同一输入跑两遍完整链路按「成功→maneuver 少→长度短」择优，data7 由 16.74m/降级改善为 15.54m/收敛，其余数据集逐位不变，耗时约 +100%。
+
+mid_park（`data/mid_park/data3.json`）：maneuver 段数 9→7，长度缩短 39.2%（红色为原始路径，绿色为 DDP 优化后轨迹）：
+
+![ddp_data3](fig/ddp_data3.png)
+
+rub_park（`data/rub_park/data7.json`）：maneuver 段数 6→2，长度缩短 22.8%：
+
+![ddp_data7](fig/ddp_data7.png)

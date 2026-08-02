@@ -55,8 +55,9 @@ class AlmEsdfPenalty {
     const AlmEsdfPenaltyConfig& config() const { return config_; }
 
    protected:
-    // 累加单个外圆的惩罚值与梯度贡献。圆心越出地图时 ESDF 查询返回
-    // (0, 零梯度) 哨兵，按保守侵入处理：惩罚为正、该圆梯度贡献为零
+    // 累加单个外圆的惩罚值与梯度贡献。圆心越出地图时 ESDF 按实心障碍
+    // 处理（M011 L8 修复后的契约）：返回穿透深度（负值随深度线性下降）
+    // 与恒指向图内的恢复梯度——惩罚随穿透深度三次增长、梯度非零
     void accumulateCircle(const Eigen::Vector2d& local_center, double cos_theta,
                           double sin_theta, double x, double y,
                           AlmEsdfPoseCost& result) const;

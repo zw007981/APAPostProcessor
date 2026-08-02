@@ -322,8 +322,8 @@ TEST(VisualizerPlotTrajectoryTest, StoresStartEndFlagWhenEnabled) {
 TEST(VisualizerClampKappaForPlotTest, ClampsOutOfRangeValuesAndPreservesRest) {
     const double nan = std::numeric_limits<double>::quiet_NaN();
     constexpr double kLimit = 0.4444;
-    const std::vector<double> input = {0.0,  0.3,      -0.3, 3.2,  -150.0,
-                                       nan,  INFINITY,  -INFINITY, kLimit, -kLimit};
+    const std::vector<double> input = {
+        0.0, 0.3, -0.3, 3.2, -150.0, nan, INFINITY, -INFINITY, kLimit, -kLimit};
     const auto clamped = VisualizerTestAccess::ClampKappaForPlot(input);
     ASSERT_EQ(clamped.size(), input.size());
     EXPECT_DOUBLE_EQ(clamped[0], 0.0);
@@ -343,10 +343,9 @@ TEST(VisualizerClampKappaForPlotTest, ClampsOutOfRangeValuesAndPreservesRest) {
 // （如 margin 的 0~50）依旧产出整数间隔。
 TEST(VisualizerComputeCoordinateIntervalTest, AdaptsAcrossMagnitudes) {
     // 非有限值与浮点噪声级跨度回退为 1.0。
-    EXPECT_DOUBLE_EQ(
-        VisualizerTestAccess::ComputeCoordinateInterval(
-            std::numeric_limits<double>::infinity(), 6),
-        1.0);
+    EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(
+                         std::numeric_limits<double>::infinity(), 6),
+                     1.0);
     EXPECT_DOUBLE_EQ(VisualizerTestAccess::ComputeCoordinateInterval(1e-15, 6),
                      1.0);
     // κ 量级：0.8 跨度 / 4 目标刻度 → 0.2 间隔。

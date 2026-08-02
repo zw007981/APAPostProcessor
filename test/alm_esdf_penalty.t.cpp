@@ -1,5 +1,3 @@
-#include "core/ALM/alm_esdf_penalty.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -7,6 +5,7 @@
 #include <limits>
 #include <vector>
 
+#include "core/ALM/alm_esdf_penalty.h"
 #include "core/NMPC/vehicle_circle_geometry.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
@@ -16,9 +15,13 @@
 namespace apa_post_processor {
 namespace {
 
-// 墙场地图参数：第 0 列整列占据。占据栅格中心的符号距离场在 x>=2*resolution
-// 区域严格满足 D=x、g=(1,0)（距离变换在该区域对线性函数精确，有限差分梯度
-// 同样精确；第一个自由列因符号距离在墙面处存在折点，其梯度为 1.5 不可用）。
+// 墙场地图参数：第 0 列整列占据；L8.2 契约下最外圈（第 0/63 行与第 63 列）
+// 同样被标记占据。占据栅格中心的符号距离场在 x>=2*resolution 且远离其余
+// 边界圈的区域严格满足 D=x、g=(1,0)（距离变换在该区域对线性函数精确，
+// 有限差分梯度同样精确；第一个自由列因符号距离在墙面处存在折点，其梯度为
+// 1.5 不可用）。场景 y 坐标须保证全部圆心到第 0/63 行的距离明显大于到
+// 墙面的距离，否则最近特征在墙面与边界圈之间切换（中轴折点），D=x 的
+// 解析假设在折点两侧各一格的过渡带内失效。
 constexpr double kResolution = 0.125;
 constexpr int kMapCols = 64;
 constexpr int kMapRows = 64;
@@ -158,11 +161,14 @@ TEST_F(AlmEsdfPenaltyTest, ConstructorThrowsOnInvalidConfig) {
 
 // 测试舒适缓冲边界之外代价与梯度严格为零。
 // 因为双重惩罚是两段外点罚，d >= r+margin_comf 时两段都不应激活。
+// y=2.5（而非地图中部 4.0）：L8.2 后 θ=π/2 时前圆 cy=y+2.78 会逼近
+// 第 63 行边界圈（y=7.875），y=4.0 时其 d≈1.09<r+margin_comf 被边界圈激活；
+// y=2.5 时全部圆心 cy∈[2.42,5.28]，墙面仍是唯一最近特征，场精确 D=cx。
 TEST_F(AlmEsdfPenaltyTest, ReturnsZeroOutsideComfortMargin) {
     const auto penalty = MakePenalty();
     // 平行位姿（θ=π/2）下全部圆心 cx=x0>d 阈值 r+margin_comf
     const double x0 = circle_radius_ + 0.5;
-    const auto result = penalty.evaluate(x0, 4.0, kHalfPi);
+    const auto result = penalty.evaluate(x0, 2.5, kHalfPi);
 
     EXPECT_DOUBLE_EQ(result.cost, 0.0);
     EXPECT_TRUE(result.gradient.isZero());
@@ -173,23 +179,24 @@ TEST_F(AlmEsdfPenaltyTest, ReturnsZeroOutsideComfortMargin) {
 TEST_F(AlmEsdfPenaltyTest, BoundaryAtComfortMarginIsContinuous) {
     const auto penalty = MakePenalty();
     const double x0 = circle_radius_ + penalty.config().margin_comf;
-    const auto on_boundary = penalty.evaluate(x0, 4.0, kHalfPi);
+    const auto on_boundary = penalty.evaluate(x0, 2.5, kHalfPi);
     EXPECT_DOUBLE_EQ(on_boundary.cost, 0.0);
     EXPECT_TRUE(on_boundary.gradient.isZero());
     // 边界内侧 1mm：舒适段激活，代价严格为正
-    const auto inside = penalty.evaluate(x0 - 1e-3, 4.0, kHalfPi);
+    const auto inside = penalty.evaluate(x0 - 1e-3, 2.5, kHalfPi);
     EXPECT_GT(inside.cost, 0.0);
 }
 
 // 测试仅舒适段激活时（r+margin_safe < d < r+margin_comf）代价/梯度与手推一致。
-// 因为双重机制的关键分段特性是"safe 段不激活、comf 段单独起作用"，必须独立验证。
+// 因为双重机制的关键分段特性是"safe 段不激活、comf
+// 段单独起作用"，必须独立验证。
 TEST_F(AlmEsdfPenaltyTest, HandDerivedComfortOnlyZoneMatches) {
     const auto penalty = MakePenalty();
     // 平行位姿全部圆心 cx=x0=r+0.06：C_safe=-0.04<0（safe 段不激活）、
-    // C_comf=0.04>0（comf 段激活）
+    // C_comf=0.04>0（comf 段激活）；y=2.5 保证墙面主导（见文件头部注释）
     const double x0 = circle_radius_ + 0.06;
-    const auto result = penalty.evaluate(x0, 4.0, kHalfPi);
-    const auto ref = ComputeReference(circle_centers_, circle_radius_, x0, 4.0,
+    const auto result = penalty.evaluate(x0, 2.5, kHalfPi);
+    const auto ref = ComputeReference(circle_centers_, circle_radius_, x0, 2.5,
                                       kHalfPi, penalty.config());
 
     // 弱信号区（C_comf=0.04）同样按 1e-6 验收（双精度存储下无量化噪声放大）
@@ -197,7 +204,8 @@ TEST_F(AlmEsdfPenaltyTest, HandDerivedComfortOnlyZoneMatches) {
     ExpectComponentClose(ref.grad_x, result.gradient.x(), 1e-6);
     EXPECT_NEAR(ref.grad_y, result.gradient.y(), 1e-9);
     ExpectComponentClose(ref.grad_theta, result.gradient.z(), 1e-6);
-    // safe 段不激活 ⇒ 代价应与"仅 comf 段"解析值严格同构（参考公式中无 safe 项）
+    // safe 段不激活 ⇒ 代价应与"仅 comf 段"解析值严格同构（参考公式中无 safe
+    // 项）
     EXPECT_GT(result.cost, 0.0);
 }
 
@@ -299,18 +307,16 @@ TEST_F(AlmEsdfPenaltyTest, NumericGradientMatchesAnalyticParallel) {
     const double x0 = 0.35;
     const auto result = penalty.evaluate(x0, 4.0, kHalfPi);
 
-    ExpectComponentClose(result.gradient.x(),
-                         NumericGradientComponent(penalty, x0, 4.0, kHalfPi, 0,
-                                                  1e-2),
-                         1e-6);
+    ExpectComponentClose(
+        result.gradient.x(),
+        NumericGradientComponent(penalty, x0, 4.0, kHalfPi, 0, 1e-2), 1e-6);
     // 墙场不依赖 y：解析与数值梯度都应在零附近（绝对容差）
     EXPECT_NEAR(result.gradient.y(),
                 NumericGradientComponent(penalty, x0, 4.0, kHalfPi, 1, 1e-2),
                 1e-9);
-    ExpectComponentClose(result.gradient.z(),
-                         NumericGradientComponent(penalty, x0, 4.0, kHalfPi, 2,
-                                                  1e-2),
-                         1e-6);
+    ExpectComponentClose(
+        result.gradient.z(),
+        NumericGradientComponent(penalty, x0, 4.0, kHalfPi, 2, 1e-2), 1e-6);
 }
 
 // 测试旋转位姿（θ≠0）下解析梯度与数值梯度对拍，相对误差 < 1e-6（含 θ 通道）。
@@ -322,40 +328,79 @@ TEST_F(AlmEsdfPenaltyTest, NumericGradientMatchesAnalyticRotated) {
     const double x0 = 1.95;
     const auto result = penalty.evaluate(x0, 4.0, theta);
 
-    ExpectComponentClose(result.gradient.x(),
-                         NumericGradientComponent(penalty, x0, 4.0, theta, 0,
-                                                  1e-2),
-                         1e-6);
+    ExpectComponentClose(
+        result.gradient.x(),
+        NumericGradientComponent(penalty, x0, 4.0, theta, 0, 1e-2), 1e-6);
     EXPECT_NEAR(result.gradient.y(),
                 NumericGradientComponent(penalty, x0, 4.0, theta, 1, 1e-2),
                 1e-9);
     // θ 通道步长 h=2e-3：大力臂（2.78m）下截断项 ~h^4·arm^5 增长快，
     // 实测该步长噪声/截断权衡最优；场景设计保证全部圆心在差分模板
     // 范围内不跨越 max(0,C)^3 的 C=0 折点（否则差分误差由折点主导）
-    ExpectComponentClose(result.gradient.z(),
-                         NumericGradientComponent(penalty, x0, 4.0, theta, 2,
-                                                  2e-3),
-                         1e-6);
+    ExpectComponentClose(
+        result.gradient.z(),
+        NumericGradientComponent(penalty, x0, 4.0, theta, 2, 2e-3), 1e-6);
     // 负对照量级确认：θ 梯度信号本身足够强，上述对拍具备判别力
     EXPECT_GT(std::abs(result.gradient.z()), 1.0);
 }
 
 // 测试圆心越出地图时的保守行为。
-// 因为 ESDFMap 对越界查询返回 (0, 零梯度) 哨兵，对应圆按最大侵入计
-// （cost=W_safe·(r+margin_safe)^3+W_comf·(r+margin_comf)^3），梯度贡献为零。
+// L8.1 契约下越界圆得到恢复场 d = d_map(p) − s（负值，随穿透深度线性下降）
+// 与恒指向图内的非零梯度：惩罚为大的正值且梯度非零（沿负梯度下降把圆拉回
+// 图内），「保守惩罚」语义保留且严格强于 L8 前的 (0, 零梯度) 哨兵（d=0
+// 对应的全侵入罚）。
 TEST_F(AlmEsdfPenaltyTest, OutOfMapCircleYieldsConservativePenalty) {
     const auto penalty = MakePenalty();
-    // θ=0 位姿 x0=5.5：前圆 cx=8.28>8 越界；其余圆在图内但 d>r+margin_comf
-    // 不激活
-    const auto result = penalty.evaluate(5.5, 4.0, 0.0);
-    const double expected =
-        penalty.config().weight_safe *
-            std::pow(circle_radius_ + penalty.config().margin_safe, 3) +
-        penalty.config().weight_comf *
-            std::pow(circle_radius_ + penalty.config().margin_comf, 3);
+    const auto& config = penalty.config();
+    // θ=0 位姿 x0=5.25：前圆 cx=5.25+2.7833≈8.033 越出东边界（s≈0.033）；
+    // 中圆 cx=6.60（到东边界圈 d=1.275>r+margin_comf≈1.2505）与后圆
+    // cx≈5.167 均不激活——x0 的可行窗口为 (8-2.7833, 7.875-1.35-1.2505)≈
+    // (5.217, 5.274)，取中点附近
+    const double x0 = 5.25;
+    const double y0 = 4.0;
+    const double map_east = kMapCols * kResolution;  // 8.0
+    double expected_cost = 0.0;
+    double expected_grad_x = 0.0;
+    for (const auto& center : circle_centers_) {
+        const double cx = x0 + center.x();  // θ=0、ly=0：cy=y0
+        double d;
+        if (cx >= map_east) {
+            // L8.1 恢复场：p=(map_east,y0) 索引钳制到东边界格（采样值
+            // d=-res），d = -res-s，∇d=(-1,0) 恒指向图内
+            d = -kResolution - (cx - map_east);
+        } else {
+            // 图内东侧线性区：d = 东边界格中心 x − cx = 7.875−cx，∇d=(-1,0)
+            d = (map_east - kResolution) - cx;
+        }
+        const double c_safe = circle_radius_ + config.margin_safe - d;
+        const double c_comf = circle_radius_ + config.margin_comf - d;
+        double factor = 0.0;
+        if (c_safe > 0.0) {
+            expected_cost += config.weight_safe * c_safe * c_safe * c_safe;
+            factor += config.weight_safe * 3.0 * c_safe * c_safe;
+        }
+        if (c_comf > 0.0) {
+            expected_cost += config.weight_comf * c_comf * c_comf * c_comf;
+            factor += config.weight_comf * 3.0 * c_comf * c_comf;
+        }
+        expected_grad_x += factor;  // ∂cost/∂x = factor·(−∂d/∂x)，∂d/∂x=-1
+    }
+    const auto result = penalty.evaluate(x0, y0, 0.0);
 
-    EXPECT_NEAR(result.cost, expected, 1e-9);
-    EXPECT_TRUE(result.gradient.isZero());
+    // 场景设计自检：前圆确实越界（否则注释中的恢复场推导不成立）
+    EXPECT_GT(x0 + circle_centers_.back().x(), map_east);
+    ExpectComponentClose(expected_cost, result.cost, 1e-9);
+    ExpectComponentClose(expected_grad_x, result.gradient.x(), 1e-9);
+    // 恢复场梯度指向图内（∇d=(-1,0)）⟹ 代价梯度 +x，非零
+    EXPECT_GT(result.gradient.x(), 0.0);
+    EXPECT_NEAR(result.gradient.y(), 0.0, 1e-9);
+    // θ=0 且 ly=0：旋转链式项 dcx/dθ=0，θ 通道梯度为 0
+    EXPECT_NEAR(result.gradient.z(), 0.0, 1e-9);
+    // 保守性：惩罚严格大于 L8 前 d=0 哨兵对应的全侵入罚
+    const double old_sentinel =
+        config.weight_safe * std::pow(circle_radius_ + config.margin_safe, 3) +
+        config.weight_comf * std::pow(circle_radius_ + config.margin_comf, 3);
+    EXPECT_GT(result.cost, old_sentinel);
 }
 
 }  // namespace

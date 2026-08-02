@@ -1,5 +1,3 @@
-#include "core/ALM/block_tridiagonal_solver.h"
-
 #include <gtest/gtest.h>
 
 #include <Eigen/Core>
@@ -7,6 +5,8 @@
 #include <random>
 #include <stdexcept>
 #include <vector>
+
+#include "core/ALM/block_tridiagonal_solver.h"
 
 namespace apa_post_processor {
 namespace {

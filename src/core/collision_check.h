@@ -34,9 +34,8 @@ inline double ComputeMaxCollisionDepth(
                     pt.x + local.x() * cos_theta - local.y() * sin_theta;
                 const double wy =
                     pt.y + local.x() * sin_theta + local.y() * cos_theta;
-                max_collision = std::max(max_collision,
-                                         outer_radius -
-                                             esdf_map.getDist(wx, wy));
+                max_collision = std::max(
+                    max_collision, outer_radius - esdf_map.getDist(wx, wy));
             }
         }
     }

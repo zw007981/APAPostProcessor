@@ -12,3 +12,4 @@ src/generated/
 
 .favorites.json
 note.md
+*.pdf

@@ -14,10 +14,31 @@
 namespace apa_post_processor {
 namespace {
 
-// 墙场地图参数：第 0 列整列占据。占据栅格中心的符号距离场在 x>=2*resolution
-// 区域严格满足 D=x、g=(1,0)（距离变换在该区域对线性函数精确，有限差分梯度
-// 同样精确；第一个自由列因符号距离在墙面处存在折点，其梯度为 1.5 不可用，
-// 所有测试场景必须避开该折点区单元格）。
+// 编译期一致性断言（零运行时开销）：钉住头文件声明与冻结接口契约——
+// 定长类型维度与配置默认值必须与 data/ddp_config.json/设计文档一致，
+// 声明被意外改动（维度/默认值漂移）时在编译期即失败
+static_assert(DdpStateHessian::RowsAtCompileTime == DDP_STATE_DIM &&
+                  DdpStateHessian::ColsAtCompileTime == DDP_STATE_DIM,
+              "DdpStateHessian 必须为 DDP_STATE_DIM x DDP_STATE_DIM");
+static_assert(DdpEsdfConstraintConfig{}.margin_safe == 0.02,
+              "margin_safe 默认值必须与 data/ddp_config.json 一致 (0.02)");
+static_assert(DdpEsdfConstraintConfig{}.margin_comf == 0.10,
+              "margin_comf 默认值必须与 data/ddp_config.json 一致 (0.10)");
+static_assert(DdpEsdfConstraintConfig{}.weight_safe == 100.0,
+              "weight_safe 默认值必须与 data/ddp_config.json 一致 (100.0)");
+static_assert(DdpEsdfConstraintConfig{}.weight_comf == 1.0,
+              "weight_comf 默认值必须与 data/ddp_config.json 一致 (1.0)");
+static_assert(DdpEsdfConstraintConfig{}.stride == 1,
+              "stride 默认值必须与 data/ddp_config.json 一致 (1)");
+
+// 墙场地图参数：第 0 列整列占据；L8.2 契约下最外圈（第 0/63 行与第 63 列）
+// 同样被标记占据。占据栅格中心的符号距离场在 x>=2*resolution 且远离其余
+// 边界圈的区域严格满足 D=x、g=(1,0)（距离变换在该区域对线性函数精确，
+// 有限差分梯度同样精确；第一个自由列因符号距离在墙面处存在折点，其梯度为
+// 1.5 不可用，所有测试场景必须避开该折点区单元格）。场景 y 坐标须保证
+// 全部圆心到第 0/63 行的距离明显大于到墙面的距离，否则最近特征在墙面与
+// 边界圈之间切换（中轴折点），D=x 的解析假设在折点两侧各一格的过渡带内
+// 失效。
 constexpr double kResolution = 0.125;
 constexpr int kMapCols = 64;
 constexpr int kMapRows = 64;
@@ -174,11 +195,14 @@ TEST_F(DdpEsdfConstraintTest, ConstructorThrowsOnInvalidConfig) {
 
 // 测试舒适缓冲边界之外代价、梯度与 Hessian 严格为零。
 // 因为双 margin 惩罚是两段外点罚，d >= r+margin_comf 时两段都不应激活。
+// y=2.5（而非地图中部 4.0）：L8.2 后 θ=π/2 时前圆 cy=y+2.78 会逼近第 63 行
+// 边界圈（y=7.875），y=4.0 时其 d≈1.09<r+margin_comf 被边界圈激活；
+// y=2.5 时全部圆心 cy∈[2.42,5.28]，墙面仍是唯一最近特征，场精确 D=cx。
 TEST_F(DdpEsdfConstraintTest, ReturnsZeroOutsideComfortMargin) {
     const auto constraint = MakeConstraint();
     // 平行位姿（θ=π/2）下全部圆心 cx=x0>r+margin_comf
     const double x0 = circle_radius_ + 0.5;
-    const auto result = constraint.evaluate(x0, 4.0, kHalfPi);
+    const auto result = constraint.evaluate(x0, 2.5, kHalfPi);
 
     EXPECT_DOUBLE_EQ(result.cost, 0.0);
     EXPECT_TRUE(result.gradient.isZero());
@@ -189,23 +213,24 @@ TEST_F(DdpEsdfConstraintTest, ReturnsZeroOutsideComfortMargin) {
 // 因为 Φ(C)=max(0,C)³ 在 C=0 处值与一阶导数都为 0，d=r+margin_comf 与
 // d=r+margin_safe 两个衔接处两侧的代价与梯度必须连续（GN Hessian 含
 // max(0,C) 因子，同样随 C→0 连续归零）。
+// y=2.5：全部圆心远离第 0/63 行边界圈，场精确 D=cx（见文件头部地图注释）。
 TEST_F(DdpEsdfConstraintTest, MarginBoundariesAreC1Continuous) {
     const auto constraint = MakeConstraint();
     const auto& config = constraint.config();
     // 舒适边界：界上严格为零，界内 0.1mm 处梯度量级 ~3·W_comf·(1e-4)²·N_c
     const double x_comf = circle_radius_ + config.margin_comf;
-    const auto on_comf = constraint.evaluate(x_comf, 4.0, kHalfPi);
+    const auto on_comf = constraint.evaluate(x_comf, 2.5, kHalfPi);
     EXPECT_DOUBLE_EQ(on_comf.cost, 0.0);
     EXPECT_TRUE(on_comf.gradient.isZero());
     EXPECT_TRUE(on_comf.hessian.isZero());
-    const auto inside_comf = constraint.evaluate(x_comf - 1e-4, 4.0, kHalfPi);
+    const auto inside_comf = constraint.evaluate(x_comf - 1e-4, 2.5, kHalfPi);
     EXPECT_GT(inside_comf.cost, 0.0);
     EXPECT_LT(inside_comf.gradient.norm(), 1e-6);
     // 安全边界：两侧代价差为 O(Δx)（梯度有限），两侧梯度差同样为 O(Δx)
     // （C¹：梯度在衔接处连续、仅随 C 线性变化），不会出现 O(1) 跳变
     const double x_safe = circle_radius_ + config.margin_safe;
-    const auto above_safe = constraint.evaluate(x_safe + 1e-4, 4.0, kHalfPi);
-    const auto below_safe = constraint.evaluate(x_safe - 1e-4, 4.0, kHalfPi);
+    const auto above_safe = constraint.evaluate(x_safe + 1e-4, 2.5, kHalfPi);
+    const auto below_safe = constraint.evaluate(x_safe - 1e-4, 2.5, kHalfPi);
     EXPECT_NEAR(above_safe.cost, below_safe.cost, 1e-4);
     EXPECT_LT((above_safe.gradient - below_safe.gradient).norm(), 1e-3);
 }
@@ -216,10 +241,10 @@ TEST_F(DdpEsdfConstraintTest, MarginBoundariesAreC1Continuous) {
 TEST_F(DdpEsdfConstraintTest, HandDerivedComfortOnlyZoneMatches) {
     const auto constraint = MakeConstraint();
     // 平行位姿全部圆心 cx=x0=r+0.06：C_safe=-0.04<0（safe 段不激活）、
-    // C_comf=0.04>0（comf 段激活）
+    // C_comf=0.04>0（comf 段激活）；y=2.5 保证墙面主导（见文件头部注释）
     const double x0 = circle_radius_ + 0.06;
-    const auto result = constraint.evaluate(x0, 4.0, kHalfPi);
-    const auto ref = ComputeReference(circle_centers_, circle_radius_, x0, 4.0,
+    const auto result = constraint.evaluate(x0, 2.5, kHalfPi);
+    const auto ref = ComputeReference(circle_centers_, circle_radius_, x0, 2.5,
                                       kHalfPi, constraint.config());
 
     ExpectMatchesReference(result, ref, 1e-6);
@@ -405,23 +430,64 @@ TEST_F(DdpEsdfConstraintTest, GnHessianMatchesConstraintJacobianFd) {
 }
 
 // 测试圆心越出地图时的保守行为。
-// 因为 ESDFMap 对越界查询返回 (0, 零梯度) 哨兵，对应圆按最大侵入计
-// （cost=W_safe·(r+margin_safe)³+W_comf·(r+margin_comf)³），梯度贡献为零，
-// GN Hessian 因 ∇C=0 同样为零（不引入虚假的恢复方向）。
+// L8.1 契约下越界圆得到恢复场 d = d_map(p) − s（负值，随穿透深度线性下降）
+// 与恒指向图内的非零梯度：惩罚为大的正值，梯度与 GN Hessian 均非零
+// （∇C=+x 向，沿负梯度下降把圆拉回图内），「保守惩罚」语义保留且严格强于
+// L8 前的 (0, 零梯度) 哨兵（那时 ∇C=0，Hessian 同样为零）。
 TEST_F(DdpEsdfConstraintTest, OutOfMapCircleYieldsConservativePenalty) {
     const auto constraint = MakeConstraint();
-    // θ=0 位姿 x0=5.5：前圆 cx=8.28>8 越界；其余圆在图内但 d>r+margin_comf
-    // 不激活
-    const auto result = constraint.evaluate(5.5, 4.0, 0.0);
-    const double expected =
-        constraint.config().weight_safe *
-            std::pow(circle_radius_ + constraint.config().margin_safe, 3) +
-        constraint.config().weight_comf *
-            std::pow(circle_radius_ + constraint.config().margin_comf, 3);
+    const auto& config = constraint.config();
+    // θ=0 位姿 x0=5.25：前圆 cx=5.25+2.7833≈8.033 越出东边界（s≈0.033）；
+    // 中圆 cx=6.60（到东边界圈 d=1.275>r+margin_comf≈1.2505）与后圆
+    // cx≈5.167 均不激活——x0 的可行窗口为 (8-2.7833, 7.875-1.35-1.2505)≈
+    // (5.217, 5.274)，取中点附近
+    const double x0 = 5.25;
+    const double y0 = 4.0;
+    const double map_east = kMapCols * kResolution;  // 8.0
+    ReferenceCostGradHess ref;
+    for (const auto& center : circle_centers_) {
+        const double cx = x0 + center.x();  // θ=0、ly=0：cy=y0、dcx/dθ=0
+        double d;
+        if (cx >= map_east) {
+            // L8.1 恢复场：p=(map_east,y0) 索引钳制到东边界格（采样值
+            // d=-res），d = -res-s，∇d=(-1,0) 恒指向图内
+            d = -kResolution - (cx - map_east);
+        } else {
+            // 图内东侧线性区：d = 东边界格中心 x − cx = 7.875−cx，∇d=(-1,0)
+            d = (map_east - kResolution) - cx;
+        }
+        // ∇C = -(∇d·∂c/∂pose)：∂d/∂x=-1、dcx/dθ=0 ⟹ ∇C=(1,0,0)
+        const Eigen::Vector3d grad_c(1.0, 0.0, 0.0);
+        const double c_safe = circle_radius_ + config.margin_safe - d;
+        if (c_safe > 0.0) {
+            ref.cost += config.weight_safe * std::pow(c_safe, 3);
+            ref.gradient +=
+                (3.0 * config.weight_safe * c_safe * c_safe) * grad_c;
+            ref.hessian += (6.0 * config.weight_safe * c_safe) * grad_c *
+                           grad_c.transpose();
+        }
+        const double c_comf = circle_radius_ + config.margin_comf - d;
+        if (c_comf > 0.0) {
+            ref.cost += config.weight_comf * std::pow(c_comf, 3);
+            ref.gradient +=
+                (3.0 * config.weight_comf * c_comf * c_comf) * grad_c;
+            ref.hessian += (6.0 * config.weight_comf * c_comf) * grad_c *
+                           grad_c.transpose();
+        }
+    }
+    const auto result = constraint.evaluate(x0, y0, 0.0);
 
-    EXPECT_NEAR(result.cost, expected, 1e-9);
-    EXPECT_TRUE(result.gradient.isZero());
-    EXPECT_TRUE(result.hessian.isZero());
+    // 场景设计自检：前圆确实越界（否则注释中的恢复场推导不成立）
+    EXPECT_GT(x0 + circle_centers_.back().x(), map_east);
+    ExpectMatchesReference(result, ref, 1e-9);
+    // 恢复场梯度指向图内 ⟹ 代价梯度与 Hessian 的 x 分量非零
+    EXPECT_GT(result.gradient(DDP_IDX_X), 0.0);
+    EXPECT_GT(result.hessian(DDP_IDX_X, DDP_IDX_X), 0.0);
+    // 保守性：惩罚严格大于 L8 前 d=0 哨兵对应的全侵入罚
+    const double old_sentinel =
+        config.weight_safe * std::pow(circle_radius_ + config.margin_safe, 3) +
+        config.weight_comf * std::pow(circle_radius_ + config.margin_comf, 3);
+    EXPECT_GT(result.cost, old_sentinel);
 }
 
 // 测试时间轴 stride 抽样语义。

@@ -96,11 +96,16 @@ TEST(StaticCorridorBuilderTest, BuildFailsOnEsdfQueryOutOfBounds) {
     EXPECT_NE(result.status_msg.find("Invalid ESDF sample"), std::string::npos);
 }
 
-// 场景：障碍物位于 (0,0) 单栅格，车辆沿 x 轴正向停放在 (2,0,0)。
+// 场景：障碍物位于 (0,0) 单栅格，车辆沿 x 轴正向停放在 (2.2,5.0,0)。
 // 触发原因：验证 Round 7 起唯一保留的舒适 soft 约束——在 Z_ref 处约束 slack
 // 应等于 d_ref - R - soft_margin；小扰动后，由走廊系数恢复的线性化距离应与
 // 真实 ESDF 距离接近。
 // 预期行为：slack 与线性化距离均与解析预期值在容差内一致。
+// L8.2 契约下边界圈占据：参考位姿取 (2.2,5.0) 使首个外圆圆心 (~2.12,5.0)
+// 落在西边界圈主导的精确线性区（d = cx 精确成立、梯度恒 (1,0)，且不在
+// 折点过渡带内），障碍与南北边界圈都更远；若沿用旧的 (2.0,0.0)，圆心会
+// 直接落在被标记占据的边界行上（d=-1），slack 被 violation 钳制为 0，
+// 本用例要验证的未违反分支将被覆盖。
 TEST(StaticCorridorBuilderTest,
      LinearizedDistanceMatchesEsdfNearExpansionPoint) {
     const StaticCorridorBuilder builder(MakeConfig());
@@ -114,16 +119,20 @@ TEST(StaticCorridorBuilderTest,
     ASSERT_GE(local_centers.size(), 1U);
     const double local_x = local_centers.front().x();
     const double local_y = local_centers.front().y();
-    const std::vector<TrajectoryPoint> z_ref = {MakePathPoint(2.0, 0.0, 0.0)};
+    const std::vector<TrajectoryPoint> z_ref = {MakePathPoint(2.2, 5.0, 0.0)};
     const auto result = builder.build(z_ref, esdf_map, model);
     EXPECT_TRUE(result.success);
     ASSERT_GE(result.constraints.size(), 2U);
     const Eigen::VectorXd z_vec =
-        (Eigen::VectorXd(5) << 2.0, 0.0, 0.0, 0.0, 0.0).finished();
-    const double expected_cx = 2.0 + local_x;
-    const double expected_cy = local_y;
+        (Eigen::VectorXd(5) << 2.2, 5.0, 0.0, 0.0, 0.0).finished();
+    const double expected_cx = 2.2 + local_x;
+    const double expected_cy = 5.0 + local_y;
     const double dist_ref =
         esdf_map.getDistAndGrad(expected_cx, expected_cy).first;
+    // 线性区健全性检查：圆心处场由西边界圈主导（d = cx 精确成立），
+    // slack 为正（未违反，不触发 violation 钳制）
+    EXPECT_DOUBLE_EQ(dist_ref, expected_cx);
+    EXPECT_GT(dist_ref, model.getOuterRadius() + MakeConfig().soft_margin);
     // 唯一的舒适约束行（索引0）
     const auto& soft = result.constraints[0];
     const double soft_slack = soft.d - soft.c.dot(z_vec);
@@ -168,6 +177,10 @@ TEST(StaticCorridorBuilderTest, AHasZeroVDeltaComponents) {
 
 // 障碍物极远时，走廊约束应处于松弛状态（slack = d_ref - R - margin > 0）；
 // 障碍物极近时，约束应紧绷甚至不可行（slack < 0）。
+// L8.2 契约下边界圈占据：极远场景车辆取 (7,7)（地图中央），全部外圆到
+// 边界圈的距离都明显大于 R+soft_margin（障碍物更远），slack 恒正不触发
+// 钳制；若沿用旧的 (10,0)，圆心落在被占据的边界行上（d=-1），slack
+// 被 violation 钳制为 0，本块要验证的松弛分支不成立。
 TEST(StaticCorridorBuilderTest, NumericalStabilityAtExtremeDistances) {
     const StaticCorridorBuilder builder(MakeConfig());
     const VehicleFootprintModel model = MakeSimpleFootprintModel();
@@ -176,24 +189,24 @@ TEST(StaticCorridorBuilderTest, NumericalStabilityAtExtremeDistances) {
                                                            CircleType::OUTER);
     ASSERT_GE(local_centers.size(), 1U);
     const double radius = model.getOuterRadius();
-    // 极远场景：车辆在 (10,0,0)，障碍物在 (0,0)
+    // 极远场景：车辆在 (7,7,0)，障碍物在 (0,0)（最近特征实为边界圈）
     {
         const GridMap grid_map(1.0, 15, 15, Position{0.0, 0.0},
                                {Position{0.0, 0.0}});
         const ESDFMap esdf_map(grid_map);
         const std::vector<TrajectoryPoint> z_ref = {
-            MakePathPoint(10.0, 0.0, 0.0)};
+            MakePathPoint(7.0, 7.0, 0.0)};
         const auto result = builder.build(z_ref, esdf_map, model);
         EXPECT_TRUE(result.success);
         const Eigen::VectorXd z_vec =
-            (Eigen::VectorXd(5) << 10.0, 0.0, 0.0, 0.0, 0.0).finished();
+            (Eigen::VectorXd(5) << 7.0, 7.0, 0.0, 0.0, 0.0).finished();
         for (const auto& c : result.constraints) {
             const double slack = c.d - c.c.dot(z_vec);
             const double margin = MakeConfig().soft_margin;
             const double circle_local_x = local_centers[c.circle_idx].x();
             const double circle_local_y = local_centers[c.circle_idx].y();
-            const double expected_cx = 10.0 + circle_local_x;
-            const double expected_cy = circle_local_y;
+            const double expected_cx = 7.0 + circle_local_x;
+            const double expected_cy = 7.0 + circle_local_y;
             const double expected_slack =
                 esdf_map.getDistAndGrad(expected_cx, expected_cy).first -
                 radius - margin;
@@ -201,30 +214,34 @@ TEST(StaticCorridorBuilderTest, NumericalStabilityAtExtremeDistances) {
             EXPECT_GT(slack, 0.0);
         }
     }
-    // 极近场景：车辆后轴放在使第一个外圆圆心刚好侵入障碍物内部的位置。
-    // 此时 center 0 的 d_ref < R + soft_margin
+    // 极近场景：让第一个外圆圆心到障碍物的 ESDF 距离约为 R+soft_margin-0.1，
+    // 即 center 0 的 d_ref < R + soft_margin（违反，slack 被钳制为 0）。
+    // L8.2 契约下把障碍与车辆同时放到 y=2.5（远离上下边界圈）：障碍物本身
+    // 位于第 0 列（边界圈一部分），圆心处场由墙面列主导且 d = cx 精确成立，
+    // 钳制机制与 L8 前一致；若沿用旧的 y=0.0，圆心落在被占据的边界行上，
+    // d≈-0.01 与车辆 x 位置解耦，「距离约为 R+soft_margin-0.1」的设计失效。
     {
         const double local_x = local_centers.front().x();
-        // 让 center 0 的圆心到障碍物 (0,0) 的 ESDF 距离约为 R + soft_margin -
-        // 0.1
+        // 让 center 0 的圆心到障碍物 (0,2.5) 的 ESDF 距离约为 R + soft_margin
+        // - 0.1
         const double vehicle_x =
             radius + MakeConfig().soft_margin - 0.1 - local_x;
         const GridMap grid_map(0.01, 500, 500, Position{0.0, 0.0},
-                               {Position{0.0, 0.0}});
+                               {Position{0.0, 2.5}});
         const ESDFMap esdf_map(grid_map);
         const std::vector<TrajectoryPoint> z_ref = {
-            MakePathPoint(vehicle_x, 0.0, 0.0)};
+            MakePathPoint(vehicle_x, 2.5, 0.0)};
         const auto result = builder.build(z_ref, esdf_map, model);
         EXPECT_TRUE(result.success);
         const Eigen::VectorXd z_vec =
-            (Eigen::VectorXd(5) << vehicle_x, 0.0, 0.0, 0.0, 0.0).finished();
+            (Eigen::VectorXd(5) << vehicle_x, 2.5, 0.0, 0.0, 0.0).finished();
         bool found_clamped = false;
         for (const auto& c : result.constraints) {
             const double slack = c.d - c.c.dot(z_vec);
             const double margin = MakeConfig().soft_margin;
             const double expected_cx =
                 vehicle_x + local_centers[c.circle_idx].x();
-            const double expected_cy = local_centers[c.circle_idx].y();
+            const double expected_cy = 2.5 + local_centers[c.circle_idx].y();
             const double dist_ref =
                 esdf_map.getDistAndGrad(expected_cx, expected_cy).first;
             // 自洽性修正：violation = max(0, radius + margin - dist_ref)，

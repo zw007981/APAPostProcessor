@@ -31,11 +31,50 @@ AlOuterLoop::AlOuterLoop(AlOuterLoopConfig config, DdpCostConfig cost_config)
         throw std::invalid_argument(
             "AlOuterLoop: 首轮罚权重/幅值初始罚权重与 ε_μ 必须为正有限");
     }
+    // 幅值组独立上限：必须为正有限且不小于幅值初始罚权重（否则启动值
+    // 即越界）
+    if (!std::isfinite(config_.amplitude_mu_max) ||
+        !(config_.amplitude_mu_max >= config_.amplitude_mu_initial)) {
+        throw std::invalid_argument(
+            "AlOuterLoop: 幅值组 μ 上限必须为正有限且不小于幅值初始罚权重");
+    }
     if (!(config_.mu_gate_kappa > 0.0 && config_.mu_gate_kappa < 1.0) ||
         !(config_.mu_growth_factor > 1.0) ||
         !(config_.anneal_gamma > 0.0 && config_.anneal_gamma < 1.0)) {
         throw std::invalid_argument(
             "AlOuterLoop: 门控/增长/退火参数必须满足 0<κ<1、φ>1、0<γ<1");
+    }
+    // β 退火调度：0<β_final<=β_initial 且 0<γ_β<1（地板必须为正——β→0
+    // 时 σ_β 梯度在 v=0 处爆炸）
+    if (!(config_.shift_beta_initial > 0.0) ||
+        !(config_.shift_beta_final > 0.0) ||
+        config_.shift_beta_final > config_.shift_beta_initial ||
+        !(config_.shift_beta_gamma > 0.0 && config_.shift_beta_gamma < 1.0)) {
+        throw std::invalid_argument(
+            "AlOuterLoop: β 退火参数必须满足 0<β_final<=β_initial、0<γ_β<1");
+    }
+    // 候选段差异化退火：临界比阈值必须为正、候选退火率满足 0<γ_cand<1
+    if (!(config_.melt_crit_threshold > 0.0) ||
+        !std::isfinite(config_.melt_crit_threshold) ||
+        !(config_.candidate_anneal_gamma > 0.0 &&
+          config_.candidate_anneal_gamma < 1.0)) {
+        throw std::invalid_argument(
+            "AlOuterLoop: 候选段阈值必须为正有限、候选退火率满足 0<γ_cand<1");
+    }
+    if (config_.anneal_hold_rounds < 0) {
+        throw std::invalid_argument("AlOuterLoop: 退火保持轮数必须非负");
+    }
+    // 逃逸冻结阈值：0 = 关闭；启用时必须为正有限
+    if (config_.anneal_freeze_length_growth < 0.0 ||
+        config_.anneal_freeze_lateral_deviation < 0.0 ||
+        config_.anneal_freeze_defect < 0.0 ||
+        config_.anneal_freeze_ref_length_ratio < 0.0 ||
+        !std::isfinite(config_.anneal_freeze_length_growth) ||
+        !std::isfinite(config_.anneal_freeze_lateral_deviation) ||
+        !std::isfinite(config_.anneal_freeze_defect) ||
+        !std::isfinite(config_.anneal_freeze_ref_length_ratio)) {
+        throw std::invalid_argument(
+            "AlOuterLoop: 逃逸冻结阈值必须为非负有限值（0 = 关闭）");
     }
     // 幅值边界进入 g 公式（量测与代价求值层同口径），w_ref,0 进入退火基准
     if (!(cost_config_.v_max > 0.0) || !(cost_config_.a_max > 0.0) ||
@@ -50,6 +89,8 @@ AlOuterLoop::AlOuterLoop(AlOuterLoopConfig config, DdpCostConfig cost_config)
 
 void AlOuterLoop::reset() {
     round_ = 0;
+    anneal_round_ = 0;
+    anneal_frozen_ = false;
     mu_terminal_ = config_.first_round_mu;
     mu_amplitude_ = config_.amplitude_mu_initial;
     mu_calibrated_ = config_.first_round_mu;
@@ -60,8 +101,84 @@ void AlOuterLoop::reset() {
 }
 
 double AlOuterLoop::trackingWeight() const {
+    // 分段常数退火：前 anneal_hold_rounds 轮保持 w_ref,0（先让 AL 把约束
+    // 建立起来），之后按 γ 几何退火；hold=0 时退化为纯几何退火；
+    // 逃逸冻结期间退火轮次停走（w_ref 停在当前深度）
+    const double effective_round = static_cast<double>(
+        std::max(0, anneal_round_ - config_.anneal_hold_rounds));
     return cost_config_.weight_ref_base *
-           std::pow(config_.anneal_gamma, static_cast<double>(round_));
+           std::pow(config_.anneal_gamma, effective_round);
+}
+
+double AlOuterLoop::shiftBeta() const {
+    return std::max(config_.shift_beta_final,
+                    config_.shift_beta_initial *
+                        std::pow(config_.shift_beta_gamma,
+                                 static_cast<double>(anneal_round_)));
+}
+
+double AlOuterLoop::candidateTrackingWeight() const {
+    return cost_config_.weight_ref_base *
+           std::pow(config_.candidate_anneal_gamma,
+                    static_cast<double>(anneal_round_));
+}
+
+void AlOuterLoop::reportEscapeIndicators(double length_growth,
+                                         double lateral_deviation,
+                                         double defect_norm,
+                                         double ref_length_ratio) {
+    // 滞回：已冻结不再重复判定（冻结期间指标可能继续恶化，语义上不应
+    // 反复触发）；冻结只在 reset 时解除
+    if (anneal_frozen_) {
+        return;
+    }
+    const bool length_escape =
+        config_.anneal_freeze_length_growth > 0.0 &&
+        length_growth > config_.anneal_freeze_length_growth;
+    const bool deviation_escape =
+        config_.anneal_freeze_lateral_deviation > 0.0 &&
+        lateral_deviation > config_.anneal_freeze_lateral_deviation;
+    const bool defect_escape = config_.anneal_freeze_defect > 0.0 &&
+                               defect_norm > config_.anneal_freeze_defect;
+    // 绝对长度比逃逸：解长度/参考总长越阈即冻结——环比触发在慢速跑飞
+    // （每轮 +4% 复利）下永远静默，且触发时 w_ref 已退火过深、冻结无法
+    // 把解拉回；绝对比在逃逸起步（w_ref 仍高、跟踪仍有拉力）时即触发
+    const bool ref_ratio_escape =
+        config_.anneal_freeze_ref_length_ratio > 0.0 &&
+        ref_length_ratio > config_.anneal_freeze_ref_length_ratio;
+    anneal_frozen_ =
+        length_escape || deviation_escape || defect_escape || ref_ratio_escape;
+}
+
+std::vector<bool> AlOuterLoop::makeMeltCandidateMask(
+    const DdpReference& reference) const {
+    const std::size_t num_poses = reference.poses.size();
+    std::vector<bool> mask(num_poses, false);
+    if (reference.maneuvers.empty() || num_poses == 0) {
+        // 无 maneuver 元数据（合成参考）或位姿为空：不标记任何点
+        // （与 makeAnnealExemptMask 同一防御约定）
+        return mask;
+    }
+    // 临界比 crit=T⁵·n_pts·dt（平衡式：融化该段所需的最小 w_j/w_ref）；
+    // 只标记低临界比的内部 maneuver——首/末段承载起点状态与终点语义，
+    // 任何判据下都不参与候选
+    for (std::size_t m = 1; m + 1 < reference.maneuvers.size(); ++m) {
+        const auto& maneuver = reference.maneuvers[m];
+        const std::size_t steps = maneuver.end_index - maneuver.begin_index;
+        const double duration = static_cast<double>(steps) * reference.dt;
+        const double num_pts = static_cast<double>(steps + 1);
+        const double crit = std::pow(duration, 5.0) * num_pts * reference.dt;
+        if (!(crit < config_.melt_crit_threshold)) {
+            continue;
+        }
+        assert(maneuver.begin_index < num_poses &&
+               maneuver.end_index < num_poses);
+        const std::size_t end = std::min(maneuver.end_index, num_poses - 1);
+        for (std::size_t k = maneuver.begin_index; k <= end; ++k) {
+            mask[k] = true;
+        }
+    }
+    return mask;
 }
 
 std::vector<bool> AlOuterLoop::makeAnnealExemptMask(
@@ -233,13 +350,19 @@ bool AlOuterLoop::update(const AlConstraintSnapshot& snapshot, double base_cost,
     const bool increase_amplitude =
         prev_amplitude_violation_ >= 0.0 &&
         amplitude_violation > config_.mu_gate_kappa * prev_amplitude_violation_;
+    // 退火冻结只停退火轮次，不冻结 μ 增长：冻结发生在求解中段（逃逸
+    // 刚起步），此时的违反度是 AL 该做的本职工作，μ 门控增长合法且
+    // 必要——「冻结 μ」会让残余违反永远拉不回来（实测把 data3/data6
+    // 钉死在 ineq≈0.08~1.0 耗尽）；与「收敛后延长退火轮」的场景（违反
+    // 度已归零，μ 再增长才是伪增长）必须分开
     if (increase_terminal) {
         mu_terminal_ =
             std::min(config_.mu_growth_factor * mu_terminal_, config_.mu_max);
     }
     if (increase_amplitude) {
-        mu_amplitude_ =
-            std::min(config_.mu_growth_factor * mu_amplitude_, config_.mu_max);
+        // 幅值组独立封顶（默认 = μ_max 时与既有行为逐位一致）
+        mu_amplitude_ = std::min(config_.mu_growth_factor * mu_amplitude_,
+                                 config_.amplitude_mu_max);
     }
     if (increase_terminal || increase_amplitude) {
         ++mu_increase_count_;
@@ -250,6 +373,11 @@ bool AlOuterLoop::update(const AlConstraintSnapshot& snapshot, double base_cost,
     multipliers->amplitude_mu.setConstant(mu_amplitude_);
     multipliers->terminal_mu.setConstant(mu_terminal_);
     ++round_;
+    // 退火轮次独立走表：冻结期停走（w_ref 停在当前深度），解冻时与外层
+    // 轮次同步推进
+    if (!anneal_frozen_) {
+        ++anneal_round_;
+    }
     return increase_terminal || increase_amplitude;
 }
 }  // namespace apa_post_processor

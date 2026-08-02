@@ -1,5 +1,3 @@
-#include "scene/ddp_planning_scene.h"
-
 #include <gtest/gtest.h>
 #include <unistd.h>
 
@@ -7,6 +5,7 @@
 #include <fstream>
 #include <string>
 
+#include "scene/ddp_planning_scene.h"
 #include "scene/planning_scene.h"
 
 namespace apa_post_processor {

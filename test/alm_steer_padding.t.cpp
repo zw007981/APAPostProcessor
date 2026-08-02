@@ -1,10 +1,9 @@
-#include "core/ALM/alm_steer_padding.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <vector>
 
+#include "core/ALM/alm_steer_padding.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/maneuver.h"

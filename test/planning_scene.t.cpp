@@ -1,10 +1,10 @@
-#include "scene/planning_scene.h"
-
 #include <gtest/gtest.h>
 
 #include <filesystem>
 #include <fstream>
 #include <string>
+
+#include "scene/planning_scene.h"
 
 namespace apa_post_processor {
 namespace {

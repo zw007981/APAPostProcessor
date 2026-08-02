@@ -1,5 +1,3 @@
-#include "core/DDP/bicycle_dynamics.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -7,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "core/DDP/bicycle_dynamics.h"
 #include "util/constants.h"
 
 namespace apa_post_processor {

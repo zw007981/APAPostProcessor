@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 
 namespace apa_post_processor {
@@ -41,6 +42,18 @@ MsIlqrSolver::MsIlqrSolver(MsIlqrConfig config, const BicycleDynamics* dynamics,
         !(config_.inter_segment_weight >= 0.0)) {
         throw std::invalid_argument("MsIlqrSolver: merit/段间惩罚参数非法");
     }
+    // µ_m 上限必须不小于 µ₀（否则地板与上限冲突、语义不自洽）
+    if (!(config_.merit_mu_max >= config_.merit_mu0) ||
+        !std::isfinite(config_.merit_mu_max)) {
+        throw std::invalid_argument(
+            "MsIlqrSolver: merit_mu_max 必须为有限值且不小于 merit_mu0");
+    }
+    // 定义域守卫 margin：0 = 关闭；启用时必须为非负有限值
+    if (!(config_.domain_guard_margin >= 0.0) ||
+        !std::isfinite(config_.domain_guard_margin)) {
+        throw std::invalid_argument(
+            "MsIlqrSolver: domain_guard_margin 必须为非负有限值");
+    }
     rho_reg_ = config_.reg_initial;
     merit_mu_ = config_.merit_mu0;
 }
@@ -73,6 +86,7 @@ MsIlqrResult MsIlqrSolver::solve(
     linear_rollout_count_ = 0;
     nonlinear_rollout_count_ = 0;
     qp_factorization_count_ = 0;
+    domain_guard_rejections_ = 0;
     history_.clear();
     MsIlqrResult result;
     result.initial_cost = total_cost_;
@@ -94,6 +108,7 @@ MsIlqrResult MsIlqrSolver::solve(
                     result.iterations = iter - 1;
                     result.final_cost = total_cost_;
                     result.final_defect_norm = defect_norm_;
+                    result.domain_guard_rejections = domain_guard_rejections_;
                     return result;
                 }
                 continue;
@@ -113,6 +128,7 @@ MsIlqrResult MsIlqrSolver::solve(
                 result.iterations = iter - 1;
                 result.final_cost = total_cost_;
                 result.final_defect_norm = defect_norm_;
+                result.domain_guard_rejections = domain_guard_rejections_;
                 return result;
             }
         }
@@ -145,6 +161,7 @@ MsIlqrResult MsIlqrSolver::solve(
     }
     result.final_cost = total_cost_;
     result.final_defect_norm = defect_norm_;
+    result.domain_guard_rejections = domain_guard_rejections_;
     return result;
 }
 
@@ -260,13 +277,31 @@ bool MsIlqrSolver::backwardPass() {
         const DdpState z = value_gradient + value_hessian * defects_[k + 1];
         const DdpState q_x = stage.lx + jac_a.transpose() * z;
         const DdpControl q_u = stage.lu + jac_b.transpose() * z;
-        const DdpStateHessian q_xx =
+        DdpStateHessian q_xx =
             stage.lxx + jac_a.transpose() * value_hessian * jac_a;
-        const DdpControlHessian q_uu =
-            stage.luu + jac_b.transpose() * value_hessian * jac_b +
-            rho_reg_ * DdpControlHessian::Identity();
-        const DdpControlStateHessian q_ux =
+        DdpControlHessian q_uu =
+            stage.luu + jac_b.transpose() * value_hessian * jac_b;
+        DdpControlStateHessian q_ux =
             stage.lux + jac_b.transpose() * value_hessian * jac_a;
+        // 可选完整二阶项（true MS-DDP，编译期开关）：Q_* += s'·f_** 红项
+        // 张量收缩——红项按 1.4 节公式只含价值梯度 s'（缺陷修正 S'd̄ 是
+        // 一阶修正，不进入二阶项）；v⁺/a⁺/δ⁺/ω⁺ 四行切片恒零，实际只有
+        // x⁺/y⁺/θ⁺ 三行有贡献。注意 Q_uu 更频繁失去正定性是已知代价
+        // （由 LM 正则化调度吸收），张量求值相对雅可比约 +60% 单步开销
+        if constexpr (DDP_FULL_HESSIAN_ENABLED) {
+            DdpStateHessianTensor f_xx;
+            DdpControlHessianTensor f_uu;
+            DdpMixedHessianTensor f_ux;
+            dynamics_->hessians(states_[k], controls_[k], dt_, &f_xx, &f_uu,
+                                &f_ux);
+            for (int row = 0; row < DDP_STATE_DIM; ++row) {
+                const double costate = value_gradient(row);
+                q_xx += costate * f_xx[row];
+                q_uu += costate * f_uu[row];
+                q_ux += costate * f_ux[row];
+            }
+        }
+        q_uu += rho_reg_ * DdpControlHessian::Identity();
         // 盒约束 QP（H 已含正则化）：回推顺序上一步的钳制集热启动，
         // 分解每步必然重做
         BoxQpSolver<>::Problem problem;
@@ -355,7 +390,10 @@ void MsIlqrSolver::updateMeritMu() {
     const double threshold =
         config_.merit_mu0 + std::abs(expectedChange(1.0)) /
                                 ((1.0 - config_.merit_rho) * defect_norm_);
-    merit_mu_ = std::max({merit_mu_, threshold, config_.merit_mu0});
+    // 棘轮只升不降 + 上限封顶（默认 1e9 不封顶）：小缺陷下的病态放大
+    // 被上限拦截，大缺陷下的修复优先级提升能力保留
+    merit_mu_ = std::min(std::max({merit_mu_, threshold, config_.merit_mu0}),
+                         config_.merit_mu_max);
 }
 
 double MsIlqrSolver::nonlinearRollout(double alpha,
@@ -375,6 +413,32 @@ double MsIlqrSolver::nonlinearRollout(double alpha,
     }
     // 新缺陷 d' = (1-α)·d̄ 精确成立（与状态更新公式逐位一致）
     cand_defect_norm_ = (1.0 - alpha) * defect_norm_;
+    // L8.3 定义域守卫：AL 幅值约束只覆盖 v/a/δ/ω、Box-QP 只约束控制，
+    // 位置 (x,y) 不受任何约束——越出「地图 ⊕ margin」的试探候选直接判
+    // 失败（返回非有限代价使 Armijo 判据拒绝并回溯），而不是拿去评价
+    // merit。margin 外扩若干米：L8.1 恢复场主导的合法小幅越界恢复过程
+    // 不被否掉。NaN 位置经比较运算自然落入拒绝分支
+    if (config_.domain_guard_margin > 0.0 &&
+        cost_evaluator_->esdfConstraint() != nullptr) {
+        const ESDFMap& map = cost_evaluator_->esdfConstraint()->esdfMap();
+        const double margin = config_.domain_guard_margin;
+        const double min_x = map.getOrigin().x - margin;
+        const double min_y = map.getOrigin().y - margin;
+        const double max_x =
+            map.getOrigin().x +
+            static_cast<double>(map.getWidth()) * map.getResolution() + margin;
+        const double max_y =
+            map.getOrigin().y +
+            static_cast<double>(map.getHeight()) * map.getResolution() + margin;
+        for (const auto& state : cand_states_) {
+            const double x = state(DDP_IDX_X);
+            const double y = state(DDP_IDX_Y);
+            if (!(x >= min_x && x <= max_x && y >= min_y && y <= max_y)) {
+                ++domain_guard_rejections_;
+                return std::numeric_limits<double>::infinity();
+            }
+        }
+    }
     cand_eval_ = cost_evaluator_->evaluate(
         reference, cand_states_, cand_controls_, multipliers, cost_input);
     cand_cost_ = cand_eval_.total_cost;

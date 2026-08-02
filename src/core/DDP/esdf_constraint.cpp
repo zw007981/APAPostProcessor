@@ -88,7 +88,9 @@ DdpEsdfCircleConstraint DdpEsdfConstraint::evaluateCircle(
     DdpEsdfCircleConstraint result;
     // 防御：ESDF 查询返回非有限值（当前实现整数距离场下不可达，属
     // 面向未来实现变更的防御）时按保守侵入处理——C 取最大值、梯度为零，
-    // 与越界哨兵的既有保守语义一致，不把 NaN 静默传播进代价/导数
+    // 不把 NaN 静默传播进代价/导数。（注意与图外语义区分：图外查询
+    // 在 M011 L8 修复后返回穿透深度与指向图内的恢复梯度，走下方正常
+    // 路径，不进入本分支）
     if (!std::isfinite(dist)) {
         result.c_safe = circle_radius_ + config_.margin_safe;
         result.c_comf = circle_radius_ + config_.margin_comf;

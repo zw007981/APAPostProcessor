@@ -48,13 +48,15 @@ TEST(ApaEsdfMapAdapterTest, QueryDistanceConsistentAcrossMultiplePoints) {
     }
 }
 
-// 测试适配器对越界查询点会先裁剪到地图内侧再查询，而不是直接返回ESDFMap对越界查询
-// 固定给出的(距离=0,
-// 梯度=0)。触发原因：无解bug修复后（ESDF碰撞约束由硬约束改为软代价），
-// SQP早期迭代可能让某个圆心暂时跑出地图，若适配器像ESDFMap本身一样对越界点返回零梯度，
+// 测试适配器对越界查询点会先裁剪到地图内侧再查询，而不是直接透传ESDFMap的
+// 越界恢复场。触发原因：无解bug修复后（ESDF碰撞约束由硬约束改为软代价），
+// SQP早期迭代可能让某个圆心暂时跑出地图，若适配器向优化器返回零梯度，
 // 优化器会完全失去把圆心拉回地图内部的方向信息，导致轨迹发散（实测data7.json长度从
 // 18.7m发散到33.6m）。预期行为：越界点应被裁剪到边界内侧后再查询，得到与边界附近某个
 // 合法内部点一致的非零距离/梯度。
+// L8 契约后底层 ESDFMap 的越界查询返回 L8.1 恢复场（d = d_map(p) − s，
+// 梯度恒指向图内）而非全零哨兵；适配器的裁剪语义不变，本用例同步锁定
+// 底层恢复场的解析值。
 TEST(ApaEsdfMapAdapterTest, QueryDistanceClampsOutOfBoundsPointToMapInterior) {
     const std::vector<Position> cells{Position{0.0, 0.0}, Position{1.0, 0.0},
                                       Position{0.0, 1.0}, Position{1.0, 1.0}};
@@ -68,11 +70,18 @@ TEST(ApaEsdfMapAdapterTest, QueryDistanceClampsOutOfBoundsPointToMapInterior) {
                                              out_of_bounds_point.y());
     const auto sample = adapter.queryDistance(out_of_bounds_point);
 
-    // 底层ESDFMap对越界查询固定返回全零结果
-    EXPECT_DOUBLE_EQ(raw.first, 0.0);
-    EXPECT_TRUE(raw.second.isZero());
-    // 适配器裁剪后应得到边界内侧的真实非零距离/梯度，而不是全零
-    EXPECT_NE(sample.distance, 0.0);
+    // L8.1 恢复场：p = clamp((10,10)) = (4,4)，s = 6*sqrt(2)；base 为边界
+    // 角格 (3,3) 的采样值 -sqrt(2)（最近自由格 (2,2) 在对角）；
+    // d = base - s = -7*sqrt(2)，梯度 = (p-q)/s = (-1/sqrt(2), -1/sqrt(2))
+    EXPECT_NEAR(raw.first, -7.0 * std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(raw.second.x(), -1.0 / std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(raw.second.y(), -1.0 / std::sqrt(2.0), 1e-12);
+    // 适配器把 (10,10) 裁剪到 (3.5,3.5)（内缩 res/2）后查询：落在角格
+    // (3,3)（索引钳制），距离为 -sqrt(2)，梯度为角格单侧差分 (1-sqrt(2),
+    // 1-sqrt(2))——非零且指向图内，优化器不会失去回拉方向
+    EXPECT_NEAR(sample.distance, -std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(sample.gradient.x(), 1.0 - std::sqrt(2.0), 1e-12);
+    EXPECT_NEAR(sample.gradient.y(), 1.0 - std::sqrt(2.0), 1e-12);
     EXPECT_FALSE(sample.gradient.isZero());
 }
 

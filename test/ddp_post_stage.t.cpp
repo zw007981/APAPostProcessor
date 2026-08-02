@@ -1,5 +1,4 @@
-#include "core/DDP/ddp_post_stage.h"
-
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -10,6 +9,7 @@
 
 #include "core/DDP/apa_ddp_solver.h"
 #include "core/DDP/ddp_cost.h"
+#include "core/DDP/ddp_post_stage.h"
 #include "core/DDP/ddp_reference_builder.h"
 #include "core/DDP/esdf_constraint.h"
 #include "spatial/esdf_map.h"
@@ -65,19 +65,23 @@ ApaDdpSolverConfig MakeSyntheticConfig() {
     return config;
 }
 
-// 合成状态剖面的一条记录：x 位置、纵向速度、前轮转角（y=θ=a=ω=0）
+// 合成状态剖面的一条记录：x 位置、纵向速度、前轮转角、朝向（y=0，
+// a/ω 默认 0，需要注入差分反解的用例可显式指定）
 struct ProfileEntry {
     double x;
     double v;
     double delta;
+    double theta{0.0};
+    double a{0.0};
+    double omega{0.0};
 };
 
-// 向剖面末尾追加 count 个均匀点：x 按 dx 步进，v/δ 恒定
+// 向剖面末尾追加 count 个均匀点：x 按 dx 步进，v/δ 恒定（θ/a/ω 恒 0）
 void AppendRun(std::vector<ProfileEntry>* profile, double dx, int count,
                double v, double delta) {
     for (int i = 0; i < count; ++i) {
         const double x = profile->empty() ? 0.0 : profile->back().x + dx;
-        profile->push_back({x, v, delta});
+        profile->push_back({x, v, delta, 0.0, 0.0, 0.0});
     }
 }
 
@@ -90,6 +94,9 @@ DdpAlignedVec<DdpState> MakeStates(const std::vector<ProfileEntry>& profile) {
         state(DDP_IDX_X) = entry.x;
         state(DDP_IDX_V) = entry.v;
         state(DDP_IDX_DELTA) = entry.delta;
+        state(DDP_IDX_THETA) = entry.theta;
+        state(DDP_IDX_A) = entry.a;
+        state(DDP_IDX_OMEGA) = entry.omega;
         states.push_back(state);
     }
     return states;
@@ -111,6 +118,22 @@ struct PostStageFixture {
     ApaDdpSolver solver;
     DdpReferenceBuilder reference_builder;
     DdpPostStage post_stage;
+};
+
+// 白盒测试访问器：暴露 protected 的两层校验入口，供"校验容差按
+// 预期拦截/放行"的边界测试直接驱动（无需为注入异常解重跑完整求解）
+class ValidateOutputAccessor : public DdpPostStage {
+   public:
+    using DdpPostStage::DdpPostStage;
+    using DdpPostStage::validateOutput;
+};
+
+// 白盒测试访问器：暴露 protected 的阶段一驻留窗计划构建，供多接缝
+// 窗口裁剪语义的直接驱动（无需先构造完整后处理输入）
+class SeamPlanAccessor : public DdpPostStage {
+   public:
+    using DdpPostStage::buildStageOneSeamPlans;
+    using DdpPostStage::DdpPostStage;
 };
 
 // ==================== T_resteer 双积分 bang-bang 公式 ====================
@@ -265,9 +288,9 @@ TEST(DdpTopologyPruneTest, FirstAndLastManeuverProtected) {
     ASSERT_EQ(maneuvers.size(), 3);
     // 判据确认：首末段弧长均低于剔除阈值（验证保护语义而非判据失效）
     EXPECT_LT(maneuvers.front().length(),
-              fixture.post_config.cleanup.min_arc_length);
+              fixture.post_config.prune.min_arc_length);
     EXPECT_LT(maneuvers.back().length(),
-              fixture.post_config.cleanup.min_arc_length);
+              fixture.post_config.prune.min_arc_length);
     EXPECT_TRUE(fixture.post_stage.pruneManeuvers(&maneuvers));
     const Path pruned = ReconstructPath(maneuvers);
     ASSERT_EQ(pruned.numManeuvers(), 3);
@@ -276,23 +299,82 @@ TEST(DdpTopologyPruneTest, FirstAndLastManeuverProtected) {
     EXPECT_EQ(pruned.getManeuvers()[2].direction, Direction::FORWARD);
 }
 
-// 红线：PIVOT 触发失败语义——中间微游程 |Δs|<0.05 但首尾前轮转角差
-// 0.3 rad（>0.1 rad 阈值），被判为原地打轮式微动；默认车辆无钟摆泊车
-// 能力，修剪必须上报失败（返回 false）而非带病输出
+// 红线：PIVOT 触发失败语义（Δθ 判据）——中间微游程 |Δs|<0.05 且朝向变化
+// 0.3 rad（>0.1 rad 阈值）被判为原地掉头式微动；注意本例 Δδ=0——Δδ 不再
+// 参与判据（换挡点两侧的方向盘大幅摆动与原地掉头无关），只有朝向变化
+// 才携带原地掉头语义。动力学一致解不可能产生此类微动，修剪必须上报
+// 失败（返回 false）而非带病输出
 TEST(DdpTopologyPruneTest, PivotTriggersFailureSemantics) {
     PostStageFixture fixture;
     std::vector<ProfileEntry> profile;
     AppendRun(&profile, 0.05, 41, 0.5, 0.0);
-    // 微游程起点 δ=0.3、出边界 δ=0.0：|Δδ|=0.3 > 0.1 → PIVOT
-    profile.push_back({2.00, -0.03, 0.3});
-    profile.push_back({1.99, -0.03, 0.3});
-    profile.push_back({2.005, 0.5, 0.0});
+    // 微游程：位移 0.01 m（<0.05），朝向从 0 跳到 0.3 rad（δ 恒 0）
+    profile.push_back({2.00, -0.03, 0.0, 0.0});
+    profile.push_back({1.99, -0.03, 0.0, 0.3});
+    profile.push_back({2.005, 0.5, 0.0, 0.3});
     AppendRun(&profile, 0.05, 40, 0.5, 0.0);
     const auto states = MakeStates(profile);
     auto maneuvers = fixture.post_stage.buildManeuvers(
         states, fixture.post_stage.analyzeSignRuns(states));
     ASSERT_EQ(maneuvers.size(), 3);
     EXPECT_FALSE(fixture.post_stage.pruneManeuvers(&maneuvers));
+}
+
+// 判据语义钉住：微游程首末前轮转角差 0.3 rad（超过旧 Δδ 判据 0.1）但朝向
+// 不变（Δθ=0）——换挡点两侧的方向盘摆动不携带原地掉头语义，不得误判
+// PIVOT，按融化残余剔除并拼接前后同向段（修剪返回 true）
+TEST(DdpTopologyPruneTest, LargeSteerChangeWithoutHeadingChangeIsNotPivot) {
+    PostStageFixture fixture;
+    std::vector<ProfileEntry> profile;
+    AppendRun(&profile, 0.05, 41, 0.5, 0.0);
+    // 微游程：位移 0.01 m（<0.05）、δ 从 0.3 跳到 0.0（|Δδ|=0.3）、θ 恒 0
+    profile.push_back({2.00, -0.03, 0.3, 0.0});
+    profile.push_back({1.99, -0.03, 0.0, 0.0});
+    profile.push_back({2.005, 0.5, 0.0, 0.0});
+    AppendRun(&profile, 0.05, 40, 0.5, 0.0);
+    const auto states = MakeStates(profile);
+    auto maneuvers = fixture.post_stage.buildManeuvers(
+        states, fixture.post_stage.analyzeSignRuns(states));
+    ASSERT_EQ(maneuvers.size(), 3);
+    EXPECT_TRUE(fixture.post_stage.pruneManeuvers(&maneuvers));
+    // 微游程被剔除、前后同向段拼接为一段
+    const Path pruned = ReconstructPath(maneuvers);
+    ASSERT_EQ(pruned.numManeuvers(), 1);
+    EXPECT_EQ(pruned.getManeuvers()[0].direction, Direction::FORWARD);
+}
+
+// 不改写采样数据红线：修剪只打方向标签（UNKNOWN 剔除标记），保留段与
+// 剔除段的逐点数据（x/y/θ/v/δ）在修剪前后必须逐位一致——压平位置/清零
+// 速度会产生 v≡0 但 θ 变化的自相矛盾状态（ALM 侧已废弃的做法）
+TEST(DdpTopologyPruneTest, PruneDoesNotRewritePoints) {
+    PostStageFixture fixture;
+    std::vector<ProfileEntry> profile;
+    AppendRun(&profile, 0.05, 41, 0.5, 0.0);
+    profile.push_back({2.00, -0.03, 0.0, 0.0});
+    profile.push_back({1.99, -0.03, 0.0, 0.0});
+    profile.push_back({2.005, 0.5, 0.0, 0.0});
+    AppendRun(&profile, 0.05, 40, 0.5, 0.0);
+    const auto states = MakeStates(profile);
+    auto maneuvers = fixture.post_stage.buildManeuvers(
+        states, fixture.post_stage.analyzeSignRuns(states));
+    ASSERT_EQ(maneuvers.size(), 3);
+    const auto before = maneuvers;
+    EXPECT_TRUE(fixture.post_stage.pruneManeuvers(&maneuvers));
+    ASSERT_EQ(maneuvers.size(), before.size());
+    EXPECT_EQ(maneuvers[1].direction, Direction::UNKNOWN);
+    for (std::size_t m = 0; m < maneuvers.size(); ++m) {
+        ASSERT_EQ(maneuvers[m].points.size(), before[m].points.size());
+        for (std::size_t i = 0; i < maneuvers[m].points.size(); ++i) {
+            EXPECT_DOUBLE_EQ(maneuvers[m].points[i].x, before[m].points[i].x);
+            EXPECT_DOUBLE_EQ(maneuvers[m].points[i].y, before[m].points[i].y);
+            EXPECT_DOUBLE_EQ(maneuvers[m].points[i].theta,
+                             before[m].points[i].theta);
+            EXPECT_DOUBLE_EQ(maneuvers[m].points[i].getV(),
+                             before[m].points[i].getV());
+            EXPECT_DOUBLE_EQ(maneuvers[m].points[i].getDelta(),
+                             before[m].points[i].getDelta());
+        }
+    }
 }
 
 // ==================== 门控计划构建 ====================
@@ -576,6 +658,79 @@ TEST(DdpGatingCostTest, GatingDerivativesMatchFiniteDifference) {
     EXPECT_DOUBLE_EQ(eval.stages[0].lu.norm(), 0.0);
 }
 
+// ==================== 阶段二热启动映射 ====================
+
+// 独立验证热启动映射：修剪后路径的阶段一状态量（v/a/δ/ω）按累积弧长
+// 查表线性插值到重采样网格（位姿取参考位姿本身），控制量由 a/ω 差分
+// 反解并裁剪进盒——前进 1.0 m（v=0.5, δ=0.2）→ 倒退 1.0 m（v=-0.5,
+// δ=-0.3），网格间距与点距同为 0.05 m 使插值结果逐位可预期；注入单点
+// a=0.3 与 ω=0.25 阶跃，差分反解 j=Δa/dt=3.0>j_max、η=Δω/dt=2.5>η_max
+// 必须被裁剪到盒边界
+TEST(DdpStageTwoWarmStartTest, InterpolatesStatesAndClampsControls) {
+    PostStageFixture fixture;
+    std::vector<ProfileEntry> profile;
+    AppendRun(&profile, 0.05, 21, 0.5, 0.2);     // x: 0 → 1.0（前进）
+    AppendRun(&profile, -0.05, 20, -0.5, -0.3);  // x: 0.95 → 0.0（倒退）
+    // 单点阶跃注入：a 在索引 10、ω 在索引 15（差分反解产生超盒控制量）
+    profile[10].a = 0.3;
+    profile[15].omega = 0.25;
+    const auto states = MakeStates(profile);
+    auto maneuvers = fixture.post_stage.buildManeuvers(
+        states, fixture.post_stage.analyzeSignRuns(states));
+    ASSERT_EQ(maneuvers.size(), 2);
+    EXPECT_TRUE(fixture.post_stage.pruneManeuvers(&maneuvers));
+    const Path pruned = ReconstructPath(maneuvers);
+    const DdpReference reference = fixture.reference_builder.build(pruned);
+    DdpAlignedVec<DdpState> warm_states;
+    DdpAlignedVec<DdpControl> warm_controls;
+    fixture.post_stage.buildStageTwoWarmStart(pruned, reference, &warm_states,
+                                              &warm_controls);
+    ASSERT_EQ(warm_states.size(), reference.poses.size());
+    ASSERT_EQ(warm_controls.size(), reference.poses.size() - 1);
+    // 位姿取参考位姿本身
+    for (std::size_t k = 0; k < reference.poses.size(); ++k) {
+        EXPECT_DOUBLE_EQ(warm_states[k](DDP_IDX_X), reference.poses[k].x);
+        EXPECT_DOUBLE_EQ(warm_states[k](DDP_IDX_Y), reference.poses[k].y);
+        EXPECT_DOUBLE_EQ(warm_states[k](DDP_IDX_THETA),
+                         reference.poses[k].theta);
+    }
+    // v/δ 按弧长插值：前进段 0.5/0.2、倒退段 −0.5/−0.3，翻转发生在接缝
+    // 弧长（1.0 m）之后的第一个网格点（弧长累积与网格目标的浮点路径
+    // 不同，插值比值与 1.0 有 1e-15 量级差异，按 1e-9 容差对拍）
+    EXPECT_NEAR(warm_states[10](DDP_IDX_V), 0.5, 1e-9);
+    EXPECT_NEAR(warm_states[20](DDP_IDX_V), 0.5, 1e-9);
+    EXPECT_NEAR(warm_states[21](DDP_IDX_V), -0.5, 1e-9);
+    EXPECT_NEAR(warm_states[25](DDP_IDX_V), -0.5, 1e-9);
+    EXPECT_NEAR(warm_states[10](DDP_IDX_DELTA), 0.2, 1e-9);
+    EXPECT_NEAR(warm_states[25](DDP_IDX_DELTA), -0.3, 1e-9);
+    // a/ω 阶跃逐位映射到网格点（点距与网格间距一致，插值在网格点精确）
+    EXPECT_NEAR(warm_states[10](DDP_IDX_A), 0.3, 1e-9);
+    EXPECT_NEAR(warm_states[15](DDP_IDX_OMEGA), 0.25, 1e-9);
+    // 控制量差分反解并裁剪进盒：j=±3.0→±j_max、η=±2.5→±η_max，
+    // 未受阶跃影响的控制量为 0
+    const auto& limits = fixture.solver_config.inner;
+    EXPECT_DOUBLE_EQ(warm_controls[9](DDP_IDX_JERK), limits.jerk_max);
+    EXPECT_DOUBLE_EQ(warm_controls[10](DDP_IDX_JERK), -limits.jerk_max);
+    EXPECT_DOUBLE_EQ(warm_controls[14](DDP_IDX_ETA), limits.steer_accel_max);
+    EXPECT_DOUBLE_EQ(warm_controls[15](DDP_IDX_ETA), -limits.steer_accel_max);
+    EXPECT_DOUBLE_EQ(warm_controls[0](DDP_IDX_JERK), 0.0);
+    EXPECT_DOUBLE_EQ(warm_controls[0](DDP_IDX_ETA), 0.0);
+}
+
+// 数据来源链防御（评审加固）：修剪后路径点缺少阶段一状态量（v/a/δ/ω）
+// 时，热启动必须以带明确现场信息的 std::logic_error 快速失败——普通
+// A* 路径点不携带派生量，正好充当隐式契约违例的注入源
+TEST(DdpStageTwoWarmStartTest, MissingDerivedQuantitiesThrowLogicError) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = fixture.reference_builder.build(path);
+    DdpAlignedVec<DdpState> warm_states;
+    DdpAlignedVec<DdpControl> warm_controls;
+    EXPECT_THROW(fixture.post_stage.buildStageTwoWarmStart(
+                     path, reference, &warm_states, &warm_controls),
+                 std::logic_error);
+}
+
 // ==================== 阶段二门控重解 ====================
 
 // 手工构建阶段二门控计划（按参考 maneuver 元数据 + 接缝窗宽 m）
@@ -771,12 +926,88 @@ TEST(DdpStageTwoSolveTest, DualSeedWarmStartConvergesNoSlowerThanCold) {
               << std::endl;
 }
 
+// 对偶热启动种子 μ 的量级自适应上限：种子已达 μ_max 的病态情形（阶段一
+// 终端 μ 被门控推到上限）下，抬升被截断为 κ·μ̂——μ̂ 是阶段二自身按
+// ALTRO clip 公式在热启动轨迹上量测的标定初值（不抬升 μ_min 的版本）；
+// 种子量级正常时照常抬升，cap_ratio=0 关闭（既有行为逐位不变）
+TEST(DdpStageTwoSolveTest, SeedMuCapBoundsPathologicalDualSeed) {
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = BuildReference(path);
+    ApaDdpSolverConfig config = MakeSyntheticConfig();
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(config.cost, nullptr);
+    ApaDdpSolver stage_one_solver(config, &dynamics, &evaluator);
+    const auto stage_one = stage_one_solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    DdpGatingPlan plan;
+    plan.sign_gate.assign(reference.poses.size(), 1);
+    plan.seam_lookup.assign(reference.poses.size(), -1);
+    plan.dwell_v_cap.assign(reference.poses.size(), 0.0);
+    const double tracking_weight =
+        stage_one.report.history.back().tracking_weight;
+    // 构造病态种子：终端 μ 直接拉到 μ_max（模拟长视窗上阶段一终端 μ
+    // 被门控一路推到上限的情形）
+    auto pathological_seed = stage_one.final_multipliers;
+    pathological_seed.terminal_mu.setConstant(1e6);
+    // 对照组：关闭上限（默认）——首轮罚权重即病态种子本身
+    ApaDdpSolver uncapped_solver(config, &dynamics, &evaluator);
+    const auto uncapped = uncapped_solver.solveStageTwo(
+        reference, plan, stage_one.states, stage_one.controls, tracking_weight,
+        &pathological_seed);
+    ASSERT_FALSE(uncapped.report.history.empty());
+    EXPECT_DOUBLE_EQ(uncapped.report.history.front().mu, 1e6);
+    // 实验组：κ=10——首轮罚权重应被截断为 min(1e6, 10·μ̂)。μ̂ 在测试侧
+    // 按同一 ALTRO clip 公式独立量测（合成配置 mu_min=1.0、ε_μ=1e-4）
+    const auto zero_multipliers = DdpCostMultiplierState::MakeStageTwoZero(
+        reference.poses.size() - 1, plan.seam_indices.size());
+    DdpCostInput cal_input;
+    cal_input.tracking_weight = tracking_weight;
+    cal_input.gating_plan = &plan;
+    const double base_cost0 =
+        evaluator
+            .evaluate(reference, stage_one.states, stage_one.controls,
+                      zero_multipliers, cal_input)
+            .total_cost;
+    const auto& x_final = stage_one.states.back();
+    const Pose& goal = reference.poses.back();
+    const double c_norm = std::sqrt(
+        std::pow(x_final(DDP_IDX_X) - goal.x, 2.0) +
+        std::pow(x_final(DDP_IDX_Y) - goal.y, 2.0) +
+        std::pow(WrapAngle(x_final(DDP_IDX_THETA) - goal.theta), 2.0) +
+        std::pow(x_final(DDP_IDX_V), 2.0) + std::pow(x_final(DDP_IDX_A), 2.0));
+    const double mu_hat = std::min(
+        std::max(base_cost0 / std::max(c_norm * c_norm, 1e-4), 1.0), 1e6);
+    const double expected_seed = std::min(1e6, 10.0 * mu_hat);
+    config.seed_mu_cap_ratio = 10.0;
+    ApaDdpSolver capped_solver(config, &dynamics, &evaluator);
+    const auto capped = capped_solver.solveStageTwo(
+        reference, plan, stage_one.states, stage_one.controls, tracking_weight,
+        &pathological_seed);
+    ASSERT_FALSE(capped.report.history.empty());
+    EXPECT_NEAR(capped.report.history.front().mu, expected_seed,
+                expected_seed * 1e-9);
+    // 截断后求解仍然收敛（热启动良态保持）
+    EXPECT_EQ(capped.report.status, ApaDdpStatus::CONVERGED)
+        << "outer=" << capped.report.outer_iterations
+        << " pos_err=" << capped.report.terminal_position_error;
+    // 病态种子截断生效的边界断言：μ̂ 远小于 μ_max 时截断必须显著
+    EXPECT_LT(capped.report.history.front().mu, 1e6);
+    // 非法上限参数显式拒绝
+    config.seed_mu_cap_ratio = -1.0;
+    ApaDdpSolver bad_solver(config, &dynamics, &evaluator);
+    EXPECT_THROW(bad_solver.solveStageTwo(reference, plan, stage_one.states,
+                                          stage_one.controls, tracking_weight,
+                                          &pathological_seed),
+                 std::invalid_argument);
+}
+
 // ==================== 驻留插入 ====================
 
 // 驻留插入的时间拉伸语义：接缝 Δδ=0.3（T_resteer=1.1 s，T_dwell=1.32 s）
-// 超过窗口时长 1.0 s——窗内 δ 摆动剖面按 1.4 倍放慢重定时（v/ω 同比
-// 减小），时间戳严格单调、总时长增加、窗内 |v|≤v_dwell，且重排后轨迹
-// 仍通过 Trajectory::validate() 运动学门
+// 超过窗口时长 1.0 s——窗内 δ 摆动剖面按边缘斜坡重定时放慢（平台区
+// ρ=1.5、窗口边沿 ρ 平滑过渡回 1，v/ω 同比减小），时间戳严格单调、
+// 总时长增加、窗内 |v|≤v_dwell，且重排后轨迹仍通过 Trajectory::validate()
+// 运动学门
 TEST(DdpDwellInsertTest, RetimesWindowAndKeepsKinematics) {
     PostStageFixture fixture;
     // 合成阶段二输出：接缝 k=20、驻留窗 [15,25] 的直线 reversal。
@@ -836,13 +1067,15 @@ TEST(DdpDwellInsertTest, RetimesWindowAndKeepsKinematics) {
     }
     EXPECT_NEAR(output.back().getT(), 4.4, 1e-9);
     // 驻留段内 |v|≤v_dwell（拉伸后同比减小）、|δ̇|≤ω_max；
-    // 静止段 v/a 近零语义逐点断言：|v|≤0.05/1.4+裕量、|a|≤0.1/1.96+裕量
+    // 静止段 v/a 近零语义逐点断言：|v|≤0.05+裕量；|a| 的上界为窗内原剖面
+    // 幅值 0.1——边缘斜坡重定时在窗口边沿 ρ→1（速率连续过渡到窗外），
+    // 边沿样本保持原速、平台区按 1/ρ² 缩放
     const double t_dwell_start = 15 * 0.1;
     for (const auto& pt : output) {
         if (pt.getT() >= t_dwell_start - 1e-9 &&
             pt.getT() <= t_dwell_start + 1.4 + 1e-9) {
             EXPECT_LE(std::abs(pt.getV()), 0.05 + 1e-9);
-            EXPECT_LE(std::abs(pt.getA()), 0.1 / (1.4 * 1.4) + 1e-6);
+            EXPECT_LE(std::abs(pt.getA()), 0.1 + 1e-6);
             EXPECT_LE(std::abs(pt.getDeltaDot()), 0.5 + 1e-9);
         }
     }
@@ -868,6 +1101,122 @@ TEST(DdpDwellInsertTest, RetimesWindowAndKeepsKinematics) {
         << " pos=" << validation.max_kinematic_position_residual
         << " head=" << validation.max_kinematic_heading_residual_deg
         << " vel=" << validation.max_kinematic_velocity_residual;
+}
+
+// 边缘斜坡重定时钉住「窗口边界速度断点」伪影的修复：窗速未受帽约束的
+// 降级候选（窗内 |v| 达 0.3+），若窗口边界以阶跃倍率重定时，边界点对的
+// 梯形配点速度残差会顶穿 0.05 运动学门限（实测 0.06~0.12）；边缘斜坡
+// 把速率变化摊入窗口边缘，边界点对残差退回原轨迹的一致值
+TEST(DdpDwellInsertTest, FastWindowFlanksKeepBoundaryResidualBelowGate) {
+    PostStageFixture fixture;
+    // 合成降级候选剖面：接缝 k=20、驻留窗 [15,25]；v 分段线性（a 取段
+    // 斜率，段内梯形配点残差精确为零、接头处半格量级），窗口右边缘外
+    // |v| 达 0.35——窗速未受帽约束（阶段一解无门控）的典型形态；阶跃
+    // 倍率重定时下边界点对残差 ~0.2（必超 0.05 门限），边缘斜坡重定时
+    // 下退回原剖面的接头量级
+    std::vector<double> v_prof(41, 0.0), a_prof(41, 0.0), d_prof(41, 0.3),
+        w_prof(41, 0.0);
+    for (int k = 0; k <= 5; ++k) {
+        v_prof[k] = 0.5;
+        d_prof[k] = 0.0;
+    }
+    for (int k = 6; k <= 14; ++k) {
+        v_prof[k] = 0.5 - 0.05 * (k - 5);
+        a_prof[k] = -0.5;
+        d_prof[k] = 0.0;
+    }
+    for (int k = 15; k <= 25; ++k) {
+        v_prof[k] = 0.05 - 0.04 * (k - 15);
+        a_prof[k] = -0.4;
+        d_prof[k] = 0.03 * (k - 15);
+        w_prof[k] = 0.3;
+    }
+    for (int k = 26; k <= 34; ++k) {
+        v_prof[k] = -0.35 - 0.02 * (k - 25);
+        a_prof[k] = -0.2;
+    }
+    for (int k = 35; k <= 40; ++k) {
+        v_prof[k] = -0.53;
+    }
+    DdpAlignedVec<DdpState> states(41, DdpState::Zero());
+    for (std::size_t k = 0; k < states.size(); ++k) {
+        states[k](DDP_IDX_V) = v_prof[k];
+        states[k](DDP_IDX_A) = a_prof[k];
+        states[k](DDP_IDX_DELTA) = d_prof[k];
+        states[k](DDP_IDX_OMEGA) = w_prof[k];
+        if (k > 0) {
+            states[k](DDP_IDX_X) =
+                states[k - 1](DDP_IDX_X) + 0.05 * (v_prof[k - 1] + v_prof[k]);
+        }
+    }
+    // Δδ≈0.3 → T_resteer≈1.1 s、T_dwell≈1.32 s（量化 1.4 s），窗口
+    // 原长 1.0 s → 平台倍率 r=1.5（阶跃倍率下边界残差必然超阈）
+    const std::vector<DdpSeamPlan> seams = {
+        DdpSeamPlan{20, 15, 25, 0.0, 0.0, 0.0}};
+    std::vector<DdpSeamReport> reports;
+    const Trajectory output =
+        fixture.post_stage.insertDwells(states, 0.1, seams, &reports);
+    ASSERT_EQ(reports.size(), 1);
+    // 逐点对计算梯形配点速度残差（校验③同款公式）：全部点对（含窗口
+    // 边界对）都必须低于 0.05 门限
+    double worst_residual = 0.0;
+    std::size_t worst_pair = 0;
+    for (std::size_t i = 0; i + 1 < output.size(); ++i) {
+        const auto& p0 = output[i];
+        const auto& p1 = output[i + 1];
+        const double dt_pair = p1.getT() - p0.getT();
+        ASSERT_GT(dt_pair, 0.0);
+        const double residual = std::abs(
+            (p1.getV() - p0.getV()) - 0.5 * dt_pair * (p0.getA() + p1.getA()));
+        if (residual > worst_residual) {
+            worst_residual = residual;
+            worst_pair = i;
+        }
+    }
+    EXPECT_LE(worst_residual, 0.05)
+        << "worst pair=" << worst_pair << " t=" << output[worst_pair].getT()
+        << " v0=" << output[worst_pair].getV()
+        << " v1=" << output[worst_pair + 1].getV();
+}
+
+// 多接缝驻留插入：两个相距仅 2 个网格点的接缝（中间倒退段 0.1 m ≥ 0.05
+// 保留不剔除），驻留窗按 m_j 定宽后与相邻窗口部分重叠、须按前一窗口
+// 边界裁剪——输出时间戳必须严格单调递增（重叠窗口会让装配阶段重复
+// 发射状态点并造成时间戳回退，本用例钉住"逐接缝窗口严格互不重叠"的
+// 裁剪语义）
+TEST(DdpDwellInsertTest, ClippedWindowsOfCloseSeamsStayMonotonic) {
+    PostStageFixture fixture;
+    // 41 状态：前进(0..20, δ=0.2) → 倒退(21..22, δ=-0.3) → 前进(23..40,
+    // δ=0.2)；中间倒退段弧长 0.1 m ≥ 0.05，修剪保留
+    std::vector<ProfileEntry> profile;
+    AppendRun(&profile, 0.05, 21, 0.5, 0.2);
+    AppendRun(&profile, -0.05, 2, -0.5, -0.3);
+    AppendRun(&profile, 0.05, 18, 0.5, 0.2);
+    const auto states = MakeStates(profile);
+    SeamPlanAccessor accessor(fixture.post_config, &fixture.reference_builder,
+                              &fixture.solver, MakeVehicleParams());
+    const auto plans = accessor.buildStageOneSeamPlans(states, {21, 23}, 0.1);
+    ASSERT_EQ(plans.size(), 2);
+    // 窗口严格互不重叠（裁剪语义直接断言），且恒包含自身接缝
+    EXPECT_LT(plans[0].window_end, plans[1].window_begin);
+    EXPECT_LE(plans[0].window_begin, plans[0].seam_index);
+    EXPECT_GE(plans[0].window_end, plans[0].seam_index);
+    EXPECT_LE(plans[1].window_begin, plans[1].seam_index);
+    EXPECT_GE(plans[1].window_end, plans[1].seam_index);
+    std::vector<DdpSeamReport> reports;
+    const Trajectory output =
+        fixture.post_stage.insertDwells(states, 0.1, plans, &reports);
+    ASSERT_EQ(reports.size(), 2);
+    // 时间戳严格单调递增、点数恰为两个窗口拉伸量之和
+    for (std::size_t i = 1; i < output.size(); ++i) {
+        EXPECT_GT(output[i].getT(), output[i - 1].getT()) << "i=" << i;
+    }
+    EXPECT_EQ(output.size(), states.size() + 19);
+    // 逐接缝驻留时长达到 T_dwell（两接缝 Δδ=0.5，T_resteer=1.5 s）
+    for (const auto& report : reports) {
+        EXPECT_NEAR(report.t_resteer, 1.5, 1e-9);
+        EXPECT_GE(report.dwell_duration, report.t_dwell - 1e-9);
+    }
 }
 
 // ==================== 后处理主流程（端到端） ====================
@@ -906,6 +1255,39 @@ TEST(DdpPostStageTest, MeltedScenarioOutputsSingleManeuver) {
     EXPECT_NEAR(result.trajectory.back().getV(), 0.0, 0.05);
     // 无接缝：无驻留插入，总时长 = N·dt
     EXPECT_TRUE(result.diagnostics.seams.empty());
+}
+
+// 阶段二跟踪权重地板（显式钉住）：地板高于阶段一末轮退火值时，阶段二
+// 的逐轮跟踪权重必须取地板值（深退火调度下防止精化因跟踪过弱脱离热
+// 启动邻域）；地板为 0 时保持既有「冻结在阶段一末轮值」行为
+TEST(DdpPostStageTest, StageTwoTrackingWeightFloorApplies) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED)
+        << "outer=" << stage_one.report.outer_iterations;
+    ASSERT_FALSE(stage_one.report.history.empty());
+    const double stage_one_final_weight =
+        stage_one.report.history.back().tracking_weight;
+    // 地板取阶段一末轮值的 4 倍（明确高于末轮值）
+    DdpPostStageConfig floored_config;
+    floored_config.stage_two_min_tracking_weight = 4.0 * stage_one_final_weight;
+    DdpPostStage floored_post_stage(floored_config, &fixture.reference_builder,
+                                    &fixture.solver, MakeVehicleParams());
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = 1.85;
+    goal.y = 0.0;
+    goal.theta = 0.0;
+    const auto result = floored_post_stage.run(path, reference, stage_one, goal,
+                                               esdf_map, footprint_model);
+    ASSERT_TRUE(result.stage_two.has_value());
+    ASSERT_FALSE(result.stage_two->report.history.empty());
+    EXPECT_DOUBLE_EQ(result.stage_two->report.history.front().tracking_weight,
+                     4.0 * stage_one_final_weight);
 }
 
 // 保留换挡场景全链路：「前进 1.0 → 倒退 2.0」——后处理恢复 2 个 maneuver，
@@ -957,9 +1339,10 @@ TEST(DdpPostStageTest, ReversalScenarioInsertsDwellAndValidates) {
               << " stage_two_duration=" << stage_two_duration << std::endl;
 }
 
-// 回退路径：校验清单被故意破坏（终点目标放到 100 m 外，终点双指标必然
-// 不过）——必须返回原始 A* 路径转化的回退轨迹（绝不输出半成品），且
-// 结构化诊断完整（失败项名称 + 量化值 + 阈值）
+// 回退路径：两个候选的合法性门都被故意破坏（终点目标放到 100 m 外，
+// 阶段二精化候选与阶段一降级候选的终点双指标必然都不过）——必须返回
+// 原始 A* 路径转化的回退轨迹（绝不输出未过合法性门的轨迹），且结构化
+// 诊断完整（失败项名称 + 量化值 + 阈值 + 降级原因）
 TEST(DdpPostStageTest, FallbackOnValidationFailure) {
     PostStageFixture fixture;
     const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
@@ -986,18 +1369,444 @@ TEST(DdpPostStageTest, FallbackOnValidationFailure) {
     EXPECT_TRUE(result.trajectory.back().hasT());
 }
 
-// 回退路径：阶段一解中混入 PIVOT 微游程（合成注入，模拟求解器吐出
-// 原地打轮式微动）——修剪触发失败语义，直接回退原始路径，不再进入
-// 阶段二重解
+// 分级降级：阶段二门控重解预算耗尽未收敛（外层上限置零注入失败），但
+// 阶段一解干净收敛——不得回退原始 A* 路径，应输出阶段一降级候选
+// （阶段一解 + 修剪 + 驻留插入，过同一合法性门），状态码与诊断如实
+// 反映降级（绝不伪装成阶段二完全成功）
+TEST(DdpPostStageTest, StageTwoFailureOutputsStageOneCandidate) {
+    // 独立装配：阶段二外层预算置零，门控重解必然 MAX_OUTER_ITERATIONS
+    const ApaDdpSolverConfig zero_budget_config = [] {
+        ApaDdpSolverConfig config = MakeSyntheticConfig();
+        config.stage_two_max_outer_iterations = 0;
+        return config;
+    }();
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator cost_evaluator(zero_budget_config.cost, nullptr);
+    ApaDdpSolver solver(zero_budget_config, &dynamics, &cost_evaluator);
+    const DdpReferenceBuilder reference_builder(DdpReferenceBuilderConfig{},
+                                                MakeVehicleParams());
+    DdpPostStage post_stage(DdpPostStageConfig{}, &reference_builder, &solver,
+                            MakeVehicleParams());
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = reference_builder.build(path);
+    const auto stage_one = solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    goal.y = 0.0;
+    goal.theta = 0.0;
+    const auto result = post_stage.run(path, reference, stage_one, goal,
+                                       esdf_map, footprint_model);
+    EXPECT_EQ(result.status, DdpPostStageStatus::SUCCESS_STAGE_ONE_ONLY)
+        << "failed_check=" << result.diagnostics.failed_check
+        << " measured=" << result.diagnostics.measured_value;
+    // 降级不伪装：降级原因如实记录，used_fallback 保持 false（输出的是
+    // 优化成果而非原始路径），合法性门量测全过
+    EXPECT_FALSE(result.used_fallback);
+    EXPECT_EQ(result.diagnostics.degraded_reason, "stage_two_convergence");
+    ASSERT_TRUE(result.stage_two.has_value());
+    for (const auto& check : result.diagnostics.gate_checks) {
+        EXPECT_TRUE(check.passed) << check.name;
+    }
+    // 降级输出语义：阶段一解 + 驻留插入——时间戳严格单调、终点静止、
+    // 恰好一个接缝（保留换挡），物理方向段数不增
+    ASSERT_FALSE(result.trajectory.empty());
+    for (std::size_t i = 1; i < result.trajectory.size(); ++i) {
+        EXPECT_GT(result.trajectory[i].getT(), result.trajectory[i - 1].getT());
+    }
+    EXPECT_NEAR(result.trajectory.back().getV(), 0.0, 0.05);
+    ASSERT_EQ(result.diagnostics.seams.size(), 1);
+    EXPECT_EQ(result.diagnostics.input_maneuver_count, 2);
+    EXPECT_LE(result.diagnostics.output_maneuver_count, 2);
+}
+
+// 分级降级的兜底边界：阶段二未收敛（外层上限置零）且阶段一降级候选也
+// 不过合法性门（终点目标放到 100 m 外）——两级候选依次失败后回退原始
+// A* 路径，诊断同时携带降级原因与降级候选的首个失败门项
+TEST(DdpPostStageTest, StageOneCandidateAlsoIllegalFallsBack) {
+    const ApaDdpSolverConfig zero_budget_config = [] {
+        ApaDdpSolverConfig config = MakeSyntheticConfig();
+        config.stage_two_max_outer_iterations = 0;
+        return config;
+    }();
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator cost_evaluator(zero_budget_config.cost, nullptr);
+    ApaDdpSolver solver(zero_budget_config, &dynamics, &cost_evaluator);
+    const DdpReferenceBuilder reference_builder(DdpReferenceBuilderConfig{},
+                                                MakeVehicleParams());
+    DdpPostStage post_stage(DdpPostStageConfig{}, &reference_builder, &solver,
+                            MakeVehicleParams());
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = reference_builder.build(path);
+    const auto stage_one = solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = 100.0;
+    goal.y = 100.0;
+    goal.theta = 0.0;
+    const auto result = post_stage.run(path, reference, stage_one, goal,
+                                       esdf_map, footprint_model);
+    EXPECT_EQ(result.status, DdpPostStageStatus::VALIDATION_FAILED);
+    EXPECT_TRUE(result.used_fallback);
+    EXPECT_EQ(result.diagnostics.degraded_reason, "stage_two_convergence");
+    EXPECT_EQ(result.diagnostics.failed_check, "terminal_position");
+    ASSERT_FALSE(result.trajectory.empty());
+    EXPECT_NEAR(result.trajectory.back().x, 1.85, 1e-6);
+}
+
+// 校验分层：质量指标全面超标（窗端 ω 0.56 超包络、接缝速度 0.1 超阈、
+// 窗内速度 0.2 超帽、驻留时长不足、maneuver 数倒挂、控制盒过冲 0.5）但
+// 合法性门全清的候选必须放行——质量指标全量记录（含逐项 passed 标记）
+// 供方案比较，不再作为回退触发条件
+TEST(DdpValidationLayerTest, MetricViolationsDoNotFailGate) {
+    PostStageFixture fixture;
+    // 先跑通保留换挡场景，取得合法输出轨迹与阶段二结果作为校验输入基底
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    DdpPostStageDiagnostics diag;
+    // maneuver 数倒挂注入：输入 1 段、输出 2 段——旧判据下必然回退（且
+    // 回退目标的 maneuver 数只会更多，逻辑倒挂），分层后仅作质量记录
+    diag.input_maneuver_count = 1;
+    diag.seams.push_back(DdpSeamReport{/*seam_index=*/1,
+                                       /*delta_delta=*/0.3,
+                                       /*t_resteer=*/0.5,
+                                       /*t_dwell=*/0.6,
+                                       /*dwell_duration=*/0.5,
+                                       /*seam_speed=*/0.1,
+                                       /*window_max_speed=*/0.2,
+                                       /*window_end_omega=*/0.56});
+    // 控制盒过冲注入：|j| 超盒 0.5（> 0.3 参考阈值）——j/η 不进入输出
+    // 轨迹契约，物理可执行性由状态幅值门独立保证
+    auto doctored_controls = good.stage_two->controls;
+    doctored_controls[0](DDP_IDX_JERK) =
+        fixture.solver_config.inner.jerk_max + 0.5;
+    EXPECT_TRUE(accessor.validateOutput(good.trajectory, good.stage_two->states,
+                                        doctored_controls, path.length(), goal,
+                                        esdf_map, footprint_model, &diag));
+    EXPECT_TRUE(diag.failed_check.empty());
+    // 质量指标全量记录：控制过冲/接缝四项/manuever 数/长度比逐项在场，
+    // 注入的超标项 passed=false 但未否决输出
+    std::vector<std::string> metric_names;
+    metric_names.reserve(diag.metric_checks.size());
+    for (const auto& check : diag.metric_checks) {
+        metric_names.push_back(check.name);
+    }
+    EXPECT_THAT(metric_names,
+                ::testing::UnorderedElementsAre(
+                    "control_amplitude", "seam_zero_speed", "dwell_duration",
+                    "dwell_window_speed", "dwell_window_end_omega",
+                    "maneuver_count", "length_ratio"));
+    const auto find_metric = [&diag](const std::string& name) {
+        return std::find_if(diag.metric_checks.begin(),
+                            diag.metric_checks.end(),
+                            [&name](const auto& c) { return c.name == name; });
+    };
+    EXPECT_FALSE(find_metric("control_amplitude")->passed);
+    EXPECT_FALSE(find_metric("seam_zero_speed")->passed);
+    EXPECT_FALSE(find_metric("dwell_duration")->passed);
+    EXPECT_FALSE(find_metric("dwell_window_speed")->passed);
+    EXPECT_FALSE(find_metric("dwell_window_end_omega")->passed);
+    EXPECT_FALSE(find_metric("maneuver_count")->passed);
+    EXPECT_TRUE(find_metric("length_ratio")->passed);
+    // 死判据已移除：任何一层都不得再出现 dwell_resteer（构造上
+    // t_dwell=κ_pad·max(t_resteer,T_shift) 且 κ_pad>=1，该判据恒成立）
+    for (const auto& check : diag.gate_checks) {
+        EXPECT_NE(check.name, "dwell_resteer");
+    }
+    for (const auto& check : diag.metric_checks) {
+        EXPECT_NE(check.name, "dwell_resteer");
+    }
+}
+
+// 校验分层：合法性门失败（终点位置 100 m 外）必须拦截，且门量测不
+// 短路——碰撞/终点双指标/运动学四残差/状态幅值八项全量在场，失败项
+// 为首个未过门项，量化值/阈值正确
+TEST(DdpValidationLayerTest, GateFailureRecordedAlongsideAllMeasurements) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    DdpPostStageDiagnostics diag;
+    diag.input_maneuver_count = 2;
+    TrajectoryPoint far_goal;
+    far_goal.x = 100.0;
+    far_goal.y = 100.0;
+    EXPECT_FALSE(accessor.validateOutput(
+        good.trajectory, good.stage_two->states, good.stage_two->controls,
+        path.length(), far_goal, esdf_map, footprint_model, &diag));
+    EXPECT_EQ(diag.failed_check, "terminal_position");
+    EXPECT_GT(diag.measured_value, diag.threshold);
+    std::vector<std::string> gate_names;
+    gate_names.reserve(diag.gate_checks.size());
+    for (const auto& check : diag.gate_checks) {
+        gate_names.push_back(check.name);
+    }
+    EXPECT_THAT(gate_names,
+                ::testing::UnorderedElementsAre(
+                    "collision", "terminal_position", "terminal_heading",
+                    "kinematic_position", "kinematic_heading",
+                    "kinematic_velocity", "kinematic_steer", "amplitude",
+                    "amplitude_delta", "amplitude_omega"));
+}
+
+// 合法性门：状态幅值（v/a/δ/ω 输出轨迹契约直接消费的量）超标必须拦截——
+// 注入 |v| 超过 v_max + amplitude_check_tol 的状态，门判失败且诊断指向
+// amplitude；控制量同量级超标（上例）则不否决，两项归类不容互换
+TEST(DdpValidationLayerTest, StateAmplitudeViolationFailsGate) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    DdpPostStageDiagnostics diag;
+    diag.input_maneuver_count = 2;
+    auto doctored_states = good.stage_two->states;
+    doctored_states[0](DDP_IDX_V) = fixture.solver_config.cost.v_max +
+                                    fixture.post_config.amplitude_check_tol +
+                                    0.01;
+    EXPECT_FALSE(accessor.validateOutput(
+        good.trajectory, doctored_states, good.stage_two->controls,
+        path.length(), goal, esdf_map, footprint_model, &diag));
+    EXPECT_EQ(diag.failed_check, "amplitude");
+    EXPECT_DOUBLE_EQ(diag.threshold, fixture.post_config.amplitude_check_tol);
+}
+
+// 门项边界值：终点位置误差在阈值内侧（−1e-6 m）必须放行、外侧
+//（+1e-6 m）必须拦截——钉住"不得放宽"的边界语义，防止未来改动悄悄
+// 放宽门限。（不构造"恰好等于阈值"：浮点下 (x+tol)−x 与 tol 有 1 ulp
+// 量级偏差，恰等情形不具备可复现性，内侧/外侧 ±1e-6 是稳健的边界语义）
+TEST(DdpValidationLayerTest, TerminalPositionBoundaryIsInclusive) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    // 阈值内侧：goal 置于输出终点正 x 方向 阈值−1e-6 m 处 → 放行
+    TrajectoryPoint boundary_goal;
+    boundary_goal.x =
+        good.trajectory.back().x +
+        fixture.post_config.validation.max_terminal_position_error - 1e-6;
+    boundary_goal.y = good.trajectory.back().y;
+    boundary_goal.theta = good.trajectory.back().theta;
+    DdpPostStageDiagnostics diag_inside;
+    diag_inside.input_maneuver_count = 2;
+    EXPECT_TRUE(accessor.validateOutput(
+        good.trajectory, good.stage_two->states, good.stage_two->controls,
+        path.length(), boundary_goal, esdf_map, footprint_model, &diag_inside));
+    // 阈值外侧（+1e-6 m）→ 拦截且诊断指向 terminal_position
+    boundary_goal.x =
+        good.trajectory.back().x +
+        fixture.post_config.validation.max_terminal_position_error + 1e-6;
+    DdpPostStageDiagnostics diag_outside;
+    diag_outside.input_maneuver_count = 2;
+    EXPECT_FALSE(accessor.validateOutput(
+        good.trajectory, good.stage_two->states, good.stage_two->controls,
+        path.length(), boundary_goal, esdf_map, footprint_model,
+        &diag_outside));
+    EXPECT_EQ(diag_outside.failed_check, "terminal_position");
+}
+
+// 门项边界值：状态幅值违反度在 AL 平衡容差内侧（−1e-6）必须放行且量测
+// 不超过容差（拦截侧已由 StateAmplitudeViolationFailsGate 覆盖）——确认
+// 放行来自边界语义而非其他裕量
+TEST(DdpValidationLayerTest, AmplitudeBoundaryIsInclusive) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    auto doctored_states = good.stage_two->states;
+    doctored_states[0](DDP_IDX_V) = fixture.solver_config.cost.v_max +
+                                    fixture.post_config.amplitude_check_tol -
+                                    1e-6;
+    DdpPostStageDiagnostics diag;
+    diag.input_maneuver_count = 2;
+    EXPECT_TRUE(accessor.validateOutput(
+        good.trajectory, doctored_states, good.stage_two->controls,
+        path.length(), goal, esdf_map, footprint_model, &diag));
+    const auto amplitude_check =
+        std::find_if(diag.gate_checks.begin(), diag.gate_checks.end(),
+                     [](const auto& c) { return c.name == "amplitude"; });
+    ASSERT_NE(amplitude_check, diag.gate_checks.end());
+    EXPECT_TRUE(amplitude_check->passed);
+    EXPECT_LE(amplitude_check->measured,
+              fixture.post_config.amplitude_check_tol);
+    EXPECT_GT(amplitude_check->measured, 0.0);
+}
+
+// δ/ω 按量相对容差：δ 在低速/驻留点（|v|<v_dwell）的超限不产生曲率、
+// 豁免复检（与「停稳后前轮转角无物理要求」同一设计语义）；行驶点的
+// δ 超限按相对容差 0.2% 判定；ω 全点复检。原统一绝对容差在 δ 量纲上
+// 等价于允许 κ=113%·κ_max（校验门比验收门宽），按量分设后口径对齐
+TEST(DdpValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    const double delta_max = fixture.solver_config.cost.delta_max;
+    // 驻留点（|v|<v_dwell）δ 超限 50%：豁免，门应通过
+    {
+        auto states = good.stage_two->states;
+        states[0](DDP_IDX_V) = 0.0;
+        states[0](DDP_IDX_DELTA) = 1.5 * delta_max;
+        DdpPostStageDiagnostics diag;
+        diag.input_maneuver_count = 2;
+        EXPECT_TRUE(accessor.validateOutput(
+            good.trajectory, states, good.stage_two->controls, path.length(),
+            goal, esdf_map, footprint_model, &diag));
+        const auto check = std::find_if(
+            diag.gate_checks.begin(), diag.gate_checks.end(),
+            [](const auto& c) { return c.name == "amplitude_delta"; });
+        ASSERT_NE(check, diag.gate_checks.end());
+        EXPECT_TRUE(check->passed);
+    }
+    // 行驶点（|v|≥v_dwell）δ 超限 0.3%（>0.2% 相对容差）：拦截并指向
+    // amplitude_delta
+    {
+        auto states = good.stage_two->states;
+        states[0](DDP_IDX_V) = fixture.post_config.v_dwell;
+        states[0](DDP_IDX_DELTA) = 1.003 * delta_max;
+        DdpPostStageDiagnostics diag;
+        diag.input_maneuver_count = 2;
+        EXPECT_FALSE(accessor.validateOutput(
+            good.trajectory, states, good.stage_two->controls, path.length(),
+            goal, esdf_map, footprint_model, &diag));
+        EXPECT_EQ(diag.failed_check, "amplitude_delta");
+        EXPECT_DOUBLE_EQ(diag.threshold,
+                         fixture.post_config.amplitude_check_rel_tol);
+    }
+    // 行驶点 δ 在容差内侧（+0.1%）：放行
+    {
+        auto states = good.stage_two->states;
+        states[0](DDP_IDX_V) = fixture.post_config.v_dwell;
+        states[0](DDP_IDX_DELTA) = 1.001 * delta_max;
+        DdpPostStageDiagnostics diag;
+        diag.input_maneuver_count = 2;
+        EXPECT_TRUE(accessor.validateOutput(
+            good.trajectory, states, good.stage_two->controls, path.length(),
+            goal, esdf_map, footprint_model, &diag));
+    }
+}
+
+// ω 按量相对容差：全点复检（执行器速率在驻留转向中同样工作），超限
+// 0.3% 拦截并指向 amplitude_omega
+TEST(DdpValidationLayerTest, OmegaViolationFailsGateWithRelTol) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, -1.0});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = -1.0;
+    const auto good = fixture.post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    ASSERT_EQ(good.status, DdpPostStageStatus::SUCCESS);
+    ValidateOutputAccessor accessor(fixture.post_config,
+                                    &fixture.reference_builder, &fixture.solver,
+                                    MakeVehicleParams());
+    auto states = good.stage_two->states;
+    states[0](DDP_IDX_OMEGA) = 1.003 * fixture.solver_config.cost.omega_max;
+    DdpPostStageDiagnostics diag;
+    diag.input_maneuver_count = 2;
+    EXPECT_FALSE(accessor.validateOutput(
+        good.trajectory, states, good.stage_two->controls, path.length(), goal,
+        esdf_map, footprint_model, &diag));
+    EXPECT_EQ(diag.failed_check, "amplitude_omega");
+    EXPECT_DOUBLE_EQ(diag.threshold,
+                     fixture.post_config.amplitude_check_rel_tol);
+}
+
+// 回退路径：阶段一解中混入 PIVOT 微游程（合成注入：微弧长 + 朝向跳变
+// 0.3 rad，模拟携带未愈合缺陷的解）——修剪触发失败语义，直接回退原始
+// 路径，不再进入任何候选评估
 TEST(DdpPostStageTest, PivotScenarioFallsBack) {
     PostStageFixture fixture;
     const Path path = BuildXPolyline({0.0, 2.0});
-    // 合成阶段一结果：前进 2 m → PIVOT 微游程（δ 跳变 0.3）→ 前进继续
+    // 合成阶段一结果：前进 2 m → PIVOT 微游程（θ 跳变 0.3，δ 恒 0）→ 前进继续
     std::vector<ProfileEntry> profile;
     AppendRun(&profile, 0.05, 41, 0.5, 0.0);
-    profile.push_back({2.00, -0.03, 0.3});
-    profile.push_back({1.99, -0.03, 0.3});
-    profile.push_back({2.005, 0.5, 0.0});
+    profile.push_back({2.00, -0.03, 0.0, 0.0});
+    profile.push_back({1.99, -0.03, 0.0, 0.3});
+    profile.push_back({2.005, 0.5, 0.0, 0.3});
     AppendRun(&profile, 0.05, 40, 0.5, 0.0);
     ApaDdpStageOneResult stage_one;
     stage_one.states = MakeStates(profile);

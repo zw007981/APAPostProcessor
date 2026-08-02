@@ -13,7 +13,8 @@ AlmManeuverMelter::AlmManeuverMelter(AlmManeuverMelterConfig config)
         !std::isfinite(config_.melt_arc_threshold) ||
         !(config_.melt_heading_threshold > 0.0) ||
         !std::isfinite(config_.melt_heading_threshold)) {
-        throw std::invalid_argument("AlmManeuverMelterConfig 融化阈值必须为正有限值");
+        throw std::invalid_argument(
+            "AlmManeuverMelterConfig 融化阈值必须为正有限值");
     }
     if (config_.samples_per_segment < 2) {
         throw std::invalid_argument("AlmManeuverMelterConfig 采样数须 >= 2");
@@ -74,8 +75,7 @@ std::vector<AlmManeuverMeltInfo> AlmManeuverMelter::detectMelting(
     for (std::size_t m = 0; m < estimates.size(); ++m) {
         const int first_segment = segment_offset;
         const int last_segment =
-            segment_offset +
-            static_cast<int>(estimates[m].segments.size()) - 1;
+            segment_offset + static_cast<int>(estimates[m].segments.size()) - 1;
         // θ/s 位置量跨段连续，Maneuver 的净位移直接由首末段端点精确取值
         const double s_start =
             trajectory.evaluateSegment(first_segment, 0.0, 0).y();
@@ -109,8 +109,7 @@ std::vector<AlmManeuverMeltInfo> AlmManeuverMelter::detectMelting(
             info.classification = AlmMeltClass::MELTED;
         }
         infos.push_back(info);
-        segment_offset =
-            last_segment + 1;
+        segment_offset = last_segment + 1;
     }
     return infos;
 }

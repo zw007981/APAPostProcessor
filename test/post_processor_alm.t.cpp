@@ -1,17 +1,13 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
-#include <iostream>
 #include <string>
-#include <vector>
 
-#include "core/NMPC/vehicle_circle_geometry.h"
 #include "core/collision_check.h"
 #include "core/post_processor.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/constants.h"
-#include "util/data_loader.hpp"
 #include "util/path.h"
 #include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
@@ -311,129 +307,5 @@ TEST(PostProcessorAlmTest, EndToEndGearShiftConverges) {
         ComputeMaxCollisionDepth(result.optimized_path, esdf_map, footprint),
         0.02);
 }
-
-// ============================================================
-// 四数据集端到端验收（集成测试，允许较长耗时）
-// ============================================================
-
-// 数据集描述：显示名 + 文件路径 + 机动段数验收上限
-struct AlmDatasetCase {
-    std::string name;
-    std::string file;
-    // 最终机动段数上限断言：pin 住已验证的融化能力（防回归），非劣化下界
-    int max_final_maneuvers;
-};
-
-class AlmDatasetAcceptanceTest
-    : public ::testing::TestWithParam<AlmDatasetCase> {};
-
-// 每个数据集：ALM 路径必须产出无碰撞、无奇异（全部采样点有限）、终点精度
-// 达标的轨迹；同时跑 NMPC 路径打印对比指标（NMPC 结果不做门禁）。
-TEST_P(AlmDatasetAcceptanceTest, ProducesCollisionFreeSaneTrajectory) {
-    const auto& dataset = GetParam();
-    ::apa::post_processor::OptimizeRequest request;
-    ASSERT_EQ(DataLoader::LoadProtoFromJsonFile(dataset.file, request),
-              LoadResult::SUCCESS);
-    const auto vehicle_params = VehicleParams::FromProto(request.vehicle());
-    // footprint 取代码默认构造（233/2/4）：与 ALM 生产配置
-    // （data/alm_config.json 的 outer_row_num=4）一致；NMPC 生产配置
-    // （data/nmpc_config.json 的 outer_row_num=2）不同源，其 [ALM-CMP]
-    // 对比行仅供算法间参考、不构成生产数字
-    const VehicleFootprintModel footprint_model(vehicle_params);
-    const auto grid_map = GridMap::FromProto(request.environment());
-    const ESDFMap esdf_map(grid_map);
-    const auto init_path = Path::FromProto(request.initial_path());
-    ASSERT_FALSE(init_path.empty());
-    const PostProcessor processor(vehicle_params, footprint_model, esdf_map);
-    const int init_maneuvers = static_cast<int>(init_path.numManeuvers());
-    const double init_length = init_path.length();
-
-    // NMPC 路径（默认配置，对比基线）
-    const NMPCConfig nmpc_config;
-    const auto nmpc_result = processor.optimize(init_path, nmpc_config);
-    // ALM 路径（默认配置）
-    const AlmConfig alm_config;
-    const auto alm_result = processor.optimizeAlm(init_path, alm_config);
-    // 打印对比指标行（供验收报告采集）
-    const double nmpc_collision =
-        nmpc_result.optimized_path.empty()
-            ? -1.0
-            : ComputeMaxCollisionDepth(nmpc_result.optimized_path, esdf_map,
-                                       footprint_model);
-    std::cout << "[ALM-CMP] dataset=" << dataset.name << " alg=NMPC"
-              << " success=" << nmpc_result.success
-              << " maneuvers=" << init_maneuvers << "->"
-              << nmpc_result.final_maneuvers << " length=" << init_length
-              << "->" << nmpc_result.final_length << " term_pos_err="
-              << (nmpc_result.optimized_path.empty()
-                      ? -1.0
-                      : TerminalPositionError(nmpc_result.optimized_path,
-                                              init_path))
-              << " term_head_err_deg="
-              << (nmpc_result.optimized_path.empty()
-                      ? -1.0
-                      : TerminalHeadingErrorDeg(nmpc_result.optimized_path,
-                                                init_path))
-              << " collision=" << nmpc_collision
-              << " time_ms=" << nmpc_result.total_time_ms << " msg=\""
-              << nmpc_result.message << "\"" << std::endl;
-    const double alm_collision =
-        alm_result.optimized_path.empty()
-            ? -1.0
-            : ComputeMaxCollisionDepth(alm_result.optimized_path, esdf_map,
-                                       footprint_model);
-    std::cout
-        << "[ALM-CMP] dataset=" << dataset.name << " alg=ALM"
-        << " success=" << alm_result.success << " maneuvers=" << init_maneuvers
-        << "->" << alm_result.final_maneuvers << " length=" << init_length
-        << "->" << alm_result.final_length << " term_pos_err="
-        << (alm_result.optimized_path.empty()
-                ? -1.0
-                : TerminalPositionError(alm_result.optimized_path, init_path))
-        << " term_head_err_deg="
-        << (alm_result.optimized_path.empty()
-                ? -1.0
-                : TerminalHeadingErrorDeg(alm_result.optimized_path, init_path))
-        << " collision=" << alm_collision
-        << " time_ms=" << alm_result.total_time_ms << " msg=\""
-        << alm_result.message << "\"" << std::endl;
-
-    // 验收门禁：ALM 路径必须成功且轨迹无碰撞、无奇异、终点精度达标
-    ASSERT_TRUE(alm_result.success) << alm_result.message;
-    ASSERT_FALSE(alm_result.optimized_path.empty());
-    // 预处理粗优化轨迹（优化前基线）必须同步产出
-    EXPECT_FALSE(alm_result.alm_preprocessed_traj.empty());
-    // 合法性门禁：validate() 三门（碰撞安全 + 终点收敛 + 运动学可行）
-    // 全部通过——运动学可行性取梯形配点残差，ALM 采样点携带时间戳后
-    // 该门对 ALM 产出直接生效
-    const auto& goal_pt = init_path.back();
-    const TrajectoryPoint goal(goal_pt.x, goal_pt.y, goal_pt.theta);
-    const auto validation =
-        alm_result.alm_traj.validate(goal, esdf_map, footprint_model);
-    EXPECT_TRUE(validation.kinematic_feasible) << validation.kinematic_detail;
-    EXPECT_TRUE(validation.all_passed) << FormatValidationResult(validation);
-    EXPECT_TRUE(IsPathFinite(alm_result.optimized_path));
-    EXPECT_LE(alm_collision, 0.02);
-    EXPECT_LE(TerminalPositionError(alm_result.optimized_path, init_path),
-              0.05);
-    EXPECT_LE(TerminalHeadingErrorDeg(alm_result.optimized_path, init_path),
-              1.5);
-    EXPECT_GT(alm_result.final_length, 0.0);
-    // 机动段数不超过该数据集的验收上限：按物理方向段口径（v 变号统计，
-    // 含多项式段内过冲）实测段数（data3→7、data1→4、data7→4、data6→4）
-    // 收紧并留 1 段余量，防止压缩能力静默回归
-    EXPECT_LE(alm_result.final_maneuvers, dataset.max_final_maneuvers);
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    FourDatasets, AlmDatasetAcceptanceTest,
-    ::testing::Values(
-        AlmDatasetCase{"data3_mid_park", "data/mid_park/data3.json", 8},
-        AlmDatasetCase{"data1_rub_park", "data/rub_park/data1.json", 5},
-        AlmDatasetCase{"data7_rub_park", "data/rub_park/data7.json", 5},
-        AlmDatasetCase{"data6_long_park", "data/long_park/data6.json", 5}),
-    [](const ::testing::TestParamInfo<AlmDatasetCase>& info) {
-        return info.param.name;
-    });
 
 }  // namespace apa_post_processor

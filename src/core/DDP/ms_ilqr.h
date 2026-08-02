@@ -46,9 +46,21 @@ struct MsIlqrConfig {
     // µ_m 更新的缺陷范数门限 κ_d：仅当 ‖d‖₂ > κ_d 时刷新权重，
     // 避免缺陷接近归零后权重被无意义地刷新
     double merit_kappa_d{1e-6};
+    // µ_m 上限（默认 1e9 ≈ 不封顶，既有行为不变）：自适应规则在小缺陷下
+    // 会把权重放大到病态量级（实测 µ_m 冲到 8e4、放行「以任意代价歼灭
+    // 残余缺陷」的破坏性步骤）；封顶保留大缺陷下的修复优先级提升能力，
+    // 同时把单次交易的代价增量限制在 cap·Δ‖d‖ 以内
+    double merit_mu_max{1e9};
     // 可选段间惩罚权重 w_d（Q_d = w_d·I₇，默认 0 = 关闭）：回推经过打靶
     // 节点时注入 s[i] -= Q_d·d[i]、S[i] += Q_d，促使段从左侧也向缺陷靠拢
     double inter_segment_weight{0.0};
+    // 前向 rollout 定义域守卫（L8.3，地图范围外扩该米数；0 = 关闭）：
+    // AL 幅值约束只覆盖 v/a/δ/ω、Box-QP 只约束控制，位置 (x,y) 不受任何
+    // 约束——越出「地图 ⊕ margin」的试探候选直接判失败回溯（约束优化的
+    // 基本要求：试探步不得离开问题定义域），而不是拿去评价 merit。
+    // margin 取若干米而非严格边界：L8.1 恢复场主导的合法小幅越界恢复
+    // 过程不被否掉
+    double domain_guard_margin{2.0};
 };
 // 内层求解状态：失败语义（正则化溢出/迭代超限）经状态码上报外层，
 // 供回退逻辑消费；仅输入契约违例抛异常
@@ -87,6 +99,9 @@ struct MsIlqrResult {
     double final_cost{0.0};
     double initial_defect_norm{0.0};
     double final_defect_norm{0.0};
+    // 定义域守卫（L8.3）本次求解拒绝的试探候选数（L8.4 分项归因：
+    // 「出界已被拦住」与「出界不再发生」的区分证据）
+    std::int64_t domain_guard_rejections{0};
 };
 // MS-iLQR 内层求解器（Gauss-Newton，丢弃动力学二阶张量项）：
 // 缺陷感知 Riccati 回推（右端索引约定 d[i] ≡ f(x[i-1],u[i-1]) - x[i]，
@@ -255,6 +270,8 @@ class MsIlqrSolver {
     std::int64_t linear_rollout_count_{0};
     std::int64_t nonlinear_rollout_count_{0};
     std::int64_t qp_factorization_count_{0};
+    // 定义域守卫拒绝的试探候选数（每次 solve 清零）
+    std::int64_t domain_guard_rejections_{0};
     // 逐轮诊断历史（仅接受迭代）
     std::vector<MsIlqrIterationRecord> history_;
 };

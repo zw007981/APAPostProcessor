@@ -5,9 +5,9 @@
 
 namespace apa_post_processor {
 // 顶层字段：proto 字段名与 C++ 成员名一致，仅需两个参数
-#define LOAD_(proto, field)             \
-    if ((proto).has_##field()) {        \
-        field = (proto).field();        \
+#define LOAD_(proto, field)      \
+    if ((proto).has_##field()) { \
+        field = (proto).field(); \
     }
 // 子配置字段：proto 字段名与 C++ 成员路径不同，需要三个参数
 #define LOAD_SUB_(proto, proto_field, member) \
@@ -72,8 +72,10 @@ void NMPCConfig::loadFromProto(
         LOAD_SUB_(b, weight_reg, bspline.weight_reg);
         LOAD_SUB_(b, collision_margin, bspline.collision_margin);
         LOAD_SUB_(b, anchor_extension_length, bspline.anchor_extension_length);
-        LOAD_SUB_(b, min_segment_arc_length_for_degradation, bspline.min_segment_arc_length_for_degradation);
-        LOAD_SUB_(b, collision_validation_tolerance, bspline.collision_validation_tolerance);
+        LOAD_SUB_(b, min_segment_arc_length_for_degradation,
+                  bspline.min_segment_arc_length_for_degradation);
+        LOAD_SUB_(b, collision_validation_tolerance,
+                  bspline.collision_validation_tolerance);
         LOAD_SUB_(b, lbfgs_max_iterations, bspline.lbfgs_max_iterations);
         LOAD_SUB_(b, lbfgs_epsilon, bspline.lbfgs_epsilon);
         LOAD_SUB_(b, lbfgs_epsilon_rel, bspline.lbfgs_epsilon_rel);
@@ -92,17 +94,20 @@ void NMPCConfig::loadFromProto(
         LOAD_SUB_(s, weight_v_ref, speed.weight_v_ref);
         LOAD_SUB_(s, weight_a_sq, speed.weight_a_sq);
         LOAD_SUB_(s, weight_jerk_sq, speed.weight_jerk_sq);
-        LOAD_SUB_(s, time_reintegration_epsilon, speed.time_reintegration_epsilon);
+        LOAD_SUB_(s, time_reintegration_epsilon,
+                  speed.time_reintegration_epsilon);
         LOAD_SUB_(s, max_lateral_accel, speed.max_lateral_accel);
         LOAD_SUB_(s, esdf_danger_margin, speed.esdf_danger_margin);
     }
     if (proto.has_diff_flat()) {
         const auto& df = proto.diff_flat();
-        LOAD_SUB_(df, curvature_denominator_epsilon, diff_flat.curvature_denominator_epsilon);
+        LOAD_SUB_(df, curvature_denominator_epsilon,
+                  diff_flat.curvature_denominator_epsilon);
     }
     if (proto.has_resampler()) {
         const auto& r = proto.resampler();
-        LOAD_SUB_(r, n_min_active_per_segment, resampler.n_min_active_per_segment);
+        LOAD_SUB_(r, n_min_active_per_segment,
+                  resampler.n_min_active_per_segment);
         LOAD_SUB_(r, nominal_step_s, resampler.nominal_step_s);
         LOAD_SUB_(r, density_w_base, resampler.density_w_base);
         LOAD_SUB_(r, density_w_kappa, resampler.density_w_kappa);
@@ -110,9 +115,12 @@ void NMPCConfig::loadFromProto(
         LOAD_SUB_(r, dense_step_dist, resampler.dense_step_dist);
         LOAD_SUB_(r, steer_padding_epsilon, resampler.steer_padding_epsilon);
         LOAD_SUB_(r, steer_safe_rate_ratio, resampler.steer_safe_rate_ratio);
-        LOAD_SUB_(r, min_segment_arc_length_for_degradation, resampler.min_segment_arc_length_for_degradation);
-        LOAD_SUB_(r, time_reintegration_epsilon, resampler.time_reintegration_epsilon);
-        LOAD_SUB_(r, obstacle_density_margin, resampler.obstacle_density_margin);
+        LOAD_SUB_(r, min_segment_arc_length_for_degradation,
+                  resampler.min_segment_arc_length_for_degradation);
+        LOAD_SUB_(r, time_reintegration_epsilon,
+                  resampler.time_reintegration_epsilon);
+        LOAD_SUB_(r, obstacle_density_margin,
+                  resampler.obstacle_density_margin);
     }
     if (proto.has_corridor()) {
         const auto& c = proto.corridor();

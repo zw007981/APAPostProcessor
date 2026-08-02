@@ -1,5 +1,3 @@
-#include "core/DDP/box_qp.h"
-
 #include <gtest/gtest.h>
 
 #include <Eigen/Cholesky>
@@ -8,6 +6,8 @@
 #include <limits>
 #include <random>
 #include <vector>
+
+#include "core/DDP/box_qp.h"
 
 namespace apa_post_processor {
 namespace {

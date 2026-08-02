@@ -63,6 +63,35 @@ struct DdpCostConfig {
     double weight_shift{0.0};
     // 换挡代理 σ_β 门宽 (m/s)：越小门越陡，随外层退火收窄
     double shift_beta{0.1};
+    // 曲率正则项权重 w_κ（默认 0 = 关闭）：ℓ_κ = w_κ·(tanδ/L)²（积分型
+    // 代价，含 dt 因子）。平滑项（w_j·j² + w_η·η²）对 δ 量级零梯度——
+    // 「满打方向盘匀速转」与「大半径缓转」在平滑项下完全等价，退火后
+    // 目标函数中不存在任何抑制大曲率的力，解贴边界是最优解而非病态；
+    // 本项的梯度 2w·tanδ·sec²δ/L² 以三阶极点发散（严格快于动力学项
+    // tanδ/L 的二阶），构成 δ 奇异区的真正内屏障；其精确 Hessian
+    // (2w/L²)(sec⁴δ + 2tan²δ·sec²δ) 处处为正，天然 PSD 无需投影
+    double weight_curvature{0.0};
+    // 弧长惩罚权重 w_v（默认 0 = 关闭）：ℓ_v = w_v·v²（积分型代价、
+    // 含 dt 因子）。固定 dt 网格下总时长是常数，∫v²dt 是弧长的同向凸
+    // 代理——平滑项对「a 恒定 + ω 恒定」恰为零，跟踪退火后目标函数中
+    // 不存在任何反对轨迹跑飞（绕大圈）的项；本项 Hessian 2w_v>0 天然
+    // PSD，与 ESDF 舒适罚（作用于离障距离）和已否决的第 8 状态方案
+    // （状态维 7→8）均不同源
+    double weight_velocity{0.0};
+    // 轴距 (m)：曲率正则的 κ=tanδ/L 系数来源。默认 0 = 未注入——由
+    // DdpConfig::clampToVehicleParams 按 VehicleParams 注入；weight_curvature
+    // 非零而轴距未注入时求值层构造显式拒绝（防 0 除/语义漂移）
+    double wheelbase{0.0};
+    // δ 奇异区护栏权重 w_δg（默认 0 = 关闭）：对 |δ|>δ_guard 的区域施加
+    // 光滑铰链罚 w·max(0,|δ|−δ_guard)²。换挡区 v≈0 时 tanδ 允许经 ±π/2
+    // 奇异区「原地免费转头」——AL 幅值不等式在 g<0 且 λ=0 时零梯度（对
+    // 该逃逸通道完全不可见），λ 累积的内屏障要到越界发生之后才建立；
+    // 铰链罚从首轮内层第 0 次迭代起就提供持续的回推梯度。δ_guard 取在
+    // δ_max 与 π/2 之间（0.7 rad）：健康解（|δ|≤δ_max+平衡容差）永不
+    // 激活，行为逐位不变
+    double weight_delta_guard{0.0};
+    // δ 奇异区护栏的激活阈值 (rad)：必须大于 δ_max 且小于 π/2
+    double delta_guard{0.7};
     // 纵向速度幅值上限 (m/s)（平方形态约束边界）
     double v_max{1.5};
     // 纵向加速度幅值上限 (m/s²)
@@ -106,6 +135,20 @@ struct DdpCostInput {
     double tracking_weight{0.0};
     // 豁免退火的按点掩码（true = 该点恒用 w_ref,0）；nullptr = 无豁免点
     const std::vector<bool>* anneal_exempt_mask{nullptr};
+    // 换挡代理 σ_β 的逐轮门宽 (m/s)：>0 时覆盖 DdpCostConfig::shift_beta
+    // 静态值（外层 β 退火调度的落点）；=0 回退配置静态值（默认行为）。
+    // 换挡代理只在阶段一生效——门控计划在场（阶段二）时代理整体关闭：
+    // 阶段二的换挡位置已被符号门/接缝零速等式钉死，代理继续惩罚保留的
+    // 换挡只会与门控等式对拉
+    double shift_beta{0.0};
+    // 候选待融段的按点掩码（true = 该点跟踪权重取 candidate_tracking_weight
+    // 而非 tracking_weight）：由外层按融化平衡式临界比生成（低临界比内部
+    // maneuver），深退火把「是否值得保留」的裁决权交还平滑项；权重选择
+    // 优先级：豁免掩码（w_ref,0）> 候选掩码 > 普通退火权重。
+    // nullptr = 无候选段（全部按普通退火）
+    const std::vector<bool>* melt_candidate_mask{nullptr};
+    // 候选段的逐轮跟踪权重（仅掩码在场时消费）
+    double candidate_tracking_weight{0.0};
     // 阶段二门控计划（nullptr = 阶段一模式，门控项恒零）；
     // 与乘子门控向量必须同在场（见 evaluate 的一致性校验）
     const DdpGatingPlan* gating_plan{nullptr};
@@ -124,6 +167,12 @@ struct DdpStageCostDerivatives {
     double cost_shift{0.0};
     // 状态幅值 AL 增广项（激活约束的 λg + ½μg²）
     double cost_amplitude{0.0};
+    // δ 奇异区护栏惩罚（光滑铰链，默认关闭时恒为零）
+    double cost_delta_guard{0.0};
+    // 曲率正则项（默认关闭时恒为零；积分型代价、含 dt 因子）
+    double cost_curvature{0.0};
+    // 弧长惩罚项（默认关闭时恒为零；积分型代价、含 dt 因子）
+    double cost_velocity{0.0};
     // ESDF 双 margin 惩罚（仅抽样阶段非零）
     double cost_esdf{0.0};
     // 终点 AL 等式增广项（仅末阶段非零）
@@ -133,7 +182,8 @@ struct DdpStageCostDerivatives {
     // 该阶段总代价
     double totalCost() const {
         return cost_smooth + cost_tracking + cost_shift + cost_amplitude +
-               cost_esdf + cost_terminal + cost_gating;
+               cost_delta_guard + cost_curvature + cost_velocity + cost_esdf +
+               cost_terminal + cost_gating;
     }
     // GN 导数 ℓ_x（7 维）
     DdpState lx{DdpState::Zero()};
@@ -187,6 +237,9 @@ class DdpCostEvaluator {
     static double DwellResidual(double v, double cap) {
         return std::abs(v) - cap;
     }
+    // ESDF 惩罚组件只读访问（可为空：无地图场景只评估运动学项；
+    // L8.3 定义域守卫据此判定守卫是否可用）
+    const DdpEsdfConstraint* esdfConstraint() const { return esdf_constraint_; }
 
    protected:
     // 运行阶段 k（0..N-1）：平滑 + 跟踪 + 换挡代理 + 幅值 AL + ESDF
@@ -203,9 +256,21 @@ class DdpCostEvaluator {
                                DdpStageCostDerivatives* out) const;
     // 换挡代理累加：σ_β 双门乘积经 σ(−z)=1−σ(z) 化简为
     // ℓ = w_g·(A + D − 2AD)（A=σ(v)、D=σ(v⁺)，v⁺=v+a·dt 为显式一步预测、
-    // 刻意不代入动力学链以保持纯状态代价），取精确二阶导（控制导数恒零）
-    void accumulateShiftProxy(const DdpState& x, double dt,
+    // 刻意不代入动力学链以保持纯状态代价），控制导数恒零；门区精确二阶导
+    // 不定（σ_β 二阶导变号，负曲率注入 Riccati 会破坏 GN 假设），(v,a)
+    // 2×2 块统一做负特征值截断的 PSD 投影；门宽 beta 由调用方按外层退火
+    // 调度逐轮供给
+    void accumulateShiftProxy(const DdpState& x, double dt, double beta,
                               DdpStageCostDerivatives* out) const;
+    // δ 奇异区护栏累加：w·max(0,|δ|−δ_guard)² 的光滑铰链（C¹，活动区
+    // 梯度模 2w·(|δ|−δ_guard)），GN Hessian 恒 2w；控制导数恒零
+    void accumulateDeltaGuard(const DdpState& x,
+                              DdpStageCostDerivatives* out) const;
+    // 曲率正则累加：w·(tanδ/L)²（积分型、含 dt），梯度 2w·tanδ·sec²δ/L²
+    // 以三阶极点发散（δ 奇异区内屏障）；精确 Hessian 处处为正（天然 PSD，
+    // 无需投影）；控制导数恒零
+    void accumulateCurvaturePenalty(const DdpState& x, double dt,
+                                    DdpStageCostDerivatives* out) const;
     // 幅值 AL 五项累加（v/a/ω 平方形态 + δ 双侧线性形态）
     void accumulateAmplitudeConstraints(
         std::size_t k, const DdpState& x,

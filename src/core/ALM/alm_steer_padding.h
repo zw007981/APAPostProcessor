@@ -41,6 +41,6 @@ struct AlmSteerPaddingStats {
 // 窗口后第一个驱动点的限幅值线性过渡（消除 atan 值域翻转伪影，且边界
 // 对 Δδ 最小），δ̇ 取过渡斜率。净 Δθ 超阈值的窗口（真实 pivot 旋转
 // 需求）保持原样并计数。
-AlmSteerPaddingStats ApplySteerPadding(
-    std::vector<Maneuver>& maneuvers, const AlmSteerPaddingConfig& config);
+AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
+                                       const AlmSteerPaddingConfig& config);
 }  // namespace apa_post_processor

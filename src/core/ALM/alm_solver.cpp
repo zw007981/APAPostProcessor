@@ -39,8 +39,8 @@ AlmSolver::AlmSolver(AlmSolverConfig config,
     }
     // ρ 标定与更新参数：0 < ρ_min <= ρ_max，安全阀/首轮权重为正，γ 非负
     if (!(config_.rho_min > 0.0) || !(config_.rho_max >= config_.rho_min) ||
-        !std::isfinite(config_.rho_max) ||
-        !(config_.epsilon_rho > 0.0) || !std::isfinite(config_.epsilon_rho) ||
+        !std::isfinite(config_.rho_max) || !(config_.epsilon_rho > 0.0) ||
+        !std::isfinite(config_.epsilon_rho) ||
         !(config_.first_round_rho > 0.0) ||
         !std::isfinite(config_.first_round_rho) ||
         config_.rho_increase_factor < 0.0 ||
@@ -130,9 +130,8 @@ AlmSolverResult AlmSolver::solve(
         const Eigen::VectorXd x_before = x;
         auto objective = [&](const Eigen::VectorXd& vars,
                              Eigen::VectorXd& grad) -> double {
-            return evaluateCostAndGradient(problem, esdf_penalty,
-                                           round_multipliers, vars, &grad,
-                                           nullptr);
+            return evaluateCostAndGradient(
+                problem, esdf_penalty, round_multipliers, vars, &grad, nullptr);
         };
         // 内层：L-BFGS 无约束求解（从上一轮外层迭代的解热启动）
         try {
@@ -156,8 +155,7 @@ AlmSolverResult AlmSolver::solve(
             } catch (const std::exception&) {
                 result.trajectory = MincoTrajectory{};
             }
-            result.outer_iterations =
-                static_cast<int>(result.history.size());
+            result.outer_iterations = static_cast<int>(result.history.size());
             return result;
         }
         try {
@@ -166,8 +164,7 @@ AlmSolverResult AlmSolver::solve(
             // K(T) 奇异等极端数值情况：显式失败，不返回半成品轨迹
             result.status = AlmSolverStatus::TRAJECTORY_BUILD_FAILED;
             result.trajectory = MincoTrajectory{};
-            result.outer_iterations =
-                static_cast<int>(result.history.size());
+            result.outer_iterations = static_cast<int>(result.history.size());
             return result;
         }
         // 外层指标：复用与代价函数同一组辛普森节点，保证先离散后求导一致
@@ -180,11 +177,10 @@ AlmSolverResult AlmSolver::solve(
         // 首轮收敛后按 2.5 节公式标定 ρ^0 并替换临时权重（首轮求解本身
         // 仍使用 first_round_rho，标定值从首轮更新起生效）
         if (outer == 0) {
-            result.rho_initial_calibrated =
-                Clip(breakdown.j_s_prime /
-                         std::max(metrics.violation.squaredNorm(),
-                                  config_.epsilon_rho),
-                     config_.rho_min, config_.rho_max);
+            result.rho_initial_calibrated = Clip(
+                breakdown.j_s_prime / std::max(metrics.violation.squaredNorm(),
+                                               config_.epsilon_rho),
+                config_.rho_min, config_.rho_max);
             multipliers.rho = result.rho_initial_calibrated;
         }
         AlmOuterIterationRecord record;
@@ -232,8 +228,7 @@ AlmSolverResult AlmSolver::solve(
             violation_norm > config_.rho_gate_kappa * prev_violation_norm;
         if (increase_rho) {
             multipliers.rho =
-                std::min((1.0 + config_.rho_increase_factor) *
-                             multipliers.rho,
+                std::min((1.0 + config_.rho_increase_factor) * multipliers.rho,
                          config_.rho_max);
         }
         prev_violation_norm = violation_norm;
@@ -315,7 +310,8 @@ AlmSolverProblem AlmSolver::buildProblem(
         for (const auto& segment : estimates[m].segments) {
             if (!std::isfinite(segment.theta) ||
                 !std::isfinite(segment.arc_length)) {
-                throw std::invalid_argument("微观段估计的朝向/弧长必须为有限值");
+                throw std::invalid_argument(
+                    "微观段估计的朝向/弧长必须为有限值");
             }
             ++global_index;
         }
@@ -332,10 +328,12 @@ AlmSolverProblem AlmSolver::buildProblem(
     return problem;
 }
 
-double AlmSolver::evaluateCostAndGradient(
-    const AlmSolverProblem& problem, const AlmEsdfPenalty& esdf_penalty,
-    const AlmMultiplierState& multipliers, const Eigen::VectorXd& x,
-    Eigen::VectorXd* gradient, AlmCostBreakdown* breakdown) const {
+double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
+                                          const AlmEsdfPenalty& esdf_penalty,
+                                          const AlmMultiplierState& multipliers,
+                                          const Eigen::VectorXd& x,
+                                          Eigen::VectorXd* gradient,
+                                          AlmCostBreakdown* breakdown) const {
     const int num_segments = problem.numSegments();
     const MincoTrajectory trajectory = buildTrajectory(problem, x);
     // ∂J/∂c（θ/s 两个维度，6xM）与 ∂J/∂T（M 维，仅显式部分）的累加器
@@ -354,14 +352,12 @@ double AlmSolver::evaluateCostAndGradient(
     // 144c₃c₄ + 240c₃c₅ + 720c₄c₅；显式时长梯度 ∂/∂T = -5·J_i/T
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
-        const double inv_t5 =
-            1.0 / std::pow(duration_i, 5);
+        const double inv_t5 = 1.0 / std::pow(duration_i, 5);
         for (int dim = 0; dim < 2; ++dim) {
-            const auto& coeffs = (dim == 0) ? trajectory.coeffsTheta()
-                                            : trajectory.coeffsS();
+            const auto& coeffs =
+                (dim == 0) ? trajectory.coeffsTheta() : trajectory.coeffsS();
             const double weight =
-                (dim == 0) ? config_.weight_jerk_theta
-                           : config_.weight_jerk_s;
+                (dim == 0) ? config_.weight_jerk_theta : config_.weight_jerk_s;
             auto& dJ_dc = (dim == 0) ? dJ_dc_theta : dJ_dc_s;
             const double c3 = coeffs(3, i);
             const double c4 = coeffs(4, i);
@@ -371,12 +367,12 @@ double AlmSolver::evaluateCostAndGradient(
                              240.0 * c3 * c5 + 720.0 * c4 * c5;
             const double segment_cost = weight * q * inv_t5;
             j_s_prime += segment_cost;
-            dJ_dc(3, i) += weight * inv_t5 *
-                           (72.0 * c3 + 144.0 * c4 + 240.0 * c5);
-            dJ_dc(4, i) += weight * inv_t5 *
-                           (144.0 * c3 + 384.0 * c4 + 720.0 * c5);
-            dJ_dc(5, i) += weight * inv_t5 *
-                           (240.0 * c3 + 720.0 * c4 + 1440.0 * c5);
+            dJ_dc(3, i) +=
+                weight * inv_t5 * (72.0 * c3 + 144.0 * c4 + 240.0 * c5);
+            dJ_dc(4, i) +=
+                weight * inv_t5 * (144.0 * c3 + 384.0 * c4 + 720.0 * c5);
+            dJ_dc(5, i) +=
+                weight * inv_t5 * (240.0 * c3 + 720.0 * c4 + 1440.0 * c5);
             dJ_dT(i) -= 5.0 * segment_cost / duration_i;
         }
     }
@@ -476,7 +472,8 @@ double AlmSolver::evaluateCostAndGradient(
         const double c_low = config_.duration_balance_lower * mean_duration -
                              trajectory.duration(i);
         if (c_low > 0.0) {
-            j_s_prime += config_.weight_duration_balance * c_low * c_low * c_low;
+            j_s_prime +=
+                config_.weight_duration_balance * c_low * c_low * c_low;
             // ∂C_low/∂T_j = ε_low/M - δ_ij
             const double grad_factor =
                 3.0 * config_.weight_duration_balance * c_low * c_low;
@@ -489,7 +486,8 @@ double AlmSolver::evaluateCostAndGradient(
         const double c_upp = trajectory.duration(i) -
                              config_.duration_balance_upper * mean_duration;
         if (c_upp > 0.0) {
-            j_s_prime += config_.weight_duration_balance * c_upp * c_upp * c_upp;
+            j_s_prime +=
+                config_.weight_duration_balance * c_upp * c_upp * c_upp;
             // ∂C_upp/∂T_j = δ_ij - ε_upp/M
             const double grad_factor =
                 3.0 * config_.weight_duration_balance * c_upp * c_upp;
@@ -518,8 +516,8 @@ double AlmSolver::evaluateCostAndGradient(
         const double duration_g = trajectory.duration(cusp_index);
         const double theta_dot_end =
             trajectory.evaluateSegment(cusp_index, duration_g, 1).x();
-        j_s_prime += config_.weight_gear_cusp_theta * theta_dot_end *
-                     theta_dot_end;
+        j_s_prime +=
+            config_.weight_gear_cusp_theta * theta_dot_end * theta_dot_end;
         const double g_theta_dot =
             2.0 * config_.weight_gear_cusp_theta * theta_dot_end;
         dJ_dc_theta.col(cusp_index) +=
@@ -573,24 +571,23 @@ double AlmSolver::evaluateCostAndGradient(
             // 节点 (i,j) 的位置偏导接收后缀梯度：∂P/∂θ = w_s·ṡ·(-sinθ, cosθ)，
             // ∂P/∂ṡ = w_s·(cosθ, sinθ)（w_s 为该节点的辛普森积分权重）；θ 另
             // 有 ESDF 惩罚随外圆旋转的直接梯度项
-            const double weight_simpson = duration_i / (3.0 * num_simpson) *
-                                          simpson_unit_weights[j];
+            const double weight_simpson =
+                duration_i / (3.0 * num_simpson) * simpson_unit_weights[j];
             const double cos_theta = std::cos(theta);
             const double sin_theta = std::sin(theta);
-            const double g_theta =
-                weight_simpson * s_dot *
-                    (-sin_theta * suffix_gradient.x() +
-                     cos_theta * suffix_gradient.y()) +
-                weight_trapezoid * pose_cost.gradient.z();
+            const double g_theta = weight_simpson * s_dot *
+                                       (-sin_theta * suffix_gradient.x() +
+                                        cos_theta * suffix_gradient.y()) +
+                                   weight_trapezoid * pose_cost.gradient.z();
             const double g_s_dot =
                 weight_simpson * (cos_theta * suffix_gradient.x() +
                                   sin_theta * suffix_gradient.y());
-            dJ_dc_theta.col(i) +=
-                g_theta * MincoTrajectory::DerivativeBasisRow(tau, 0, duration_i)
-                              .transpose();
-            dJ_dc_s.col(i) +=
-                g_s_dot * MincoTrajectory::DerivativeBasisRow(tau, 1, duration_i)
-                              .transpose();
+            dJ_dc_theta.col(i) += g_theta * MincoTrajectory::DerivativeBasisRow(
+                                                tau, 0, duration_i)
+                                                .transpose();
+            dJ_dc_s.col(i) += g_s_dot * MincoTrajectory::DerivativeBasisRow(
+                                            tau, 1, duration_i)
+                                            .transpose();
         }
         esdf_penalty_cost += segment_esdf_cost;
         j_s_prime += segment_esdf_cost;
@@ -721,14 +718,14 @@ AlmSolver::SimpsonNodeData AlmSolver::computeSimpsonNodeData(
             // 逐节点世界坐标定义为辛普森累计部分和：代价函数与梯度反传共享
             // 同一离散映射，保证先离散后求导的严格一致
             segment_position +=
-                weight * s_dot * Eigen::Vector2d(std::cos(theta),
-                                                 std::sin(theta));
+                weight * s_dot *
+                Eigen::Vector2d(std::cos(theta), std::sin(theta));
             data.node_theta[i][j] = theta;
             data.node_s_dot[i][j] = s_dot;
             data.node_positions[i][j] = segment_position;
             data.segment_displacements[i] +=
-                weight * s_dot * Eigen::Vector2d(std::cos(theta),
-                                                 std::sin(theta));
+                weight * s_dot *
+                Eigen::Vector2d(std::cos(theta), std::sin(theta));
         }
         running_position += data.segment_displacements[i];
     }
@@ -736,8 +733,7 @@ AlmSolver::SimpsonNodeData AlmSolver::computeSimpsonNodeData(
 }
 
 AlmSolver::TerminalMetrics AlmSolver::computeTerminalMetrics(
-    const AlmSolverProblem& problem,
-    const MincoTrajectory& trajectory) const {
+    const AlmSolverProblem& problem, const MincoTrajectory& trajectory) const {
     const SimpsonNodeData simpson_data =
         computeSimpsonNodeData(trajectory, problem.start_position);
     TerminalMetrics metrics;

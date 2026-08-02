@@ -1,5 +1,3 @@
-#include "core/ALM/alm_maneuver_melter.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -7,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "core/ALM/alm_maneuver_melter.h"
 #include "core/ALM/bicycle_kinematics_extractor.h"
 #include "util/maneuver.h"
 
@@ -112,8 +111,7 @@ TEST(AlmManeuverMelterTest, MeltedSegmentIsPrunedAndMerged) {
     EXPECT_EQ(result.removed_count, 1);
     EXPECT_EQ(result.pivot_count, 0);
     ASSERT_EQ(result.path.numManeuvers(), 1U);
-    EXPECT_EQ(result.path.getManeuvers().front().direction,
-              Direction::FORWARD);
+    EXPECT_EQ(result.path.getManeuvers().front().direction, Direction::FORWARD);
     // 修剪输出的采样点必须携带完整状态/控制量（与 NMPC 侧输出惯例一致）
     for (const auto& maneuver : result.path.getManeuvers()) {
         for (const auto& point : maneuver.points) {
@@ -274,11 +272,10 @@ TEST(AlmManeuverMelterTest, PivotSegmentSatisfiesBicycleKinematics) {
         const TrajectoryPoint& p0 = pivot.points[j];
         const TrajectoryPoint& p1 = pivot.points[j + 1];
         const double theta_dot_fd = (p1.theta - p0.theta) / dt;
-        const double theta_dot_model =
-            0.5 *
-            (p0.getV() * std::tan(p0.getDelta()) +
-             p1.getV() * std::tan(p1.getDelta())) /
-            wheelbase;
+        const double theta_dot_model = 0.5 *
+                                       (p0.getV() * std::tan(p0.getDelta()) +
+                                        p1.getV() * std::tan(p1.getDelta())) /
+                                       wheelbase;
         EXPECT_NEAR(theta_dot_fd, theta_dot_model, kFdTolerance);
         if (std::abs(theta_dot_fd) > 0.05) {
             has_significant_rotation = true;
@@ -344,12 +341,13 @@ TEST(AlmManeuverMelterTest, FirstAndLastManeuverNeverPivot) {
     const std::vector<Maneuver>& maneuvers = result.path.getManeuvers();
     EXPECT_EQ(maneuvers[0].direction, Direction::FORWARD);
     EXPECT_EQ(maneuvers[2].direction, Direction::FORWARD);
-    EXPECT_GT(maneuvers[0].points.back().theta - maneuvers[0].points.front().theta,
-              0.4);
+    EXPECT_GT(
+        maneuvers[0].points.back().theta - maneuvers[0].points.front().theta,
+        0.4);
     // 末段含全局终点补采样，朝向变化完整覆盖构造值 -0.5
-    EXPECT_NEAR(maneuvers[2].points.back().theta -
-                    maneuvers[2].points.front().theta,
-                -0.5, 1e-9);
+    EXPECT_NEAR(
+        maneuvers[2].points.back().theta - maneuvers[2].points.front().theta,
+        -0.5, 1e-9);
     // 对照组：阈值压到任何段都无法触发，末端位姿必须与未修剪运行逐位一致
     // （钉住终点不扰动不变量：无论分类结果如何变化，全局终点采样不受分类
     // 与重建过程影响）
@@ -387,8 +385,7 @@ TEST(AlmManeuverMelterTest, MultiSegmentManeuverMeasuredAcrossSegments) {
         scene.trajectory, scene.estimates, {0.0, 0.0}, kinematics);
     EXPECT_EQ(result.removed_count, 1);
     ASSERT_EQ(result.path.numManeuvers(), 1U);
-    EXPECT_EQ(result.path.getManeuvers().front().direction,
-              Direction::FORWARD);
+    EXPECT_EQ(result.path.getManeuvers().front().direction, Direction::FORWARD);
 }
 
 // 测试非法输入的异常反馈。
@@ -404,13 +401,12 @@ TEST(AlmManeuverMelterTest, InvalidInputsThrow) {
     const BicycleKinematicsExtractor kinematics = MakeKinematics();
     const AlmManeuverMelter melter;
     // 空估计
-    EXPECT_THROW(melter.meltAndPrune(scene.trajectory, {}, {0.0, 0.0},
-                                     kinematics),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        melter.meltAndPrune(scene.trajectory, {}, {0.0, 0.0}, kinematics),
+        std::invalid_argument);
     // 空 segments 的 Maneuver
-    EXPECT_THROW(melter.meltAndPrune(scene.trajectory,
-                                     {AlmManeuverEstimate{}}, {0.0, 0.0},
-                                     kinematics),
+    EXPECT_THROW(melter.meltAndPrune(scene.trajectory, {AlmManeuverEstimate{}},
+                                     {0.0, 0.0}, kinematics),
                  std::invalid_argument);
     // 段数不一致：估计 2 段 vs 轨迹 3 段
     std::vector<AlmManeuverEstimate> mismatched = scene.estimates;
@@ -419,11 +415,11 @@ TEST(AlmManeuverMelterTest, InvalidInputsThrow) {
                                      kinematics),
                  std::invalid_argument);
     // 非有限起点世界坐标
-    EXPECT_THROW(melter.meltAndPrune(
-                     scene.trajectory, scene.estimates,
-                     {std::numeric_limits<double>::quiet_NaN(), 0.0},
-                     kinematics),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        melter.meltAndPrune(scene.trajectory, scene.estimates,
+                            {std::numeric_limits<double>::quiet_NaN(), 0.0},
+                            kinematics),
+        std::invalid_argument);
     // detectMelting 共享同一套结构校验
     EXPECT_THROW(melter.detectMelting(scene.trajectory, {}),
                  std::invalid_argument);

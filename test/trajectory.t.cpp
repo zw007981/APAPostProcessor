@@ -1,5 +1,3 @@
-#include "util/trajectory.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -9,6 +7,7 @@
 #include "spatial/grid_map.h"
 #include "util/path.h"
 #include "util/time_profile.h"
+#include "util/trajectory.h"
 #include "vehicle/vehicle_footprint_model.h"
 #include "vehicle/vehicle_params.h"
 

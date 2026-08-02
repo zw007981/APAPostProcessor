@@ -48,9 +48,9 @@ std::vector<Maneuver> SampleMincoTrajectory(
         const Eigen::Vector2d direction(std::cos(sample.theta),
                                         std::sin(sample.theta));
         if (has_prev_sample) {
-            position += 0.5 * (global_time - prev_sample_time) *
-                        (prev_s_dot * prev_direction +
-                         sample.s_dot * direction);
+            position +=
+                0.5 * (global_time - prev_sample_time) *
+                (prev_s_dot * prev_direction + sample.s_dot * direction);
         }
         const AckermannState state = kinematics.extract(sample);
         TrajectoryPoint point;
@@ -104,8 +104,8 @@ void CheckMincoSampleStructure(
     if (estimates.empty()) {
         throw std::invalid_argument("初值估计不能为空");
     }
-    // 段数求和保持在 size_t 域，仅在最终比较时一次性转换（numSegments 恒 >= 0），
-    // 避免逐元素 static_cast<int> 在理论极端输入下的截断路径
+    // 段数求和保持在 size_t 域，仅在最终比较时一次性转换（numSegments 恒 >=
+    // 0）， 避免逐元素 static_cast<int> 在理论极端输入下的截断路径
     std::size_t total_segments = 0;
     for (const auto& estimate : estimates) {
         if (estimate.segments.empty()) {

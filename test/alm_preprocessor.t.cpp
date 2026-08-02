@@ -1,5 +1,3 @@
-#include "core/ALM/alm_preprocessor.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -9,6 +7,7 @@
 #include <vector>
 
 #include "core/ALM/alm_maneuver_segmenter.h"
+#include "core/ALM/alm_preprocessor.h"
 
 namespace apa_post_processor {
 namespace {
@@ -68,7 +67,7 @@ TEST(AlmPreprocessorTest, StraightSingleManeuverConverges) {
     const AlmPreprocessor preprocessor;
     const Path path = BuildStraightPath(2.0);
     const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter({}).segment(path);
+        AlmManeuverSegmenter().segment(path);
     const AlmPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
     EXPECT_TRUE(result.optimizer_converged);
@@ -99,7 +98,7 @@ TEST(AlmPreprocessorTest, GearShiftTwoManeuverConverges) {
     const Path path = BuildGearShiftPath();
     ASSERT_EQ(path.numManeuvers(), 2);
     const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter({}).segment(path);
+        AlmManeuverSegmenter().segment(path);
     ASSERT_EQ(estimates.size(), 2U);
     const AlmPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
@@ -225,7 +224,7 @@ TEST(AlmPreprocessorTest, ConflictingLimitsReturnFailure) {
     const AlmPreprocessor preprocessor(config, kinematics_config);
     const Path path = BuildStraightPath(2.0);
     const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter({}).segment(path);
+        AlmManeuverSegmenter().segment(path);
     const AlmPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
     EXPECT_FALSE(result.success);

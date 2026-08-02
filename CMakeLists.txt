@@ -182,6 +182,17 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     message(STATUS "Enabling -march=native for x86_64 SIMD optimizations.")
 endif()
 
+# DDP 完整二阶动力学项（true MS-DDP）实验开关：默认 OFF（Gauss-Newton/
+# iLQR，丢弃 s'·f_** 张量红项）。开启后内层回推补回完整二阶收缩，设计
+# 预期是换取局部二次收敛（Li 2023 Fig.3 实测结论）；副作用是 Q_uu 更
+# 频繁失去正定性、ρ_reg 触发率上升。必须 PUBLIC 传播：开关改变
+# bicycle_dynamics.h 的 constexpr 状态，所有包含该头的编译单元必须一致
+option(APA_DDP_FULL_HESSIAN "Enable full second-order dynamics terms (true MS-DDP) in the DDP backward pass" OFF)
+if(APA_DDP_FULL_HESSIAN)
+    target_compile_definitions(apa_core_lib PUBLIC DDP_ENABLE_FULL_HESSIAN)
+    message(STATUS "DDP full Hessian (true MS-DDP) backward pass: ENABLED")
+endif()
+
 # ==========================================
 # 4. 生成最终可执行文件
 # ==========================================
@@ -227,6 +238,28 @@ if(benchmark_FOUND)
         target_link_libraries(bench_apa_post_processor PRIVATE apa_core_lib stc_SQP_core_lib benchmark::benchmark)
     endif()
 endif()
+
+# ==========================================
+# 4.5 调参工具（开发期手动运行，不参与测试/压测）
+# ==========================================
+# DDP 四数据集调参驱动：逐变体 × 逐数据集执行 PostProcessor::optimizeDdp 并
+# 输出机器可读评价行，供调参标定与回归判断；stc_SQP_core_lib 需显式再次
+# 链接，理由同主程序
+add_executable(apa_tune_ddp ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_ddp.cpp)
+target_link_libraries(apa_tune_ddp PRIVATE apa_core_lib stc_SQP_core_lib)
+
+# ALM 四数据集调参驱动：逐变体 × 逐数据集执行 PostProcessor::optimizeAlm 并
+# 输出机器可读评价行；L8 ESDF 边界语义修复跨 ALM/DDP 双路径生效，ALM 回归
+# 依赖本目标（此前缺失，补齐）
+add_executable(apa_tune_alm ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_alm.cpp)
+target_link_libraries(apa_tune_alm PRIVATE apa_core_lib stc_SQP_core_lib)
+
+# DDP 后处理链路四断点审计驱动：复刻 optimizeDdp 装配并逐步手动编排，对
+# 阶段一解/修剪环节/阶段二解/驻留与最终输出四个断点转储全量结构化量测
+# （12 项校验判据不短路），供口径审计取证；stc_SQP_core_lib 需显式再次
+# 链接，理由同主程序
+add_executable(apa_audit_ddp_post ${CMAKE_CURRENT_SOURCE_DIR}/tool/audit_ddp_post.cpp)
+target_link_libraries(apa_audit_ddp_post PRIVATE apa_core_lib stc_SQP_core_lib)
 
 # ==========================================
 # 5. Ninja 动态并发池优化 (Ninja Pool Hack)

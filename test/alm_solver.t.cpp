@@ -1,5 +1,3 @@
-#include "core/ALM/alm_solver.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -10,6 +8,7 @@
 
 #include "core/ALM/alm_maneuver_segmenter.h"
 #include "core/ALM/alm_preprocessor.h"
+#include "core/ALM/alm_solver.h"
 #include "core/NMPC/vehicle_circle_geometry.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
@@ -76,8 +75,10 @@ GridMap BuildEmptyGridMap() {
     return GridMap(0.125, 160, 112, Position{-4.0, -6.0}, {});
 }
 
-// 直墙地图：第 0 列整列占据；x >= 2*resolution 区域符号距离场严格为 D=x、
-// 梯度 g=(1,0)（与 alm_esdf_penalty.t.cpp 同一场景约定）
+// 直墙地图：第 0 列整列占据；x >= 2*resolution 且远离其余边界圈的区域
+// 符号距离场严格为 D=x、梯度 g=(1,0)（与 alm_esdf_penalty.t.cpp 同一场景
+// 约定；L8.2 后第 0/63 行与第 63 列亦为占据边界圈，使用本图的测试场景须
+// 保证外圆圆心到这些边界圈的距离明显大于到墙面的距离）
 GridMap BuildWallGridMap() {
     std::vector<Position> cells;
     cells.reserve(64);
@@ -100,10 +101,10 @@ BicycleKinematicsConfig MakeKinematicsConfig() {
 }
 
 // 跑通 分段器 → 预处理器 的公共前置链路，产出主求解器的合法输入
-AlmPreprocessorResult RunPreprocessor(const Path& path,
-                                      const Eigen::Vector2d& start_position,
-                                      std::vector<AlmManeuverEstimate>* estimates) {
-    *estimates = AlmManeuverSegmenter({}).segment(path);
+AlmPreprocessorResult RunPreprocessor(
+    const Path& path, const Eigen::Vector2d& start_position,
+    std::vector<AlmManeuverEstimate>* estimates) {
+    *estimates = AlmManeuverSegmenter().segment(path);
     const AlmPreprocessor preprocessor({}, MakeKinematicsConfig());
     const AlmPreprocessorResult result =
         preprocessor.preprocess(*estimates, start_position);
@@ -131,8 +132,7 @@ TEST(AlmSolverTest, StraightLineConvergesEndToEnd) {
     EXPECT_LE(result.terminal_position_error, 0.05);
     EXPECT_LE(result.terminal_heading_error_deg, 1.5);
     EXPECT_GE(result.outer_iterations, 1);
-    EXPECT_EQ(result.outer_iterations,
-              static_cast<int>(result.history.size()));
+    EXPECT_EQ(result.outer_iterations, static_cast<int>(result.history.size()));
     ASSERT_GT(result.trajectory.numSegments(), 0);
     // 终点硬边界：速度/角速度均为 0
     const Eigen::Vector2d end_rate =
@@ -163,8 +163,8 @@ TEST(AlmSolverTest, GearShiftConvergesEndToEnd) {
     // 换挡点（首个 Maneuver 的最后一段末端）残余速度检查
     const int cusp_index =
         static_cast<int>(estimates.front().segments.size()) - 1;
-    const double cusp_speed = std::abs(
-        result.trajectory.evaluateSegment(cusp_index, 1.0, 1).y());
+    const double cusp_speed =
+        std::abs(result.trajectory.evaluateSegment(cusp_index, 1.0, 1).y());
     EXPECT_LT(cusp_speed, 0.05);
 }
 
@@ -299,13 +299,13 @@ TEST(AlmSolverTest, RhoIncreaseGateHoldsWhenEnabled) {
                 ? std::min((1.0 + config.rho_increase_factor) * rho_before,
                            config.rho_max)
                 : rho_before;
-        EXPECT_NEAR(result.history[k].rho, expected_rho, 1e-9)
-            << "轮次 " << k;
+        EXPECT_NEAR(result.history[k].rho, expected_rho, 1e-9) << "轮次 " << k;
         // λ 更新不受门控影响，始终按 λ + ρ·C_f 执行
-        EXPECT_NEAR(result.history[k].lambda_x,
-                    result.history[k - 1].lambda_x +
-                        rho_before * result.history[k - 1].terminal_violation.x(),
-                    1e-9);
+        EXPECT_NEAR(
+            result.history[k].lambda_x,
+            result.history[k - 1].lambda_x +
+                rho_before * result.history[k - 1].terminal_violation.x(),
+            1e-9);
     }
 }
 
@@ -331,7 +331,8 @@ TEST(AlmSolverTest, MaxOuterIterationsReturnsExplicitFailure) {
     EXPECT_FALSE(result.success);
     EXPECT_EQ(result.status, AlmSolverStatus::MAX_OUTER_ITERATIONS);
     EXPECT_EQ(result.outer_iterations, 1);
-    EXPECT_GT(result.terminal_position_error, config.terminal_position_tolerance);
+    EXPECT_GT(result.terminal_position_error,
+              config.terminal_position_tolerance);
     EXPECT_GT(result.trajectory.numSegments(), 0);
 }
 
@@ -340,6 +341,10 @@ TEST(AlmSolverTest, MaxOuterIterationsReturnsExplicitFailure) {
 // 1.2 < r+margin_comf≈1.25），舒适惩罚必须处于激活状态（否则场景没有验证
 // 价值）；收敛后沿轨迹密集采样全部外圆，最小安全余量 d_esdf - r_outer
 // 不得小于 margin_safe。
+// L8.2 契约下第 0/63 行亦为占据边界圈：路径 y 区间取 [1.7, 3.6]，使全部
+// 外圆到下边界圈的距离（>= 1.7-0.09 ≈ 1.62 > 1.2 = 墙距）与到上边界圈的
+// 距离（>= 8-0.125-3.6-2.79 ≈ 1.49 > 1.25 = r+margin_comf）都足够远，
+// 轨迹沿线场仍由墙面精确主导（与 L8 前场景物理一致），边界圈不参与。
 TEST(AlmSolverTest, ObstacleSceneRespectsSafeMargin) {
     const GridMap grid_map = BuildWallGridMap();
     const ESDFMap esdf_map(grid_map);
@@ -348,11 +353,11 @@ TEST(AlmSolverTest, ObstacleSceneRespectsSafeMargin) {
     const double wall_x = 1.2;
     std::vector<AlmManeuverEstimate> estimates;
     const AlmPreprocessorResult pre_result =
-        RunPreprocessor(BuildWallParallelPath(wall_x, 1.0, 3.4, PI / 2.0),
-                        {wall_x, 1.0}, &estimates);
+        RunPreprocessor(BuildWallParallelPath(wall_x, 1.7, 3.6, PI / 2.0),
+                        {wall_x, 1.7}, &estimates);
     const AlmSolver solver({}, MakeKinematicsConfig());
     const AlmSolverResult result =
-        solver.solve(estimates, pre_result, {wall_x, 1.0}, esdf_map, footprint);
+        solver.solve(estimates, pre_result, {wall_x, 1.7}, esdf_map, footprint);
     ASSERT_TRUE(result.success);
     ASSERT_GE(result.history.size(), 1U);
     // 舒适惩罚在首轮必须处于激活状态（证明场景确实在惩罚带内）
@@ -365,7 +370,7 @@ TEST(AlmSolverTest, ObstacleSceneRespectsSafeMargin) {
     const double outer_radius = footprint.getOuterRadius();
     constexpr int kSamplesPerSegment = 64;
     double min_clearance = std::numeric_limits<double>::infinity();
-    Eigen::Vector2d position(wall_x, 1.0);
+    Eigen::Vector2d position(wall_x, 1.7);
     for (int i = 0; i < result.trajectory.numSegments(); ++i) {
         const double duration_i = result.trajectory.duration(i);
         Eigen::Vector2d prev_direction(
@@ -374,18 +379,19 @@ TEST(AlmSolverTest, ObstacleSceneRespectsSafeMargin) {
         double prev_s_dot = result.trajectory.evaluateSegment(i, 0.0, 1).y();
         for (int j = 1; j <= kSamplesPerSegment; ++j) {
             const double local_time = duration_i * j / kSamplesPerSegment;
-            const double theta = result.trajectory.evaluateSegment(i, local_time, 0).x();
-            const double s_dot = result.trajectory.evaluateSegment(i, local_time, 1).y();
+            const double theta =
+                result.trajectory.evaluateSegment(i, local_time, 0).x();
+            const double s_dot =
+                result.trajectory.evaluateSegment(i, local_time, 1).y();
             const Eigen::Vector2d direction(std::cos(theta), std::sin(theta));
             position += 0.5 * duration_i / kSamplesPerSegment *
                         (prev_s_dot * prev_direction + s_dot * direction);
             for (const auto& local : local_centers) {
                 const Eigen::Vector2d center =
-                    position +
-                    Eigen::Vector2d(std::cos(theta) * local.x() -
-                                        std::sin(theta) * local.y(),
-                                    std::sin(theta) * local.x() +
-                                        std::cos(theta) * local.y());
+                    position + Eigen::Vector2d(std::cos(theta) * local.x() -
+                                                   std::sin(theta) * local.y(),
+                                               std::sin(theta) * local.x() +
+                                                   std::cos(theta) * local.y());
                 min_clearance = std::min(
                     min_clearance,
                     esdf_map.getDist(center.x(), center.y()) - outer_radius);
@@ -402,6 +408,10 @@ TEST(AlmSolverTest, ObstacleSceneRespectsSafeMargin) {
 // （含对 T 的 -5/T 显式依赖）、ESDF 逐节点后缀反传（含梯形权重 ∝T 的显式
 // 时长梯度）、PHR-ALM 终端项（非零 λ/ρ），任何一环出错都会被有限差分放大；
 // 手工构造含换挡与曲率的贴墙场景使 ESDF/物理/换挡惩罚同时处于激活区。
+// L8.2 契约下第 0/63 行成为占据边界圈，墙角对角线附近出现「墙面 vs 边界圈」
+// 中轴折点：折点两侧各一格内插值梯度场与距离场梯度不一致（插值伪影），
+// 1e-6 级对拍必挂。全部 y 坐标较 L8 前整体上移 1.0 m，使所有辛普森节点的
+// 外圆圆心都落在墙面主导的精确线性区（cy 比 cx 大 0.3 以上），边界圈不参与。
 TEST(AlmSolverTest, AnalyticGradientMatchesFiniteDifference) {
     const GridMap grid_map = BuildWallGridMap();
     const ESDFMap esdf_map(grid_map);
@@ -415,14 +425,14 @@ TEST(AlmSolverTest, AnalyticGradientMatchesFiniteDifference) {
     estimates[0].start_theta = PI / 2.0 - 0.15;
     estimates[0].start_arc_length = 0.0;
     estimates[0].segments = {
-        {{1.05, 1.4}, PI / 2.0 - 0.05, 0.5, 1.6},
-        {{1.10, 2.2}, PI / 2.0 + 0.10, 1.0, 1.4},
+        {{1.05, 2.4}, PI / 2.0 - 0.05, 0.5, 1.6},
+        {{1.10, 3.2}, PI / 2.0 + 0.10, 1.0, 1.4},
     };
     estimates[1].direction = Direction::BACKWARD;
     estimates[1].start_theta = PI / 2.0 + 0.10;
     estimates[1].start_arc_length = 1.0;
     estimates[1].segments = {
-        {{1.15, 1.8}, PI / 2.0 + 0.05, 0.6, 1.8},
+        {{1.15, 2.8}, PI / 2.0 + 0.05, 0.6, 1.8},
     };
     // 伪造与估计结构一致的预处理输出作为初值（绕过前置链路，隔离被测对象）
     AlmPreprocessorResult pre_result;
@@ -446,7 +456,7 @@ TEST(AlmSolverTest, AnalyticGradientMatchesFiniteDifference) {
     config.epsilon_time = 0.05;
     const AlmSolverTestAccessor solver(config, kinematics_config);
     const AlmSolverProblem problem =
-        solver.buildProblem(estimates, pre_result, {1.05, 0.6});
+        solver.buildProblem(estimates, pre_result, {1.05, 1.6});
     ASSERT_EQ(problem.numSegments(), 3);
     ASSERT_EQ(problem.variableCount(), 8);
     const AlmEsdfPenalty penalty(esdf_map, footprint, AlmEsdfPenaltyConfig{});
@@ -496,10 +506,9 @@ TEST(AlmSolverTest, InvalidInputsThrow) {
     EXPECT_THROW(solver.solve({}, pre_result, {0.0, 0.0}, esdf_map, footprint),
                  std::invalid_argument);
     // 非有限起点世界坐标
-    EXPECT_THROW(solver.solve(
-                     estimates, pre_result,
-                     {std::numeric_limits<double>::quiet_NaN(), 0.0}, esdf_map,
-                     footprint),
+    EXPECT_THROW(solver.solve(estimates, pre_result,
+                              {std::numeric_limits<double>::quiet_NaN(), 0.0},
+                              esdf_map, footprint),
                  std::invalid_argument);
     // 预处理结果段数与估计不一致
     auto mismatched_durations = pre_result;
@@ -515,23 +524,22 @@ TEST(AlmSolverTest, InvalidInputsThrow) {
     // 预处理结果含非正时长
     auto bad_duration = pre_result;
     bad_duration.durations[0] = 0.0;
-    EXPECT_THROW(solver.solve(estimates, bad_duration, {0.0, 0.0}, esdf_map,
-                              footprint),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        solver.solve(estimates, bad_duration, {0.0, 0.0}, esdf_map, footprint),
+        std::invalid_argument);
     // 预处理结果含非有限航点
     auto bad_waypoint = pre_result;
-    bad_waypoint.waypoints[0].x() =
-        std::numeric_limits<double>::quiet_NaN();
-    EXPECT_THROW(solver.solve(estimates, bad_waypoint, {0.0, 0.0}, esdf_map,
-                              footprint),
-                 std::invalid_argument);
+    bad_waypoint.waypoints[0].x() = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(
+        solver.solve(estimates, bad_waypoint, {0.0, 0.0}, esdf_map, footprint),
+        std::invalid_argument);
     // 目标位姿（末端估计）非有限
     auto bad_target = estimates;
     bad_target.back().segments.back().desired_position.x() =
         std::numeric_limits<double>::infinity();
-    EXPECT_THROW(solver.solve(bad_target, pre_result, {0.0, 0.0}, esdf_map,
-                              footprint),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        solver.solve(bad_target, pre_result, {0.0, 0.0}, esdf_map, footprint),
+        std::invalid_argument);
 }
 
 // 测试非法配置的构造期校验。

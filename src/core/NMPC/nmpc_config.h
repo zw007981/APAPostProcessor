@@ -71,7 +71,6 @@ struct NMPCConfig : public Config {
     double collision_safety_margin = EPSILON_PRECISE;
 
     // 从 proto 消息覆盖配置值（仅覆盖已设置的 optional 字段）
-    void loadFromProto(
-        const ::apa::post_processor::NMPCConfigProto& proto);
+    void loadFromProto(const ::apa::post_processor::NMPCConfigProto& proto);
 };
 }  // namespace apa_post_processor

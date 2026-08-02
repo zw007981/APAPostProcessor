@@ -1,11 +1,10 @@
-#include "core/ALM/alm_maneuver_segmenter.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <stdexcept>
 #include <vector>
 
+#include "core/ALM/alm_maneuver_segmenter.h"
 #include "util/constants.h"
 
 namespace apa_post_processor {

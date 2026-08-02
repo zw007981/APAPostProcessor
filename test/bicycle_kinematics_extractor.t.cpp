@@ -1,10 +1,10 @@
-#include "core/ALM/bicycle_kinematics_extractor.h"
-
 #include <gtest/gtest.h>
 
 #include <cmath>
 #include <functional>
 #include <stdexcept>
+
+#include "core/ALM/bicycle_kinematics_extractor.h"
 
 namespace apa_post_processor {
 namespace {

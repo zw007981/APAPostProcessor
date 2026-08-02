@@ -1,5 +1,3 @@
-#include "core/DDP/ms_ilqr.h"
-
 #include <gtest/gtest.h>
 
 #include <Eigen/Cholesky>
@@ -9,6 +7,12 @@
 
 #include "core/DDP/bicycle_dynamics.h"
 #include "core/DDP/ddp_cost.h"
+#include "core/DDP/esdf_constraint.h"
+#include "core/DDP/ms_ilqr.h"
+#include "spatial/esdf_map.h"
+#include "spatial/grid_map.h"
+#include "vehicle/vehicle_footprint_model.h"
+#include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {
 namespace {
@@ -779,6 +783,70 @@ TEST(MsIlqrTest, MeritMuAdaptiveAndIndependent) {
     }
 }
 
+// µ_m 上限封顶：自适应规则产出的棘轮阈值超过 merit_mu_max 时被截断到
+// 上限（小缺陷下的病态放大被拦截），不超过时与不封顶逐位一致；
+// 上限必须不小于 µ₀（构造校验拒绝地板/上限冲突的非法配置）
+TEST(MsIlqrTest, MeritMuAdaptiveCappedAtMax) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const std::size_t num_steps = 12;
+    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {4, 8, 12});
+    const DdpState offset =
+        MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
+    for (const std::size_t node : {4U, 8U, 12U}) {
+        problem.states[node] += offset;
+    }
+    // 第一趟不封顶：记录 µ_m 历史峰值，据此选介于峰值与 µ₀ 之间的上限
+    MsIlqrTestAccess uncapped_solver(MakeConfig(), &dynamics, &evaluator);
+    const auto uncapped = uncapped_solver.solve(
+        problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
+        problem.states, problem.controls);
+    ASSERT_NE(uncapped.status, MsIlqrStatus::REGULARIZATION_OVERFLOW);
+    double peak_mu = 0.0;
+    for (const auto& record : uncapped_solver.history()) {
+        peak_mu = std::max(peak_mu, record.merit_mu);
+    }
+    const double mu0 = uncapped_solver.config_.merit_mu0;
+    ASSERT_GT(peak_mu, mu0);  // 前置：自适应规则确实抬升过 µ_m
+    // 第二趟封顶到 µ₀ 与峰值的中点（保证 ≥µ₀ 且必然截断峰值轮次）：
+    // 逐轮断言 µ_m 恰好是 min(不封顶值, 上限)
+    const double mu_cap = 0.5 * (peak_mu + mu0);
+    MsIlqrConfig capped_config = MakeConfig();
+    capped_config.merit_mu_max = mu_cap;
+    MsIlqrTestAccess capped_solver(capped_config, &dynamics, &evaluator);
+    const auto capped = capped_solver.solve(
+        problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
+        problem.states, problem.controls);
+    ASSERT_NE(capped.status, MsIlqrStatus::REGULARIZATION_OVERFLOW);
+    const auto& uncapped_history = uncapped_solver.history();
+    const auto& capped_history = capped_solver.history();
+    // 两趟历史长度可能不同（封顶改变接受行为），逐轮对比到较短者为止；
+    // 首个分叉点之前的 µ_m 必须精确等于 min(不封顶值, 上限)
+    bool cap_observed = false;
+    for (std::size_t i = 0;
+         i < std::min(uncapped_history.size(), capped_history.size()); ++i) {
+        const double expected = std::min(uncapped_history[i].merit_mu, mu_cap);
+        if (std::abs(capped_history[i].merit_mu - expected) >
+            1e-9 * (1.0 + expected)) {
+            break;  // 求解轨迹分叉后不再可比
+        }
+        if (capped_history[i].merit_mu >= mu_cap - 1e-12) {
+            cap_observed = true;
+        }
+    }
+    EXPECT_TRUE(cap_observed) << "上限从未生效，前置假设不成立";
+    // 全部历史的 µ_m 不得超过上限
+    for (const auto& record : capped_history) {
+        EXPECT_LE(record.merit_mu, mu_cap + 1e-12);
+    }
+    // 非法配置：上限小于 µ₀ → 构造拒绝
+    MsIlqrConfig bad_config = MakeConfig();
+    bad_config.merit_mu_max = 0.5 * bad_config.merit_mu0;
+    EXPECT_THROW(MsIlqrTestAccess(bad_config, &dynamics, &evaluator),
+                 std::invalid_argument);
+}
+
 // 输入契约校验：空指针/非法配置/维度不符/打靶节点越界一律抛
 // std::invalid_argument
 TEST(MsIlqrTest, InputValidation) {
@@ -880,6 +948,69 @@ TEST(MsIlqrTest, SingleStepProblemSmoke) {
     EXPECT_LT(result.final_defect_norm, 1e-12);
     ASSERT_EQ(2U, solver.states().size());
     EXPECT_LE(result.iterations, 5);
+}
+
+// L8.3 前向定义域守卫：两个确定性场景——(A) 名义轨迹本身越出
+// 「地图 ⊕ margin」时，每个试探候选都携带越界状态、全部回溯拒绝
+// （拒绝计数 >0、以 REGULARIZATION_OVERFLOW 诚实失败而非坐标爆炸）；
+// (B) 守卫关闭（margin=0）时同一问题拒绝计数为 0、求解正常推进
+TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
+    const BicycleDynamics dynamics(kWheelbase);
+    // 地图 [0,20)²（margin=2.0 ⟹ 域 y≤22）
+    const GridMap grid_map(0.1, 200, 200, Position{0.0, 0.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleParams vehicle_params{4.9, 1.9, 2.7, 0.48};
+    const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 1);
+    const DdpEsdfConstraint esdf_constraint(esdf_map, footprint_model);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, &esdf_constraint);
+    // 名义轨迹：从 y=21.9 以 v=1.0 朝 +y 直行，第 2 步起越出 y≤22——
+    // 每个候选（= 名义 + α·修正）都携带越界状态
+    const std::size_t num_steps = 20;
+    std::vector<Pose> poses;
+    poses.reserve(num_steps + 1);
+    for (std::size_t k = 0; k <= num_steps; ++k) {
+        poses.emplace_back(10.0, 21.9 + 0.1 * static_cast<double>(k), 0.5 * PI);
+    }
+    const DdpReference reference = MakeReference(poses, kDt, {num_steps});
+    const DdpState x0 = MakeState(10.0, 21.9, 0.5 * PI, 1.0, 0.0, 0.0, 0.0);
+    DdpAlignedVec<DdpControl> controls;
+    controls.resize(num_steps, DdpControl::Zero());
+    const DdpAlignedVec<DdpState> states =
+        RolloutStates(dynamics, x0, controls, kDt);
+    // (A) 守卫开启：越界候选被拒绝（计数 >0），被接受的状态轨迹始终留在
+    // 域内（y ≤ 22），无坐标爆炸（参考在域外不可达，收敛与否不作断言）
+    {
+        MsIlqrConfig config = MakeConfig();
+        config.domain_guard_margin = 2.0;
+        MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+        const MsIlqrResult result =
+            solver.solve(reference, MakeMultipliers(num_steps),
+                         MakeCostInput(10.0), states, controls);
+        EXPECT_GT(result.domain_guard_rejections, 0);
+        for (const auto& state : solver.states()) {
+            EXPECT_LE(state(DDP_IDX_Y), 22.0 + 1e-9);
+            EXPECT_LT(std::abs(state(DDP_IDX_X)), 1e6);
+            EXPECT_LT(std::abs(state(DDP_IDX_Y)), 1e6);
+        }
+    }
+    // (B) 守卫关闭：同一问题拒绝计数为 0、求解正常推进
+    {
+        MsIlqrConfig config = MakeConfig();
+        config.domain_guard_margin = 0.0;
+        MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+        const MsIlqrResult result =
+            solver.solve(reference, MakeMultipliers(num_steps),
+                         MakeCostInput(10.0), states, controls);
+        EXPECT_EQ(result.domain_guard_rejections, 0);
+        EXPECT_GT(result.iterations, 0);
+    }
+    // 非法 margin 构造拒绝
+    {
+        MsIlqrConfig bad = MakeConfig();
+        bad.domain_guard_margin = -1.0;
+        EXPECT_THROW(MsIlqrTestAccess(bad, &dynamics, &evaluator),
+                     std::invalid_argument);
+    }
 }
 
 }  // namespace

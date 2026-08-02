@@ -145,8 +145,9 @@ TEST(NmpcSolverTest, ToPathReconstructsManeuverStructureFromResult) {
     }
 }
 
-// 测试ToPath()对状态增广（7 维，BicycleModelJerk）结果按状态分量回填 a/delta_dot。
-// 增广模型中 a/delta_dot 是状态（索引 5/6）、每个采样点都有真值，控制序列承载的是
+// 测试ToPath()对状态增广（7 维，BicycleModelJerk）结果按状态分量回填
+// a/delta_dot。 增广模型中 a/delta_dot 是状态（索引
+// 5/6）、每个采样点都有真值，控制序列承载的是
 // jerk/ddelta_dot（语义不同、量级刻意拉开），若误从控制序列回填会张冠李戴。
 TEST(NmpcSolverTest, ToPathFillsAugmentedStatesForJerkModelResults) {
     NmpcSolver::Result result;
@@ -160,7 +161,8 @@ TEST(NmpcSolverTest, ToPathFillsAugmentedStatesForJerkModelResults) {
     }
     for (int i = 0; i < 2; ++i) {
         stc_SQP::Vector u(2);
-        // jerk/ddelta_dot 取值与状态中的 a/delta_dot 刻意拉开，回填错来源必被发现
+        // jerk/ddelta_dot 取值与状态中的 a/delta_dot
+        // 刻意拉开，回填错来源必被发现
         u << 9.0 + i, -7.0 - i;
         result.trajectory.u.push_back(u);
     }

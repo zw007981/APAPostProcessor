@@ -51,6 +51,31 @@ DdpCostEvaluator::DdpCostEvaluator(DdpCostConfig config,
         !std::isfinite(config_.delta_max) || config_.delta_max <= 0.0) {
         throw std::invalid_argument("幅值边界必须为正有限值");
     }
+    // δ 奇异区护栏：权重非负有限；护栏阈值必须落在 (δ_max, π/2) 内——
+    // ≤δ_max 会把合法解推入罚区，≥π/2 则护栏失效（奇异区敞开）
+    if (!std::isfinite(config_.weight_delta_guard) ||
+        config_.weight_delta_guard < 0.0) {
+        throw std::invalid_argument("δ 护栏权重必须为非负有限值");
+    }
+    if (config_.weight_delta_guard > 0.0 &&
+        !(config_.delta_guard > config_.delta_max &&
+          config_.delta_guard < 3.141592653589793 / 2.0)) {
+        throw std::invalid_argument("δ 护栏阈值必须大于 δ_max 且小于 π/2");
+    }
+    // 曲率正则：权重非负有限；启用时轴距必须已注入（κ=tanδ/L 的系数
+    // 来源，未注入即启用属装配错误——静默放行会让正则项恒零失效）
+    if (!std::isfinite(config_.weight_curvature) ||
+        config_.weight_curvature < 0.0) {
+        throw std::invalid_argument("曲率正则权重必须为非负有限值");
+    }
+    if (!std::isfinite(config_.weight_velocity) ||
+        config_.weight_velocity < 0.0) {
+        throw std::invalid_argument("弧长惩罚权重必须为非负有限值");
+    }
+    if (config_.weight_curvature > 0.0 && !(config_.wheelbase > 0.0)) {
+        throw std::invalid_argument(
+            "曲率正则启用时轴距必须为正（经车辆参数注入）");
+    }
 }
 
 DdpCostEvaluation DdpCostEvaluator::evaluate(
@@ -79,11 +104,24 @@ DdpCostEvaluation DdpCostEvaluator::evaluate(
         input.anneal_exempt_mask->size() != num_poses) {
         throw std::invalid_argument("豁免掩码尺寸必须为 N+1");
     }
+    if (input.melt_candidate_mask != nullptr) {
+        if (input.melt_candidate_mask->size() != num_poses) {
+            throw std::invalid_argument("候选待融掩码尺寸必须为 N+1");
+        }
+        if (!std::isfinite(input.candidate_tracking_weight) ||
+            input.candidate_tracking_weight < 0.0) {
+            throw std::invalid_argument("候选段跟踪权重必须为非负有限值");
+        }
+    }
     if (!std::isfinite(reference.dt) || reference.dt <= 0.0) {
         throw std::invalid_argument("参考轨迹 dt 必须为正有限值");
     }
     if (!std::isfinite(input.tracking_weight)) {
         throw std::invalid_argument("跟踪权重必须为有限值");
+    }
+    // 逐轮 β 门宽：0 = 回退配置静态值；负值/非有限属调度装配错误
+    if (!std::isfinite(input.shift_beta) || input.shift_beta < 0.0) {
+        throw std::invalid_argument("换挡代理逐轮门宽必须为非负有限值");
     }
     // 门控一致性校验（"阶段一禁止启用"的断言防御）：门控计划与门控乘子
     // 必须同在场——阶段一调用路径两者恒不在场，仅一方在场说明阶段二
@@ -155,11 +193,15 @@ void DdpCostEvaluator::evaluateRunningStage(
     out->lu(DDP_IDX_ETA) += config_.weight_steer_accel * eta * dt;
     out->luu(DDP_IDX_JERK, DDP_IDX_JERK) += config_.weight_jerk * dt;
     out->luu(DDP_IDX_ETA, DDP_IDX_ETA) += config_.weight_steer_accel * dt;
-    // 退火跟踪项：豁免点恒用 w_ref,0，其余点用外部输入的 w_ref(r)
+    // 退火跟踪项：权重选择优先级「豁免点恒用 w_ref,0 > 候选待融段用深
+    // 退火权重 > 普通点用 w_ref(r)」
     const auto& mask = input.anneal_exempt_mask;
+    const bool is_candidate =
+        input.melt_candidate_mask != nullptr && (*input.melt_candidate_mask)[k];
     const double w_ref = (mask != nullptr && (*mask)[k])
                              ? config_.weight_ref_base
-                             : input.tracking_weight;
+                             : is_candidate ? input.candidate_tracking_weight
+                                            : input.tracking_weight;
     const Pose& ref = reference.poses[k];
     const double err_x = x(DDP_IDX_X) - ref.x;
     const double err_y = x(DDP_IDX_Y) - ref.y;
@@ -173,9 +215,29 @@ void DdpCostEvaluator::evaluateRunningStage(
     out->lxx(DDP_IDX_X, DDP_IDX_X) += w_ref * dt;
     out->lxx(DDP_IDX_Y, DDP_IDX_Y) += w_ref * dt;
     out->lxx(DDP_IDX_THETA, DDP_IDX_THETA) += config_.weight_theta * dt;
-    // 可选换挡代理（默认关闭）：纯状态代价
-    if (config_.weight_shift > 0.0) {
-        accumulateShiftProxy(x, dt, out);
+    // 可选换挡代理（默认关闭）：纯状态代价，仅阶段一生效——门控计划在场
+    // （阶段二）时换挡位置已被符号门/接缝等式钉死，代理与门控互斥关闭；
+    // 门宽取逐轮退火输入（>0），未指定（=0）回退配置静态值
+    if (config_.weight_shift > 0.0 && input.gating_plan == nullptr) {
+        const double beta =
+            input.shift_beta > 0.0 ? input.shift_beta : config_.shift_beta;
+        accumulateShiftProxy(x, dt, beta, out);
+    }
+    // δ 奇异区护栏（默认关闭）：从第 0 次内层迭代即生效的软屏障
+    if (config_.weight_delta_guard > 0.0) {
+        accumulateDeltaGuard(x, out);
+    }
+    // 曲率正则（默认关闭）：平滑项对 δ 量级零梯度，本项是目标函数中
+    // 唯一的曲率抑制力
+    if (config_.weight_curvature > 0.0) {
+        accumulateCurvaturePenalty(x, dt, out);
+    }
+    // 弧长惩罚（默认关闭）：固定时域下唯一反对轨迹跑飞的项
+    if (config_.weight_velocity > 0.0) {
+        const double v = x(DDP_IDX_V);
+        out->cost_velocity += config_.weight_velocity * v * v * dt;
+        out->lx(DDP_IDX_V) += 2.0 * config_.weight_velocity * v * dt;
+        out->lxx(DDP_IDX_V, DDP_IDX_V) += 2.0 * config_.weight_velocity * dt;
     }
     accumulateAmplitudeConstraints(k, x, multipliers, out);
     // 阶段二门控（仅计划在场时累加；阶段一 gating_plan 恒为 nullptr）
@@ -226,12 +288,12 @@ void DdpCostEvaluator::evaluateTerminalStage(
 }
 
 void DdpCostEvaluator::accumulateShiftProxy(
-    const DdpState& x, double dt, DdpStageCostDerivatives* out) const {
+    const DdpState& x, double dt, double beta,
+    DdpStageCostDerivatives* out) const {
     const double v = x(DDP_IDX_V);
     const double a = x(DDP_IDX_A);
     // 显式一步预测 v⁺ = v + a·dt（不含控制的 dt² 修正，保持纯状态代价）
     const double w = v + a * dt;
-    const double beta = config_.shift_beta;
     const double tanh_v = std::tanh(v / beta);
     const double tanh_w = std::tanh(w / beta);
     // σ(−z)=1−σ(z) 把双门乘积化简为 P = A + D − 2AD（A=σ(v)、D=σ(v⁺)），
@@ -248,13 +310,92 @@ void DdpCostEvaluator::accumulateShiftProxy(
     out->cost_shift += weight * (sig_v + sig_w - 2.0 * sig_v * sig_w);
     out->lx(DDP_IDX_V) += weight * (dsig_v * dp_da + dsig_w * dp_dd);
     out->lx(DDP_IDX_A) += weight * dt * dsig_w * dp_dd;
-    out->lxx(DDP_IDX_V, DDP_IDX_V) +=
+    // 门区精确二阶导不定（σ_β 二阶导变号：v≈0 处 (v,v) 元约 −w_g/β²）——
+    // 负曲率注入 Riccati 会破坏 GN 假设（实测各档位均使内层失稳），
+    // 对 (v,a) 2×2 块做负特征值截断的 PSD 投影，只保留正曲率
+    double h_vv =
         weight * (ddsig_v * dp_da + ddsig_w * dp_dd - 4.0 * dsig_v * dsig_w);
-    const double mixed =
-        weight * dt * (ddsig_w * dp_dd - 2.0 * dsig_v * dsig_w);
-    out->lxx(DDP_IDX_V, DDP_IDX_A) += mixed;
-    out->lxx(DDP_IDX_A, DDP_IDX_V) += mixed;
-    out->lxx(DDP_IDX_A, DDP_IDX_A) += weight * dt * dt * ddsig_w * dp_dd;
+    double h_va = weight * dt * (ddsig_w * dp_dd - 2.0 * dsig_v * dsig_w);
+    double h_aa = weight * dt * dt * ddsig_w * dp_dd;
+    // 2×2 对称块闭式特征分解：λ± = tr/2 ± √((h_vv−h_aa)²/4 + h_va²)
+    const double trace = h_vv + h_aa;
+    const double root = std::hypot(0.5 * (h_vv - h_aa), h_va);
+    const double lambda_max = 0.5 * trace + root;
+    const double lambda_min = 0.5 * trace - root;
+    if (lambda_min < 0.0) {
+        if (lambda_max <= 0.0) {
+            // 整块负定：投影为零矩阵（该项在门区只留梯度、不留曲率）
+            h_vv = 0.0;
+            h_va = 0.0;
+            h_aa = 0.0;
+        } else {
+            // PSD 部分 = λ_max·u·uᵀ；取两个候选特征向量中范数较大者
+            // （(h_va, λ−h_vv) 与 (λ−h_aa, h_va) 在 q≈0 时必有一个退化）
+            double ux = h_va;
+            double uy = lambda_max - h_vv;
+            const double alt_x = lambda_max - h_aa;
+            const double alt_y = h_va;
+            if (alt_x * alt_x + alt_y * alt_y > ux * ux + uy * uy) {
+                ux = alt_x;
+                uy = alt_y;
+            }
+            const double norm = std::hypot(ux, uy);
+            if (norm > 0.0) {
+                ux /= norm;
+                uy /= norm;
+                h_vv = lambda_max * ux * ux;
+                h_va = lambda_max * ux * uy;
+                h_aa = lambda_max * uy * uy;
+            } else {
+                // 理论不可达（λ_min<0<λ_max 蕴含两候选不同时为零），
+                // 防御性清零
+                h_vv = 0.0;
+                h_va = 0.0;
+                h_aa = 0.0;
+            }
+        }
+    }
+    out->lxx(DDP_IDX_V, DDP_IDX_V) += h_vv;
+    out->lxx(DDP_IDX_V, DDP_IDX_A) += h_va;
+    out->lxx(DDP_IDX_A, DDP_IDX_V) += h_va;
+    out->lxx(DDP_IDX_A, DDP_IDX_A) += h_aa;
+}
+
+void DdpCostEvaluator::accumulateDeltaGuard(
+    const DdpState& x, DdpStageCostDerivatives* out) const {
+    const double delta = x(DDP_IDX_DELTA);
+    const double excess = std::abs(delta) - config_.delta_guard;
+    // C¹ 铰链：未越出护栏时完全退出（代价与导数恒零）——健康解
+    // （|δ|≤δ_max+平衡容差）的行为逐位不变
+    if (excess <= 0.0) {
+        return;
+    }
+    const double weight = config_.weight_delta_guard;
+    const double sign = (delta > 0.0) ? 1.0 : -1.0;
+    out->cost_delta_guard += weight * excess * excess;
+    out->lx(DDP_IDX_DELTA) += 2.0 * weight * excess * sign;
+    out->lxx(DDP_IDX_DELTA, DDP_IDX_DELTA) += 2.0 * weight;
+}
+
+void DdpCostEvaluator::accumulateCurvaturePenalty(
+    const DdpState& x, double dt, DdpStageCostDerivatives* out) const {
+    const double delta = x(DDP_IDX_DELTA);
+    const double tan_delta = std::tan(delta);
+    const double cos_delta = std::cos(delta);
+    const double sec2_delta = 1.0 / (cos_delta * cos_delta);
+    const double weight = config_.weight_curvature;
+    const double inv_l2 = 1.0 / (config_.wheelbase * config_.wheelbase);
+    // ℓ_κ = w·tan²δ/L²（积分型，含 dt）；梯度 2w·tanδ·sec²δ/L² 以三阶
+    // 极点发散（δ→±π/2），严格快于动力学项的二阶发散——构成 δ 奇异区
+    // 的真正内屏障；精确 Hessian (2w/L²)(sec⁴δ + 2tan²δ·sec²δ) 处处为正
+    // （天然 PSD，直接进 Riccati，无需投影）
+    out->cost_curvature += weight * tan_delta * tan_delta * inv_l2 * dt;
+    out->lx(DDP_IDX_DELTA) +=
+        2.0 * weight * tan_delta * sec2_delta * inv_l2 * dt;
+    out->lxx(DDP_IDX_DELTA, DDP_IDX_DELTA) +=
+        2.0 * weight *
+        (sec2_delta * sec2_delta + 2.0 * tan_delta * tan_delta * sec2_delta) *
+        inv_l2 * dt;
 }
 
 void DdpCostEvaluator::accumulateAmplitudeConstraints(

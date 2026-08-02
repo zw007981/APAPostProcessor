@@ -12,5 +12,6 @@
 		"missingIncludeSystem",
 		"preprocessorErrorDirective:${workspaceFolder}/build/Debug/apa_post_process.pb.h",
 		"toomanyconfigs"
-	]
+	],
+	"python.terminal.activateEnvironment": false
 }

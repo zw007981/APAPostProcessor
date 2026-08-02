@@ -1,5 +1,3 @@
-#include "util/time_profile.h"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -7,6 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "util/time_profile.h"
 #include "vehicle/vehicle_params.h"
 
 namespace apa_post_processor {
