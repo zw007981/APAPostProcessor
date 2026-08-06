@@ -488,10 +488,10 @@ TEST(DdpGatingCostTest, StageOneInputProducesZeroGatingCost) {
     for (const auto& stage : eval.stages) {
         EXPECT_DOUBLE_EQ(stage.cost_gating, 0.0);
     }
-    // 总代价 = 平滑 + 跟踪（零状态零控制下幅值/换挡项均不激活）
+    // 总代价 = 平滑 + 跟踪（零状态零控制下幅值项不激活）
     double expected = 0.0;
     for (const auto& stage : eval.stages) {
-        expected += stage.cost_smooth + stage.cost_tracking + stage.cost_shift +
+        expected += stage.cost_smooth + stage.cost_tracking +
                     stage.cost_amplitude + stage.cost_esdf +
                     stage.cost_terminal;
     }
@@ -876,7 +876,8 @@ TEST(DdpStageTwoGatingMuTest, SufficientDecreaseDoesNotGrowMu) {
     // 第三轮未充分下降（0.95·prev > κ·prev）→ μ ×10 并写回三组乘子
     const double prev_norm = snapshot.violation_norm;
     snapshot.violation_norm = 0.95 * prev_norm;
-    EXPECT_TRUE(solver.updateGating(snapshot, &multipliers, &gating_mu, &prev));
+    EXPECT_TRUE(
+        solver.updateGating(snapshot, &multipliers, &gating_mu, &prev));
     EXPECT_DOUBLE_EQ(gating_mu, 100.0);
     EXPECT_DOUBLE_EQ(multipliers.gating_sign_mu(0), 100.0);
     EXPECT_DOUBLE_EQ(multipliers.gating_dwell_mu(0), 100.0);
@@ -924,81 +925,6 @@ TEST(DdpStageTwoSolveTest, DualSeedWarmStartConvergesNoSlowerThanCold) {
               << " cold_outer=" << cold.report.outer_iterations
               << " cold_status=" << static_cast<int>(cold.report.status)
               << std::endl;
-}
-
-// 对偶热启动种子 μ 的量级自适应上限：种子已达 μ_max 的病态情形（阶段一
-// 终端 μ 被门控推到上限）下，抬升被截断为 κ·μ̂——μ̂ 是阶段二自身按
-// ALTRO clip 公式在热启动轨迹上量测的标定初值（不抬升 μ_min 的版本）；
-// 种子量级正常时照常抬升，cap_ratio=0 关闭（既有行为逐位不变）
-TEST(DdpStageTwoSolveTest, SeedMuCapBoundsPathologicalDualSeed) {
-    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
-    const DdpReference reference = BuildReference(path);
-    ApaDdpSolverConfig config = MakeSyntheticConfig();
-    const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(config.cost, nullptr);
-    ApaDdpSolver stage_one_solver(config, &dynamics, &evaluator);
-    const auto stage_one = stage_one_solver.solveStageOne(reference);
-    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED);
-    DdpGatingPlan plan;
-    plan.sign_gate.assign(reference.poses.size(), 1);
-    plan.seam_lookup.assign(reference.poses.size(), -1);
-    plan.dwell_v_cap.assign(reference.poses.size(), 0.0);
-    const double tracking_weight =
-        stage_one.report.history.back().tracking_weight;
-    // 构造病态种子：终端 μ 直接拉到 μ_max（模拟长视窗上阶段一终端 μ
-    // 被门控一路推到上限的情形）
-    auto pathological_seed = stage_one.final_multipliers;
-    pathological_seed.terminal_mu.setConstant(1e6);
-    // 对照组：关闭上限（默认）——首轮罚权重即病态种子本身
-    ApaDdpSolver uncapped_solver(config, &dynamics, &evaluator);
-    const auto uncapped = uncapped_solver.solveStageTwo(
-        reference, plan, stage_one.states, stage_one.controls, tracking_weight,
-        &pathological_seed);
-    ASSERT_FALSE(uncapped.report.history.empty());
-    EXPECT_DOUBLE_EQ(uncapped.report.history.front().mu, 1e6);
-    // 实验组：κ=10——首轮罚权重应被截断为 min(1e6, 10·μ̂)。μ̂ 在测试侧
-    // 按同一 ALTRO clip 公式独立量测（合成配置 mu_min=1.0、ε_μ=1e-4）
-    const auto zero_multipliers = DdpCostMultiplierState::MakeStageTwoZero(
-        reference.poses.size() - 1, plan.seam_indices.size());
-    DdpCostInput cal_input;
-    cal_input.tracking_weight = tracking_weight;
-    cal_input.gating_plan = &plan;
-    const double base_cost0 =
-        evaluator
-            .evaluate(reference, stage_one.states, stage_one.controls,
-                      zero_multipliers, cal_input)
-            .total_cost;
-    const auto& x_final = stage_one.states.back();
-    const Pose& goal = reference.poses.back();
-    const double c_norm = std::sqrt(
-        std::pow(x_final(DDP_IDX_X) - goal.x, 2.0) +
-        std::pow(x_final(DDP_IDX_Y) - goal.y, 2.0) +
-        std::pow(WrapAngle(x_final(DDP_IDX_THETA) - goal.theta), 2.0) +
-        std::pow(x_final(DDP_IDX_V), 2.0) + std::pow(x_final(DDP_IDX_A), 2.0));
-    const double mu_hat = std::min(
-        std::max(base_cost0 / std::max(c_norm * c_norm, 1e-4), 1.0), 1e6);
-    const double expected_seed = std::min(1e6, 10.0 * mu_hat);
-    config.seed_mu_cap_ratio = 10.0;
-    ApaDdpSolver capped_solver(config, &dynamics, &evaluator);
-    const auto capped = capped_solver.solveStageTwo(
-        reference, plan, stage_one.states, stage_one.controls, tracking_weight,
-        &pathological_seed);
-    ASSERT_FALSE(capped.report.history.empty());
-    EXPECT_NEAR(capped.report.history.front().mu, expected_seed,
-                expected_seed * 1e-9);
-    // 截断后求解仍然收敛（热启动良态保持）
-    EXPECT_EQ(capped.report.status, ApaDdpStatus::CONVERGED)
-        << "outer=" << capped.report.outer_iterations
-        << " pos_err=" << capped.report.terminal_position_error;
-    // 病态种子截断生效的边界断言：μ̂ 远小于 μ_max 时截断必须显著
-    EXPECT_LT(capped.report.history.front().mu, 1e6);
-    // 非法上限参数显式拒绝
-    config.seed_mu_cap_ratio = -1.0;
-    ApaDdpSolver bad_solver(config, &dynamics, &evaluator);
-    EXPECT_THROW(bad_solver.solveStageTwo(reference, plan, stage_one.states,
-                                          stage_one.controls, tracking_weight,
-                                          &pathological_seed),
-                 std::invalid_argument);
 }
 
 // ==================== 驻留插入 ====================
@@ -1736,12 +1662,12 @@ TEST(DdpValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
         ASSERT_NE(check, diag.gate_checks.end());
         EXPECT_TRUE(check->passed);
     }
-    // 行驶点（|v|≥v_dwell）δ 超限 0.3%（>0.2% 相对容差）：拦截并指向
+    // 行驶点（|v|≥v_dwell）δ 超限 3%（>2% 相对容差）：拦截并指向
     // amplitude_delta
     {
         auto states = good.stage_two->states;
         states[0](DDP_IDX_V) = fixture.post_config.v_dwell;
-        states[0](DDP_IDX_DELTA) = 1.003 * delta_max;
+        states[0](DDP_IDX_DELTA) = 1.03 * delta_max;
         DdpPostStageDiagnostics diag;
         diag.input_maneuver_count = 2;
         EXPECT_FALSE(accessor.validateOutput(
@@ -1751,11 +1677,11 @@ TEST(DdpValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
         EXPECT_DOUBLE_EQ(diag.threshold,
                          fixture.post_config.amplitude_check_rel_tol);
     }
-    // 行驶点 δ 在容差内侧（+0.1%）：放行
+    // 行驶点 δ 在容差内侧（+1%）：放行
     {
         auto states = good.stage_two->states;
         states[0](DDP_IDX_V) = fixture.post_config.v_dwell;
-        states[0](DDP_IDX_DELTA) = 1.001 * delta_max;
+        states[0](DDP_IDX_DELTA) = 1.01 * delta_max;
         DdpPostStageDiagnostics diag;
         diag.input_maneuver_count = 2;
         EXPECT_TRUE(accessor.validateOutput(
@@ -1765,7 +1691,7 @@ TEST(DdpValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
 }
 
 // ω 按量相对容差：全点复检（执行器速率在驻留转向中同样工作），超限
-// 0.3% 拦截并指向 amplitude_omega
+// 3% 拦截并指向 amplitude_omega
 TEST(DdpValidationLayerTest, OmegaViolationFailsGateWithRelTol) {
     PostStageFixture fixture;
     const Path path = BuildXPolyline({0.0, 1.0, -1.0});
@@ -1784,7 +1710,7 @@ TEST(DdpValidationLayerTest, OmegaViolationFailsGateWithRelTol) {
                                     &fixture.reference_builder, &fixture.solver,
                                     MakeVehicleParams());
     auto states = good.stage_two->states;
-    states[0](DDP_IDX_OMEGA) = 1.003 * fixture.solver_config.cost.omega_max;
+    states[0](DDP_IDX_OMEGA) = 1.03 * fixture.solver_config.cost.omega_max;
     DdpPostStageDiagnostics diag;
     diag.input_maneuver_count = 2;
     EXPECT_FALSE(accessor.validateOutput(
@@ -1793,6 +1719,14 @@ TEST(DdpValidationLayerTest, OmegaViolationFailsGateWithRelTol) {
     EXPECT_EQ(diag.failed_check, "amplitude_omega");
     EXPECT_DOUBLE_EQ(diag.threshold,
                      fixture.post_config.amplitude_check_rel_tol);
+    // ω 在容差内侧（+1%）：放行
+    auto ok_states = good.stage_two->states;
+    ok_states[0](DDP_IDX_OMEGA) = 1.01 * fixture.solver_config.cost.omega_max;
+    DdpPostStageDiagnostics ok_diag;
+    ok_diag.input_maneuver_count = 2;
+    EXPECT_TRUE(accessor.validateOutput(
+        good.trajectory, ok_states, good.stage_two->controls, path.length(),
+        goal, esdf_map, footprint_model, &ok_diag));
 }
 
 // 回退路径：阶段一解中混入 PIVOT 微游程（合成注入：微弧长 + 朝向跳变

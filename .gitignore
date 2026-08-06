@@ -9,6 +9,8 @@ log/
 milestones/
 quality-audits/
 src/generated/
+altro-main/
+fig/test/
 
 .favorites.json
 note.md

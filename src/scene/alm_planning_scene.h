@@ -20,14 +20,15 @@ class ALMPlanningScene : public PlanningScene {
     // ALM 专有字段的映射随每算法一详情文件的约定扩展）
     void loadConfigDetails(const std::string& config_details_path) override;
     // 最近一次 ALM 优化产出的轨迹（未执行 optimize() 或失败时为空）
-    const Trajectory& optimizedTraj() const override { return alm_traj_; }
+    const Trajectory& optimizedTraj() const override { return optimized_traj_; }
     // 算法名（绘图标签与日志用）
     std::string algorithmName() const override { return "ALM"; }
     // 带类型访问 ALM 专有配置（构造期已固化类型，无下行转换）
     AlmConfig& almConfig() { return *alm_config_; }
     const AlmConfig& almConfig() const { return *alm_config_; }
-    // 最近一次 ALM 优化产出的轨迹
-    const Trajectory& almTraj() const { return alm_traj_; }
+    // 最近一次 ALM 优化产出的轨迹（与 optimizedTraj() 同源，保留以兼容
+    // 算法特定的旧调用方；Phase 3 起调用方应统一使用 optimizedTraj()）
+    const Trajectory& almTraj() const { return optimized_traj_; }
     // 最近一次 ALM 预处理粗优化产出的轨迹（"优化前"对比基线，与 almTraj()
     // 经同一套离散化管线产出）；预处理失败或未执行 optimize() 时为空
     const Trajectory& almPreprocessedTraj() const {
@@ -38,8 +39,6 @@ class ALMPlanningScene : public PlanningScene {
     // 构造期由 unique_ptr<AlmConfig> 直接取得的类型化配置观察指针（非拥有，
     // 生命周期与基类持有的配置对象一致）
     AlmConfig* alm_config_;
-    // ALM 优化后轨迹（采样点携带 θ-s 轨迹全局时刻）
-    Trajectory alm_traj_;
     // ALM 预处理粗优化轨迹（采样点携带 θ-s 轨迹全局时刻，"优化前"对比基线）
     Trajectory alm_preprocessed_traj_;
 

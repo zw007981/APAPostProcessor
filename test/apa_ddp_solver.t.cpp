@@ -342,7 +342,7 @@ TEST(ApaDdpSolverTest, StageOneWarmStartReconvergesQuickly) {
 
 // 内层迭代超限不致命（显式钉住）：把内层迭代上限压到 1，每一轮内层
 // 都必然以 MAX_ITERATIONS 退出（不可能收敛），验证外层不因此判败，
-// 而是沿用当前迭代点继续推进 λ/μ 更新与退火——全程无冷重启发生，
+// 而是沿用当前迭代点继续推进外层调度——全程无冷重启发生，
 // 终点误差跨轮次显著下降
 TEST(ApaDdpSolverTest, InnerMaxIterationsIsNotFatal) {
     const Path path = BuildXPolyline({0.0, 3.0});
@@ -370,6 +370,28 @@ TEST(ApaDdpSolverTest, InnerMaxIterationsIsNotFatal) {
     std::cout << "[DDP-INNERCAP] outer=" << result.report.outer_iterations
               << " first_err=" << first_err << " last_err=" << last_err
               << std::endl;
+}
+
+// 白盒访问：派生类将受保护方法公开给单元测试
+class ApaDdpTestAccess : public ApaDdpSolver {
+   public:
+    using ApaDdpSolver::ApaDdpSolver;
+    using ApaDdpSolver::MeritAlHook;
+};
+
+// merit 地板的挂钩量真值表（A1 修复）：终端/幅值两组 AL 罚权重必须
+// 取大——增广代价由两组共同构成，只挂终端组会在幅值组主导的场景
+// 低估「缺陷修复与代价下降的交换比」（data6 即幅值组主导：
+// µ_amp ≥ 1e4 而 µ_term ≤ 10135.8，只挂终端时地板不激活）
+TEST(ApaDdpSolverTest, MeritAlHookUsesMaxOfBothGroups) {
+    // 幅值组主导（data6 形态）：挂钩取幅值组
+    EXPECT_DOUBLE_EQ(ApaDdpTestAccess::MeritAlHook(10135.8, 1e5), 1e5);
+    // 终端组主导（data3 阶段二病态种子形态）：挂钩取终端组
+    EXPECT_DOUBLE_EQ(ApaDdpTestAccess::MeritAlHook(1e6, 1e4), 1e6);
+    // 两组相等：取任一（结果相同）
+    EXPECT_DOUBLE_EQ(ApaDdpTestAccess::MeritAlHook(1e3, 1e3), 1e3);
+    // 两组均为首轮临时值：地板仍低（挂钩不放大首轮弱启动）
+    EXPECT_DOUBLE_EQ(ApaDdpTestAccess::MeritAlHook(1.0, 1.0), 1.0);
 }
 
 // 冷重启链路（显式钉住）：把 reg_max 压到与 reg_initial 相等（ρ_reg 无
@@ -490,4 +512,43 @@ TEST(ApaDdpSolverTest, RealDatasetStageOneSmoke) {
 }
 
 }  // namespace
+
+// 临时探针（调试用，随诊断结束移除）：data3 阶段一在不同 η_κ 盒下的内层逐迭代轨迹
+TEST(ApaDdpSolverTest, ProbeKappaRound0Iterations) {
+    ::apa::post_processor::OptimizeRequest request;
+    ASSERT_EQ(
+        DataLoader::LoadProtoFromJsonFile("data/mid_park/data3.json", request),
+        LoadResult::SUCCESS);
+    const auto vehicle_params = VehicleParams::FromProto(request.vehicle());
+    const Path init_path = Path::FromProto(request.initial_path());
+    const GridMap grid_map = GridMap::FromProto(request.environment());
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 2);
+    const DdpEsdfConstraint esdf_constraint(esdf_map, footprint_model);
+    const DdpReference reference =
+        DdpReferenceBuilder(DdpReferenceBuilderConfig{}, vehicle_params)
+            .build(init_path);
+    for (const double eta_box : {1.0, 0.26}) {
+        ApaDdpSolverConfig config;
+        config.inner.steer_accel_max = eta_box;
+        const BicycleDynamics dynamics(vehicle_params.wheelbase);
+        const DdpCostEvaluator cost_evaluator(config.cost, &esdf_constraint);
+        ApaDdpSolver solver(config, &dynamics, &cost_evaluator);
+        const auto result = solver.solveStageOne(reference);
+        std::printf("=== eta_box=%.2f status=%d outer=%d\n", eta_box,
+                    static_cast<int>(result.report.status),
+                    result.report.outer_iterations);
+        int shown = 0;
+        for (const auto& rec : solver.innerSolver().history()) {
+            if (shown++ < 14) {
+                std::printf("iter=%d cost=%.4f merit=%.4f defect=%.4e "
+                            "alpha=%.3e bp=%d\n",
+                            rec.iteration, rec.cost, rec.merit,
+                            rec.defect_norm, rec.alpha, rec.backward_passes);
+            }
+        }
+    }
+}
+
 }  // namespace apa_post_processor
+

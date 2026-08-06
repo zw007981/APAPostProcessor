@@ -60,7 +60,6 @@ void BM_BoxQpColdStartChain(benchmark::State& state) {
             const QpSolver::Result result = solver.solve(problem);
             factorizations += result.factorizations;
             iterations += result.iterations;
-            benchmark::DoNotOptimize(result);
         }
         benchmark::DoNotOptimize(factorizations);
         state.counters["factorizations_per_qp"] =

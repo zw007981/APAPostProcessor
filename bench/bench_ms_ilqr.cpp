@@ -52,7 +52,7 @@ BenchProblem MakeBenchProblem() {
     problem.reference.shooting_nodes.reserve(kNumSteps / 25 + 2);
     const BicycleDynamics dynamics(kWheelbase);
     DdpState state;
-    state << 0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0;
+    state << 0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0, 0.0;
     problem.states.reserve(kNumSteps + 1);
     problem.controls.reserve(kNumSteps);
     problem.states.push_back(state);

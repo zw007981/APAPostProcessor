@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -15,21 +16,22 @@ namespace apa_post_processor {
 namespace {
 
 // 编译期一致性断言（零运行时开销）：钉住头文件声明与冻结接口契约——
-// 定长类型维度与配置默认值必须与 data/ddp_config.json/设计文档一致，
-// 声明被意外改动（维度/默认值漂移）时在编译期即失败
+// 定长类型维度与配置默认值必须与设计文档一致（生产配置
+// data/ddp_config.json 未覆盖这些字段，即按此默认值运行），声明被意外
+// 改动（维度/默认值漂移）时在编译期即失败
 static_assert(DdpStateHessian::RowsAtCompileTime == DDP_STATE_DIM &&
                   DdpStateHessian::ColsAtCompileTime == DDP_STATE_DIM,
               "DdpStateHessian 必须为 DDP_STATE_DIM x DDP_STATE_DIM");
 static_assert(DdpEsdfConstraintConfig{}.margin_safe == 0.02,
-              "margin_safe 默认值必须与 data/ddp_config.json 一致 (0.02)");
+              "margin_safe 默认值必须为 0.02（生产按默认值运行）");
 static_assert(DdpEsdfConstraintConfig{}.margin_comf == 0.10,
-              "margin_comf 默认值必须与 data/ddp_config.json 一致 (0.10)");
+              "margin_comf 默认值必须为 0.10（生产按默认值运行）");
 static_assert(DdpEsdfConstraintConfig{}.weight_safe == 100.0,
-              "weight_safe 默认值必须与 data/ddp_config.json 一致 (100.0)");
+              "weight_safe 默认值必须为 100.0（生产按默认值运行）");
 static_assert(DdpEsdfConstraintConfig{}.weight_comf == 1.0,
-              "weight_comf 默认值必须与 data/ddp_config.json 一致 (1.0)");
+              "weight_comf 默认值必须为 1.0（生产按默认值运行）");
 static_assert(DdpEsdfConstraintConfig{}.stride == 1,
-              "stride 默认值必须与 data/ddp_config.json 一致 (1)");
+              "stride 默认值必须为 1（生产按默认值运行）");
 
 // 墙场地图参数：第 0 列整列占据；L8.2 契约下最外圈（第 0/63 行与第 63 列）
 // 同样被标记占据。占据栅格中心的符号距离场在 x>=2*resolution 且远离其余
@@ -488,6 +490,79 @@ TEST_F(DdpEsdfConstraintTest, OutOfMapCircleYieldsConservativePenalty) {
         config.weight_safe * std::pow(circle_radius_ + config.margin_safe, 3) +
         config.weight_comf * std::pow(circle_radius_ + config.margin_comf, 3);
     EXPECT_GT(result.cost, old_sentinel);
+}
+
+// 测试 evaluate 与「逐圆全量求值」参照路径在逐位意义下完全一致。
+// 因为 evaluate 内部允许对两个 margin 均不活跃的圆跳过梯度插值
+// （不活跃圆的代价/梯度/Hessian 贡献恒为零），本测试用未做该跳过的
+// evaluateCircle 逐圆累加作为参照，钉住「跳过不改变任何数值」契约；
+// 位姿覆盖全不活跃、comf 段、混合区、旋转、部分圆活跃与图外恢复场
+// （图外按实心障碍处理，c 恒正，梯度必取——两阶段跳过只发生在图内）。
+TEST_F(DdpEsdfConstraintTest, EvaluateMatchesPerCircleFullEvaluationBitExact) {
+    const auto constraint = MakeTestable();
+    const auto& config = constraint.config();
+    // {x, y, theta}；地图 64x64、分辨率 0.125，墙在第 0 列
+    const std::vector<std::array<double, 3>> poses = {
+        {6.0, 2.5, kHalfPi},
+        {circle_radius_ + 0.06, 2.5, kHalfPi},
+        {0.35, 4.0, kHalfPi},
+        {1.95, 4.0, std::atan2(0.8, -0.6)},
+        {1.2, 4.0, 0.0},
+        {-0.3, 4.0, 0.0},
+    };
+    for (const auto& pose : poses) {
+        const double px = pose[0];
+        const double py = pose[1];
+        const double pt = pose[2];
+        const double cos_theta = std::cos(pt);
+        const double sin_theta = std::sin(pt);
+        // 参照累加：逐圆全量求值（evaluateCircle 恒取距离+梯度），
+        // 累加表达式与生产 evaluate 逐条对应
+        DdpEsdfPoseCost expected;
+        Eigen::Vector3d grad3 = Eigen::Vector3d::Zero();
+        Eigen::Matrix3d hess3 = Eigen::Matrix3d::Zero();
+        for (const auto& center : circle_centers_) {
+            const auto circle = constraint.evaluateCircle(
+                center, cos_theta, sin_theta, px, py);
+            if (circle.c_safe > 0.0) {
+                expected.cost += config.weight_safe * circle.c_safe *
+                                 circle.c_safe * circle.c_safe;
+                grad3 += (3.0 * config.weight_safe * circle.c_safe *
+                          circle.c_safe) *
+                         circle.grad;
+                hess3 += (6.0 * config.weight_safe * circle.c_safe) *
+                         (circle.grad * circle.grad.transpose());
+            }
+            if (circle.c_comf > 0.0) {
+                expected.cost += config.weight_comf * circle.c_comf *
+                                 circle.c_comf * circle.c_comf;
+                grad3 += (3.0 * config.weight_comf * circle.c_comf *
+                          circle.c_comf) *
+                         circle.grad;
+                hess3 += (6.0 * config.weight_comf * circle.c_comf) *
+                         (circle.grad * circle.grad.transpose());
+            }
+        }
+        expected.gradient(DDP_IDX_X) = grad3.x();
+        expected.gradient(DDP_IDX_Y) = grad3.y();
+        expected.gradient(DDP_IDX_THETA) = grad3.z();
+        expected.hessian.topLeftCorner<3, 3>() = hess3;
+        const auto actual = constraint.evaluate(px, py, pt);
+        // 逐位等价：双 margin 三次罚的累加顺序与每个分量都必须零误差
+        EXPECT_DOUBLE_EQ(expected.cost, actual.cost) << "pose x=" << px;
+        for (int i = 0; i < DDP_STATE_DIM; ++i) {
+            EXPECT_DOUBLE_EQ(expected.gradient(i), actual.gradient(i))
+                << "pose x=" << px << " grad i=" << i;
+        }
+        for (int row = 0; row < DDP_STATE_DIM; ++row) {
+            for (int col = 0; col < DDP_STATE_DIM; ++col) {
+                EXPECT_DOUBLE_EQ(expected.hessian(row, col),
+                                 actual.hessian(row, col))
+                    << "pose x=" << px << " hess (" << row << "," << col
+                    << ")";
+            }
+        }
+    }
 }
 
 // 测试时间轴 stride 抽样语义。

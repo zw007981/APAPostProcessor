@@ -19,21 +19,20 @@ class DDPPlanningScene : public PlanningScene {
     // 字段，二者字段集互不重叠）
     void loadConfigDetails(const std::string& config_details_path) override;
     // 最近一次 DDP 优化产出的轨迹（未执行 optimize() 或失败时为空）
-    const Trajectory& optimizedTraj() const override { return ddp_traj_; }
+    const Trajectory& optimizedTraj() const override { return optimized_traj_; }
     // 算法名（绘图标签与日志用）
     std::string algorithmName() const override { return "DDP"; }
     // 带类型访问 DDP 专有配置（构造期已固化类型，无下行转换）
     DdpConfig& ddpConfig() { return *ddp_config_; }
     const DdpConfig& ddpConfig() const { return *ddp_config_; }
-    // 最近一次 DDP 优化产出的轨迹
-    const Trajectory& ddpTraj() const { return ddp_traj_; }
+    // 最近一次 DDP 优化产出的轨迹（与 optimizedTraj() 同源，保留以兼容
+    // 算法特定的旧调用方；Phase 3 起调用方应统一使用 optimizedTraj()）
+    const Trajectory& ddpTraj() const { return optimized_traj_; }
 
    protected:
     // 构造期由 unique_ptr<DdpConfig> 直接取得的类型化配置观察指针（非拥有，
     // 生命周期与基类持有的配置对象一致）
     DdpConfig* ddp_config_;
-    // DDP 优化后轨迹（阶段二重解 + 驻留插入后的最终轨迹，含时间戳）
-    Trajectory ddp_traj_;
 
    private:
     // 委托构造的中间结构：基类持有配置所有权，本类保留类型化观察指针

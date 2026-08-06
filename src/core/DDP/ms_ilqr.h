@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -11,55 +13,45 @@
 #include "ddp_reference_builder.h"
 
 namespace apa_post_processor {
-// MS-iLQR 内层求解器配置：控制盒、迭代/收敛、LM 正则化、线搜索与 merit
-// 自适应罚参数。默认值取 DDP.md 2.5 节参数表与 Unified MS-DDP 论文/官方
-// 实现的建议值，最终标定属端到端调参
+// MS-iLQR 内层配置：控制盒、迭代/收敛、LM 正则化、线搜索与 merit 罚参数
 struct MsIlqrConfig {
-    // 纵向跃度盒约束幅值 |j| <= jerk_max (m/s³)
+    // 跃度上限 (m/s³)
     double jerk_max{1.5};
-    // 前轮转角加加速度盒约束幅值 |η| <= steer_accel_max (rad/s²)
+    // 转角加加速度上限 (rad/s²)
     double steer_accel_max{1.0};
-    // 内层迭代上限（超限按未收敛上报外层）
+    // 迭代上限
     int max_iterations{50};
-    // 收敛判据一：相对代价变化 |ΔJ|/|J| 阈值
+    // 代价变化容差
     double cost_change_tol{1e-6};
-    // 收敛判据二：控制梯度范数 max_k ‖Q_u‖∞ 阈值（无约束驻点信号；
-    // 盒约束激活处 Q_u 不必为零，该判据自然不会误触发）
+    // 梯度范数容差
     double gradient_tol{1e-8};
-    // LM 正则化初值/下界/上界：ρ_reg 超上限判定本轮内层失败并上报
+    // 收敛的可行性守卫：缺陷 ‖d‖∞ 必须降到本容差内才允许判收敛（防大 μ
+    // 下尺度盲误判）
+    double convergence_defect_tol{1e-3};
+    // 正则化初值
     double reg_initial{1e-4};
+    // 正则化下界
     double reg_min{1e-9};
+    // 正则化上界
     double reg_max{1e9};
-    // 拒绝后增大倍率 / 接受后缩小倍率（Levenberg-Marquardt 启发式）
+    // 正则化增大倍率
     double reg_increase{10.0};
+    // 正则化缩小倍率
     double reg_decrease{0.5};
-    // Armijo 充分下降系数 γ 与回溯衰减 β
+    // Armijo γ
     double armijo_gamma{0.1};
+    // 回溯衰减 β
     double backtrack_beta{0.5};
-    // 回溯次数上限（α 下界 = β^max_backtracks）
+    // 回溯次数上限
     int max_backtracks{50};
-    // merit 罚参数 µ_m 的安全余量 µ₀：自适应阈值 = µ₀+|EC(1)|/((1-ρ)‖d‖)，
-    // 且 µ_m 恒不小于 µ₀；µ_m 与 AL 外层的 µ 是完全独立的两套参数
+    // merit μ₀
     double merit_mu0{10.0};
-    // 自适应规则的安全因子 ρ（分母 1-ρ 提供余量）
-    double merit_rho{0.5};
-    // µ_m 更新的缺陷范数门限 κ_d：仅当 ‖d‖₂ > κ_d 时刷新权重，
-    // 避免缺陷接近归零后权重被无意义地刷新
-    double merit_kappa_d{1e-6};
-    // µ_m 上限（默认 1e9 ≈ 不封顶，既有行为不变）：自适应规则在小缺陷下
-    // 会把权重放大到病态量级（实测 µ_m 冲到 8e4、放行「以任意代价歼灭
-    // 残余缺陷」的破坏性步骤）；封顶保留大缺陷下的修复优先级提升能力，
-    // 同时把单次交易的代价增量限制在 cap·Δ‖d‖ 以内
+    // merit-AL 量级挂钩比率 c：保持缺陷修复与代价下降的交换比恒定（0=关闭）
+    double merit_mu_al_ratio{0.0};
+    // merit μ 上限
     double merit_mu_max{1e9};
-    // 可选段间惩罚权重 w_d（Q_d = w_d·I₇，默认 0 = 关闭）：回推经过打靶
-    // 节点时注入 s[i] -= Q_d·d[i]、S[i] += Q_d，促使段从左侧也向缺陷靠拢
-    double inter_segment_weight{0.0};
-    // 前向 rollout 定义域守卫（L8.3，地图范围外扩该米数；0 = 关闭）：
-    // AL 幅值约束只覆盖 v/a/δ/ω、Box-QP 只约束控制，位置 (x,y) 不受任何
-    // 约束——越出「地图 ⊕ margin」的试探候选直接判失败回溯（约束优化的
-    // 基本要求：试探步不得离开问题定义域），而不是拿去评价 merit。
-    // margin 取若干米而非严格边界：L8.1 恢复场主导的合法小幅越界恢复
-    // 过程不被否掉
+    // 前向 rollout 定义域守卫：地图外扩 margin
+    // 米，越界候选直接判失败回溯（0=关闭）
     double domain_guard_margin{2.0};
 };
 // 内层求解状态：失败语义（正则化溢出/迭代超限）经状态码上报外层，
@@ -76,13 +68,17 @@ struct MsIlqrIterationRecord {
     int iteration{0};
     // 接受后的总代价 J / 缺陷 L2 范数 / merit 值 M = J + µ_m‖d‖
     double cost{0.0};
+    // 缺陷 L2 范数
     double defect_norm{0.0};
+    // merit 罚 μ_m
     double merit{0.0};
     // 本轮使用的 µ_m 与接受步长 α
     double merit_mu{0.0};
+    // 线搜索步长
     double alpha{0.0};
     // 本轮被接受方向对应的 EC 系数（EC(α) = α·EC₁ + ½α²·EC₂）
     double ec1{0.0};
+    // EC 二阶
     double ec2{0.0};
     // 本轮后向传递次数（正则化重试 >1 表明发生过 QP 失败或线搜索拒绝）
     int backward_passes{0};
@@ -91,101 +87,88 @@ struct MsIlqrIterationRecord {
 };
 // 内层求解结果汇总
 struct MsIlqrResult {
+    // 求解状态
     MsIlqrStatus status{MsIlqrStatus::MAX_ITERATIONS};
     // 实际执行的迭代轮数
     int iterations{0};
     // 求解前后的总代价与缺陷 L2 范数（诊断）
     double initial_cost{0.0};
+    // 终态基础代价
     double final_cost{0.0};
+    // 初始缺陷范数
     double initial_defect_norm{0.0};
+    // 最终缺陷范数
     double final_defect_norm{0.0};
     // 定义域守卫（L8.3）本次求解拒绝的试探候选数（L8.4 分项归因：
     // 「出界已被拦住」与「出界不再发生」的区分证据）
     std::int64_t domain_guard_rejections{0};
 };
-// MS-iLQR 内层求解器（Gauss-Newton，丢弃动力学二阶张量项）：
-// 缺陷感知 Riccati 回推（右端索引约定 d[i] ≡ f(x[i-1],u[i-1]) - x[i]，
-// i=1..N，d[0]=0）+ 每步盒约束 QP（活动集沿回推顺序热启动）+
-// 非线性 rollout 与 L₂ merit 线搜索。索引约定：状态/缺陷数组长 N+1，
-// 控制/雅可比/增益数组长 N；缺陷仅在打靶节点非零（滚动状态恒被动力学
-// 覆写，其缺陷恒为零）。µ_m 与 AL 罚权重 µ 完全独立（独立变量、独立
-// 更新逻辑）。全部轨迹/矩阵按 SoA 以对齐分配器容器存储，Workspace 在
-// 首次 solve 时按 N 预分配，回推/滚动热循环内零堆分配。
+// MS-iLQR 内层求解器（Gauss-Newton）：缺陷感知回推 + box-QP + 非线性 rollout +
+// L₂ merit 线搜索
 class MsIlqrSolver {
    public:
-    // 构造校验：动力学/代价求值层必须非空，盒边界/容差/正则化上下界/
-    // 线搜索与 merit 参数必须为正且自洽，非法输入抛 std::invalid_argument
+    // 构造时校验配置与控制盒/线搜索/正则化参数合法性
     MsIlqrSolver(MsIlqrConfig config, const BicycleDynamics* dynamics,
                  const DdpCostEvaluator* cost_evaluator);
-    // 求解一次内层问题（固定 AL 乘子）：以初值序列建立名义轨迹
-    // （打靶状态直接注入、滚动状态由动力学覆写），迭代至收敛/上限/失败。
-    // initial_states 尺寸必须为 N+1、initial_controls 为 N（N = 参考位姿
-    // 数 - 1）；维度/取值不符抛 std::invalid_argument。µ_m 与 ρ_reg 跨
-    // solve 调用保持（外层 AL 轮次间自然热启动），计数器与历史每次清空
+    // µ_m 与 ρ_reg 跨 solve
+    // 调用保持（外层轮次间自然热启动），计数器与历史每次清空
+    // 输入契约：states/controls 尺寸必须为 N+1/N，dt 为正有限
     MsIlqrResult solve(const DdpReference& reference,
                        const DdpCostMultiplierState& multipliers,
                        const DdpCostInput& cost_input,
                        const DdpAlignedVec<DdpState>& initial_states,
                        const DdpAlignedVec<DdpControl>& initial_controls);
-    // 当前名义轨迹（尺寸 N+1 / N）
+    // 最后一次接受迭代的名义状态序列（N+1 个）
     const DdpAlignedVec<DdpState>& states() const { return states_; }
+    // 最后一次接受迭代的名义控制序列（N 个）
     const DdpAlignedVec<DdpControl>& controls() const { return controls_; }
-    // 当前缺陷序列 d[i]（尺寸 N+1，d[0]=0，仅打靶节点非零）
+    // 最后一次接受迭代的打靶缺陷序列（N+1 个）
     const DdpAlignedVec<DdpState>& defects() const { return defects_; }
-    // 缺陷 L2 范数（聚合向量意义下的 2-范数）
+    // 当前缺陷 L2 范数
     double defectNorm() const { return defect_norm_; }
-    // 当前名义总代价 J
+    // 当前全轨迹总代价（增广后）
     double totalCost() const { return total_cost_; }
-    // 当前 merit 罚参数 µ_m（与 AL 的 µ 无关）
+    // 当前 merit 罚 µ_m
     double meritMu() const { return merit_mu_; }
+    // 地板抬升：µ_m = min(max(µ_m, floor), merit_mu_max)，棘轮只升不降
+    void raiseMeritMuFloor(double floor) {
+        if (!std::isfinite(floor)) {
+            return;
+        }
+        merit_mu_ = std::min(std::max(merit_mu_, floor), config_.merit_mu_max);
+    }
     // 当前 LM 正则化 ρ_reg
     double rhoReg() const { return rho_reg_; }
-    // 逐轮诊断历史（仅记录被接受的迭代）
+    // 本轮 solve 的逐接受迭代诊断历史（不含被拒绝迭代）
     const std::vector<MsIlqrIterationRecord>& history() const {
         return history_;
     }
 
    protected:
-    // 按 N 预分配全部工作区（N 变化时重建；热循环外的准备动作）
     void prepareWorkspace(std::size_t num_steps);
-    // 打靶节点集 -> 逐节点 bool 查表；节点索引越界抛 std::invalid_argument
     void setShootingLookup(const std::vector<std::size_t>& shooting_nodes);
-    // 建立初始名义轨迹：滚动状态由动力学覆写、打靶状态直接注入初值，
-    // 同步计算初始缺陷（非打靶节点恒为零）与缺陷范数
     void setNominalTrajectory(
         const DdpReference& reference,
         const DdpAlignedVec<DdpState>& initial_states,
         const DdpAlignedVec<DdpControl>& initial_controls);
-    // 名义代价与 GN 导数求值（含 AL 增广项，由代价求值层统一折叠进
-    // 各阶段导数，内层不区分基础代价与 AL 项）
     void evaluateNominal(const DdpReference& reference,
                          const DdpCostMultiplierState& multipliers,
                          const DdpCostInput& cost_input);
-    // 逐阶段解析雅可比 A_k/B_k
     void computeJacobians(const DdpReference& reference);
-    // 缺陷感知 Riccati 回推：标准 Q 量装配 + q_x/q_u 的 S'd 修正
-    // （ẑ = s' + S'·d[k+1]，Q_x = ℓ_x + Aᵀẑ，Q_u = ℓ_u + Bᵀẑ），每步
-    // box-QP 求 δũ 与自由子空间增益 K（钳制行恒为零），随后按 K/δũ 形式
-    // 回传 S/s。可选段间惩罚在经过打靶节点时先注入 s -= Q_d·d、S += Q_d。
-    // 任一步 QP 未收敛返回 false（调用方增大 ρ_reg 后重跑整个回推，
-    // 不得复用旧分解；活动集经成员缓存热启动但分解必然重做）
+    void syncStepDt(const DdpReference& reference);
+    // 缺陷感知 Riccati 回推：每步 box-QP 求 δũ +
+    // K，钳制行恒为零。任一步失败返回 false
     bool backwardPass();
-    // 线性 rollout（每轮后向传递后恰好一次）：沿 A_k/B_k 传播 α=1 的
-    // 搜索方向 δx^l/δu^l（含打靶节点缺陷项），并缓存 EC₁/EC₂ 为成员，
-    // 此后整条 Armijo 回溯链上 EC(α) 均为闭式求值，严禁重复线性传播
+    // 线性 rollout（每轮一次）：缓存 EC₁/EC₂ 为成员，此后 EC(α) 闭式求值
     void linearRollout();
     // 预期代价变化闭式模型 EC(α) = α·EC₁ + ½α²·EC₂
     double expectedChange(double alpha) const {
         return alpha * ec1_ + 0.5 * alpha * alpha * ec2_;
     }
-    // 自适应 µ_m 更新：仅当 ‖d‖₂ > κ_d 时按 µ₀+|EC(1)|/((1-ρ)‖d‖) 抬升
-    // （取绝对值与只升不降的棘轮跟随官方实现，Nocedal Chp18.3 的动机；
-    // 与 AL 的 µ 更新无任何共享变量/逻辑）
-    void updateMeritMu();
+    // 收敛出口的可行性守卫：打靶缺陷 ‖d‖∞ 是否已降到容差内——
+    // CONVERGED_COST/CONVERGED_GRADIENT 两个出口仅在守卫通过时允许触发
+    bool convergenceAllowed() const;
     // 非线性 rollout（仅线搜索内逐候选 α 调用）：控制闭环更新
-    // u' = ū + α·δũ + K(x' - x̄)，段内真实动力学积分，打靶节点状态按
-    // x' = x_int + (α-1)·d̄ 收缩缺陷（α=1 时缺陷精确归零），新缺陷
-    // d' = (1-α)·d̄ 精确成立。返回候选轨迹总代价
     double nonlinearRollout(double alpha, const DdpReference& reference,
                             const DdpCostMultiplierState& multipliers,
                             const DdpCostInput& cost_input);
@@ -198,77 +181,96 @@ class MsIlqrSolver {
     // 接受候选轨迹：名义状态/控制/缺陷/代价整体替换（缺陷按 1-α 缩放，
     // 候选代价求值结果直接移入名义缓存，避免每轮重复全轨迹求值）
     void acceptCandidate(double alpha);
-    // ρ_reg 增大（返回 false 表示已超上限，内层失败）/ 接受后缩小
+    // ρ_reg 增大（false=超上限）/ 接受后缩小
     bool increaseReg();
     void decreaseReg();
-    // 缺陷 L2 范数：sqrt(Σ_i ‖d[i]‖²)
     static double DefectNorm(const DdpAlignedVec<DdpState>& defects);
 
    protected:
+    // 配置
     MsIlqrConfig config_;
-    // 动力学与代价求值层（不持有所有权，必须非空）
+    // 动力学模型（不持有所有权）
     const BicycleDynamics* dynamics_;
+    // 代价求值层（不持有所有权）
     const DdpCostEvaluator* cost_evaluator_;
-    // 步数 N 与固定步长 dt
+    // 步数 N
     std::size_t num_steps_{0};
-    double dt_{0.0};
-    // 逐节点打靶标志（尺寸 N+1）
+    // 逐步时长 dt[k]，未填充时退化为均匀网格
+    std::vector<double> step_dt_;
+    // 打靶标志（第 k 阶段是否为打靶节点）
     std::vector<bool> is_shooting_;
-    // 名义轨迹与缺陷（SoA，尺寸 N+1 / N / N+1）
+    // 名义状态序列（N+1 个，当前接受迭代点）
     DdpAlignedVec<DdpState> states_;
+    // 名义控制序列（N 个）
     DdpAlignedVec<DdpControl> controls_;
+    // 打靶缺陷序列（N+1 个）
     DdpAlignedVec<DdpState> defects_;
-    // 候选轨迹（线搜索试用，尺寸 N+1 / N）及其总代价/缺陷范数缓存
+    // 候选状态序列（线搜索试探用）
     DdpAlignedVec<DdpState> cand_states_;
+    // 候选控制序列（线搜索试探用）
     DdpAlignedVec<DdpControl> cand_controls_;
+    // 候选代价
     double cand_cost_{0.0};
+    // 候选缺陷范数
     double cand_defect_norm_{0.0};
-    // 逐阶段雅可比（尺寸 N）
+    // 动力学雅可比 A = ∂f/∂x（N 个，逐步）
     DdpAlignedVec<DdpStateJacobian> jac_A_;
+    // 动力学雅可比 B = ∂f/∂u（N 个，逐步）
     DdpAlignedVec<DdpControlJacobian> jac_B_;
-    // 名义轨迹代价分解与 GN 导数（stages 尺寸 N+1）
+    // 当前名义轨迹的全轨迹代价求值结果
     DdpCostEvaluation cost_eval_;
-    // 候选轨迹代价求值结果（接受后移入 cost_eval_）
+    // 候选轨迹的全轨迹代价求值结果
     DdpCostEvaluation cand_eval_;
-    // 回推产物：前馈 δũ、反馈增益 K（钳制行恒为零）、逐阶段 Q 量
-    // （供价值回传与白盒对拍），尺寸均为 N
+    // Riccati 回推产出：前馈控制修正 δũ（N 个）
     DdpAlignedVec<DdpControl> feedforward_;
+    // Riccati 回推产出：状态反馈增益 K（N 个）
     DdpAlignedVec<DdpControlStateHessian> gain_K_;
+    // 回推中间量：代价对状态的梯度 Q_x（N 个）
     DdpAlignedVec<DdpState> q_x_;
+    // 回推中间量：代价对控制的梯度 Q_u（N 个）
     DdpAlignedVec<DdpControl> q_u_;
+    // 回推中间量：代价对控制的 Hessian Q_uu（N 个）
     DdpAlignedVec<DdpControlHessian> q_uu_;
-    // 逐节点价值梯度/Hessian 与逐步实际使用的下游值（段间惩罚注入后），
-    // 尺寸 N+1 / N / N，供白盒对拍缺陷修正与 Q_d 注入位置
+    // 回推中间量：值函数 Hessian S（N+1 个）
     DdpAlignedVec<DdpStateHessian> value_S_;
+    // 回推中间量：值函数梯度 s（N+1 个）
     DdpAlignedVec<DdpState> value_s_;
-    DdpAlignedVec<DdpStateHessian> down_S_;
-    DdpAlignedVec<DdpState> down_s_;
-    // 逐步钳制集缓存（跨回推热启动；分解不跨次复用）与历史有效标志
+    // 钳制集（每步控制维活动集，供热启动跨 step 复用）
     std::vector<std::array<bool, DDP_CONTROL_DIM>> clamped_;
+    // 钳制历史有效标志（步数不变时保留，N 变化时清空）
     bool has_clamped_history_{false};
-    // 线性 rollout 缓存的方向（尺寸 N+1 / N）
+    // 线性 rollout 产出：状态摄动序列 dx（N+1 个）
     DdpAlignedVec<DdpState> dx_lin_;
+    // 线性 rollout 产出：控制摄动序列 du（N 个）
     DdpAlignedVec<DdpControl> du_lin_;
-    // 本轮 EC 闭式系数缓存
+    // EC 一阶系数：EC(α)=α·EC₁+½α²·EC₂ 的线性项
     double ec1_{0.0};
+    // EC 二阶系数
     double ec2_{0.0};
-    // 价值回传累积的 ΔV 一阶/二阶系数（诊断）
+    // ΔV 一阶系数（二次展开的线性项）
     double dv1_{0.0};
+    // ΔV 二阶系数（二次展开的 Hessian 项）
     double dv2_{0.0};
-    // 本轮回推的最大控制梯度范数 max_k ‖Q_u‖∞（收敛判据二）
+    // 最大 ‖Q_u‖∞（控制梯度收敛判据的驱动量）
     double max_qu_norm_{0.0};
-    // 当前状态量：总代价、缺陷范数、µ_m、ρ_reg
+    // 全轨迹总代价（增广后）
     double total_cost_{0.0};
+    // 缺陷 L2 范数
     double defect_norm_{0.0};
+    // 当前 merit μ_m（跨外层轮次保持）
     double merit_mu_{0.0};
+    // 当前 LM 正则化 ρ_reg（跨外层轮次保持）
     double rho_reg_{0.0};
     // 盒约束 QP 求解器（无状态，逐步复用）
     BoxQpSolver<> qp_;
     // 计数器（每次 solve 清零，供单元测试断言双 rollout 调用次数与
     // 正则化变更后的全量重分解；统一 64 位，长时多次 solve 累积不溢出）
     std::int64_t backward_pass_count_{0};
+    // 线性 rollout 计数
     std::int64_t linear_rollout_count_{0};
+    // 非线性 rollout 计数
     std::int64_t nonlinear_rollout_count_{0};
+    // QP 分解计数
     std::int64_t qp_factorization_count_{0};
     // 定义域守卫拒绝的试探候选数（每次 solve 清零）
     std::int64_t domain_guard_rejections_{0};

@@ -36,11 +36,12 @@ MsIlqrSolver::MsIlqrSolver(MsIlqrConfig config, const BicycleDynamics* dynamics,
         throw std::invalid_argument(
             "MsIlqrSolver: 线搜索参数必须满足 0<γ<1、0<β<1、回溯上限为正");
     }
-    if (!(config_.merit_mu0 > 0.0) ||
-        !(config_.merit_rho > 0.0 && config_.merit_rho < 1.0) ||
-        !(config_.merit_kappa_d >= 0.0) ||
-        !(config_.inter_segment_weight >= 0.0)) {
-        throw std::invalid_argument("MsIlqrSolver: merit/段间惩罚参数非法");
+    if (!(config_.convergence_defect_tol > 0.0)) {
+        throw std::invalid_argument("MsIlqrSolver: 收敛可行性容差必须为正");
+    }
+    if (!(config_.merit_mu0 > 0.0) || !(config_.merit_mu_al_ratio >= 0.0) ||
+        !std::isfinite(config_.merit_mu_al_ratio)) {
+        throw std::invalid_argument("MsIlqrSolver: merit 参数非法");
     }
     // µ_m 上限必须不小于 µ₀（否则地板与上限冲突、语义不自洽）
     if (!(config_.merit_mu_max >= config_.merit_mu0) ||
@@ -98,8 +99,6 @@ MsIlqrResult MsIlqrSolver::solve(
         int passes_this_iter = 0;
         int trials_this_iter = 0;
         // 正则化重试循环：QP 未收敛或线搜索耗尽都不能简单放弃本轮，必须
-        // 增大 ρ_reg 并重跑整个后向传递（仅缩小步长无法脱困）；ρ_reg 超
-        // 上限才判定本轮内层失败并上报
         while (true) {
             ++passes_this_iter;
             if (!backwardPass()) {
@@ -114,7 +113,6 @@ MsIlqrResult MsIlqrSolver::solve(
                 continue;
             }
             linearRollout();
-            updateMeritMu();
             const double merit_prev = total_cost_ + merit_mu_ * defect_norm_;
             const std::int64_t trials_before = nonlinear_rollout_count_;
             if (lineSearch(reference, multipliers, cost_input, merit_prev,
@@ -123,6 +121,8 @@ MsIlqrResult MsIlqrSolver::solve(
                     static_cast<int>(nonlinear_rollout_count_ - trials_before);
                 break;
             }
+            // 线搜索被拒：升 ρ_reg 后重跑整个回推（QP 随 Hessian 变化
+            // 必须重做分解——与 QP 失败路径同一约定）
             if (!increaseReg()) {
                 result.status = MsIlqrStatus::REGULARIZATION_OVERFLOW;
                 result.iterations = iter - 1;
@@ -132,6 +132,7 @@ MsIlqrResult MsIlqrSolver::solve(
                 return result;
             }
         }
+        // 接受：ρ_reg 按既有 LM 调度收缩
         decreaseReg();
         acceptCandidate(accepted_alpha);
         computeJacobians(reference);
@@ -148,13 +149,14 @@ MsIlqrResult MsIlqrSolver::solve(
         record.line_search_trials = trials_this_iter;
         history_.push_back(record);
         result.iterations = iter;
+        // 收敛出口的可行性守卫：两个尺度盲判据达标时，打靶缺陷还必须
         const double rel_change = std::abs(cost_prev - total_cost_) /
                                   std::max(std::abs(cost_prev), 1e-12);
-        if (rel_change < config_.cost_change_tol) {
+        if (rel_change < config_.cost_change_tol && convergenceAllowed()) {
             result.status = MsIlqrStatus::CONVERGED_COST;
             break;
         }
-        if (max_qu_norm_ < config_.gradient_tol) {
+        if (max_qu_norm_ < config_.gradient_tol && convergenceAllowed()) {
             result.status = MsIlqrStatus::CONVERGED_GRADIENT;
             break;
         }
@@ -166,6 +168,12 @@ MsIlqrResult MsIlqrSolver::solve(
 }
 
 void MsIlqrSolver::prepareWorkspace(std::size_t num_steps) {
+    // 步数不变时跳过全部 resize/assign，仅清空历史（热启动主路径）
+    if (num_steps_ == num_steps) {
+        is_shooting_.assign(is_shooting_.size(), false);
+        history_.clear();
+        return;
+    }
     num_steps_ = num_steps;
     const std::size_t nodes = num_steps + 1;
     is_shooting_.assign(nodes, false);
@@ -181,14 +189,9 @@ void MsIlqrSolver::prepareWorkspace(std::size_t num_steps) {
     q_uu_.resize(num_steps);
     value_S_.resize(nodes);
     value_s_.resize(nodes);
-    down_S_.resize(num_steps);
-    down_s_.resize(num_steps);
     dx_lin_.resize(nodes);
     du_lin_.resize(num_steps);
     // 首轮 QP 初始点/钳制集只在（重）分配时清零；N 不变时保留跨 solve
-    // 热启动数据（错误活动集会被 QP 内部梯度重判自动释放，不影响正确性；
-    // 代价是若新问题的活动集与热启动猜测差异较大，个别步可能多做 1~2
-    // 次分解才识别出正确活动集——纯性能影响，通常远小于冷启动全链）
     if (feedforward_.size() != num_steps) {
         feedforward_.assign(num_steps, DdpControl::Zero());
         clamped_.assign(num_steps,
@@ -210,11 +213,18 @@ void MsIlqrSolver::setShootingLookup(
     }
 }
 
+void MsIlqrSolver::syncStepDt(const DdpReference& reference) {
+    step_dt_.resize(num_steps_);
+    for (std::size_t k = 0; k < num_steps_; ++k) {
+        step_dt_[k] = reference.stepDt(k);
+    }
+}
+
 void MsIlqrSolver::setNominalTrajectory(
     const DdpReference& reference,
     const DdpAlignedVec<DdpState>& initial_states,
     const DdpAlignedVec<DdpControl>& initial_controls) {
-    dt_ = reference.dt;
+    syncStepDt(reference);
     states_[0] = initial_states[0];
     defects_[0].setZero();
     // 初始名义建立：零反馈开环积分，滚动状态被动力学覆写、打靶状态直接
@@ -222,7 +232,7 @@ void MsIlqrSolver::setNominalTrajectory(
     for (std::size_t k = 0; k < num_steps_; ++k) {
         controls_[k] = initial_controls[k];
         const DdpState integral =
-            dynamics_->step(states_[k], controls_[k], dt_);
+            dynamics_->step(states_[k], controls_[k], step_dt_[k]);
         if (is_shooting_[k + 1]) {
             defects_[k + 1] = integral - initial_states[k + 1];
             states_[k + 1] = initial_states[k + 1];
@@ -243,9 +253,9 @@ void MsIlqrSolver::evaluateNominal(const DdpReference& reference,
 }
 
 void MsIlqrSolver::computeJacobians(const DdpReference& reference) {
-    dt_ = reference.dt;
+    syncStepDt(reference);
     for (std::size_t k = 0; k < num_steps_; ++k) {
-        dynamics_->jacobians(states_[k], controls_[k], dt_, &jac_A_[k],
+        dynamics_->jacobians(states_[k], controls_[k], step_dt_[k], &jac_A_[k],
                              &jac_B_[k]);
     }
 }
@@ -253,8 +263,6 @@ void MsIlqrSolver::computeJacobians(const DdpReference& reference) {
 bool MsIlqrSolver::backwardPass() {
     ++backward_pass_count_;
     const auto& stages = cost_eval_.stages;
-    const DdpStateHessian qd_mat =
-        config_.inter_segment_weight * DdpStateHessian::Identity();
     DdpStateHessian value_hessian = stages[num_steps_].lxx;
     DdpState value_gradient = stages[num_steps_].lx;
     value_S_[num_steps_] = value_hessian;
@@ -263,18 +271,15 @@ bool MsIlqrSolver::backwardPass() {
     dv2_ = 0.0;
     max_qu_norm_ = 0.0;
     for (std::size_t k = num_steps_; k-- > 0;) {
-        // 可选段间惩罚：回推经过打靶节点 k+1 时先注入再装配（默认关闭）
-        if (config_.inter_segment_weight > 0.0 && is_shooting_[k + 1]) {
-            value_gradient -= config_.inter_segment_weight * defects_[k + 1];
-            value_hessian += qd_mat;
-        }
-        down_S_[k] = value_hessian;
-        down_s_[k] = value_gradient;
         const auto& stage = stages[k];
         const DdpStateJacobian& jac_a = jac_A_[k];
         const DdpControlJacobian& jac_b = jac_B_[k];
-        // 缺陷修正：ẑ = s' + S'·d[k+1]（右端索引；非打靶节点 d 恒为零）
-        const DdpState z = value_gradient + value_hessian * defects_[k + 1];
+        // 缺陷修正：ẑ = s' + S'·d[k+1]（右端索引；非打靶节点 d 恒为零，
+        // 直接复用 s' 跳过与零矩阵的乘积——打靶间隔 25，96% 的阶段受益）
+        const DdpState z =
+            is_shooting_[k + 1]
+                ? value_gradient + value_hessian * defects_[k + 1]
+                : value_gradient;
         const DdpState q_x = stage.lx + jac_a.transpose() * z;
         const DdpControl q_u = stage.lu + jac_b.transpose() * z;
         DdpStateHessian q_xx =
@@ -283,24 +288,6 @@ bool MsIlqrSolver::backwardPass() {
             stage.luu + jac_b.transpose() * value_hessian * jac_b;
         DdpControlStateHessian q_ux =
             stage.lux + jac_b.transpose() * value_hessian * jac_a;
-        // 可选完整二阶项（true MS-DDP，编译期开关）：Q_* += s'·f_** 红项
-        // 张量收缩——红项按 1.4 节公式只含价值梯度 s'（缺陷修正 S'd̄ 是
-        // 一阶修正，不进入二阶项）；v⁺/a⁺/δ⁺/ω⁺ 四行切片恒零，实际只有
-        // x⁺/y⁺/θ⁺ 三行有贡献。注意 Q_uu 更频繁失去正定性是已知代价
-        // （由 LM 正则化调度吸收），张量求值相对雅可比约 +60% 单步开销
-        if constexpr (DDP_FULL_HESSIAN_ENABLED) {
-            DdpStateHessianTensor f_xx;
-            DdpControlHessianTensor f_uu;
-            DdpMixedHessianTensor f_ux;
-            dynamics_->hessians(states_[k], controls_[k], dt_, &f_xx, &f_uu,
-                                &f_ux);
-            for (int row = 0; row < DDP_STATE_DIM; ++row) {
-                const double costate = value_gradient(row);
-                q_xx += costate * f_xx[row];
-                q_uu += costate * f_uu[row];
-                q_ux += costate * f_ux[row];
-            }
-        }
         q_uu += rho_reg_ * DdpControlHessian::Identity();
         // 盒约束 QP（H 已含正则化）：回推顺序上一步的钳制集热启动，
         // 分解每步必然重做
@@ -377,23 +364,12 @@ void MsIlqrSolver::linearRollout() {
             .value();
 }
 
-void MsIlqrSolver::updateMeritMu() {
-    // 缺陷接近归零时不刷新权重（κ_d 门控）
-    if (defect_norm_ <= config_.merit_kappa_d) {
-        return;
+bool MsIlqrSolver::convergenceAllowed() const {
+    double defect_inf = 0.0;
+    for (const auto& defect : defects_) {
+        defect_inf = std::max(defect_inf, defect.cwiseAbs().maxCoeff());
     }
-    // 上游求值异常（NaN/Inf）时保持既有权重，避免污染 µ_m
-    if (!std::isfinite(defect_norm_) || !std::isfinite(ec1_) ||
-        !std::isfinite(ec2_)) {
-        return;
-    }
-    const double threshold =
-        config_.merit_mu0 + std::abs(expectedChange(1.0)) /
-                                ((1.0 - config_.merit_rho) * defect_norm_);
-    // 棘轮只升不降 + 上限封顶（默认 1e9 不封顶）：小缺陷下的病态放大
-    // 被上限拦截，大缺陷下的修复优先级提升能力保留
-    merit_mu_ = std::min(std::max({merit_mu_, threshold, config_.merit_mu0}),
-                         config_.merit_mu_max);
+    return defect_inf <= config_.convergence_defect_tol;
 }
 
 double MsIlqrSolver::nonlinearRollout(double alpha,
@@ -408,16 +384,12 @@ double MsIlqrSolver::nonlinearRollout(double alpha,
         cand_controls_[k] = controls_[k] + alpha * feedforward_[k] +
                             gain_K_[k] * (cand_states_[k] - states_[k]);
         cand_states_[k + 1] =
-            dynamics_->step(cand_states_[k], cand_controls_[k], dt_) +
+            dynamics_->step(cand_states_[k], cand_controls_[k], step_dt_[k]) +
             (alpha - 1.0) * defects_[k + 1];
     }
     // 新缺陷 d' = (1-α)·d̄ 精确成立（与状态更新公式逐位一致）
     cand_defect_norm_ = (1.0 - alpha) * defect_norm_;
     // L8.3 定义域守卫：AL 幅值约束只覆盖 v/a/δ/ω、Box-QP 只约束控制，
-    // 位置 (x,y) 不受任何约束——越出「地图 ⊕ margin」的试探候选直接判
-    // 失败（返回非有限代价使 Armijo 判据拒绝并回溯），而不是拿去评价
-    // merit。margin 外扩若干米：L8.1 恢复场主导的合法小幅越界恢复过程
-    // 不被否掉。NaN 位置经比较运算自然落入拒绝分支
     if (config_.domain_guard_margin > 0.0 &&
         cost_evaluator_->esdfConstraint() != nullptr) {
         const ESDFMap& map = cost_evaluator_->esdfConstraint()->esdfMap();

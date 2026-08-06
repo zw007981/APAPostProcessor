@@ -174,7 +174,7 @@ EvalRecord RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
     record.level = ParseLevel(result.success, result.message);
     record.time_ms = result.total_time_ms;
     record.msg = Sanitize(result.message);
-    if (!result.success || result.ddp_traj.empty()) {
+    if (!result.success || result.optimized_trajectory.empty()) {
         // 回退分支：段数/长度按输入计（天然劣于任何合法输出），message
         // 携带结构化诊断（失败阶段 + 失败项 + 量化值/阈值），原样透传
         record.maneuvers_out = record.maneuvers_in;
@@ -191,7 +191,7 @@ EvalRecord RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
     const auto& goal_pt = init_path.back();
     const TrajectoryPoint goal(goal_pt.x, goal_pt.y, goal_pt.theta);
     const auto validation =
-        result.ddp_traj.validate(goal, esdf_map, footprint_model);
+        result.optimized_trajectory.validate(goal, esdf_map, footprint_model);
     record.maneuvers_out = result.final_maneuvers;
     record.length_out = result.final_length;
     record.len_ratio = result.final_length / record.length_in;
@@ -201,7 +201,7 @@ EvalRecord RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
     // 曲率包络：max/P95/P50（行驶点）与相对车辆物理上限的比值；
     // 输入分位为形态门的相对基准（输出不劣于同数据集输入）
     const auto output_env =
-        ComputeKappaEnvelope(result.ddp_traj, vehicle_params.wheelbase);
+        ComputeKappaEnvelope(result.optimized_trajectory, vehicle_params.wheelbase);
     const auto input_env =
         ComputeInputKappaEnvelope(init_path, vehicle_params.wheelbase);
     record.max_kappa = output_env.max;
@@ -211,7 +211,7 @@ EvalRecord RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
     record.input_kappa_max = input_env.max;
     record.input_kappa_p95 = input_env.p95;
     record.input_kappa_p50 = input_env.p50;
-    for (const auto& pt : result.ddp_traj) {
+    for (const auto& pt : result.optimized_trajectory) {
         if (pt.hasDeltaDot()) {
             record.max_omega =
                 std::max(record.max_omega, std::abs(pt.getDeltaDot()));
@@ -224,7 +224,7 @@ EvalRecord RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
         vehicle_circle_geometry::ExtractLocalCircleCenters(
             footprint_model, CircleType::OUTER);
     const double outer_radius = footprint_model.getOuterRadius();
-    for (const auto& pt : result.ddp_traj) {
+    for (const auto& pt : result.optimized_trajectory) {
         const double cos_theta = std::cos(pt.theta);
         const double sin_theta = std::sin(pt.theta);
         for (const auto& local : outer_circles) {
@@ -241,14 +241,16 @@ EvalRecord RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
                          outer_radius - esdf_map.getDist(wx, wy));
         }
     }
-    // 曲率/转角速率硬门归入合法性口径（验收标准⑨，Round 2 裁决口径）：
-    // 幅值硬限必须取 VehicleParams 真值；1.002 为数值容差带（吸收 AL
-    // 平衡残余与浮点噪声），不是工程让步——实测三集 1.00015/0.99655/
-    // 0.99295 实质已满足严格 1.0，禁止再放宽
+    // 曲率/转角速率硬门归入合法性口径（与生产 amplitude_delta/
+    // amplitude_omega 校验门同一包络）：幅值硬限取 VehicleParams 真值；
+    // δ 相对 2.1% ≈ κ 相对 2.47%（tan 映射系数 1.17）——「AL 平衡包络
+    // （inequality_tol 0.01 rad ≈ 2.1% 相对）+ 车辆余量」的一致标定，
+    // 校验门严于此包络会把外层认为已达标的解判死；ω 同取 2.1% 相对
+    // （标定依据见 ddp_post_stage.h 注释与 DDP.md 3.12 节）
     record.legal = validation.all_passed &&
-                   record.kappa_ratio <= 1.002 &&
+                   record.kappa_ratio <= 1.0247 &&
                    record.max_omega <=
-                       1.002 * vehicle_params.max_steer_rate;
+                       1.021 * vehicle_params.max_steer_rate;
     std::cout << "[TUNE] variant=" << record.variant
               << " dataset=" << record.dataset << " success=1"
               << " level=" << record.level

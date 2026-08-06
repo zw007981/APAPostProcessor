@@ -23,8 +23,7 @@ static_assert(std::is_move_constructible_v<DdpConfig>);
 // 现以车辆真值为默认并由 clampToVehicleParams 强制只准收紧）、j_max=1.5、
 // eta_max=1.0、margin_safe/margin_comf=0.02/0.10、stride=1、epsilon_v=0.02、
 // v_dwell=0.05、T_shift=0.4、kappa_pad=1.2），且编排层默认标定
-// （merit_kappa_d=1e9、merit_mu0=100、cost_change_tol=1e-9）不被 DdpConfig
-// 构造破坏。
+// （merit_mu0=100、cost_change_tol=1e-9）不被 DdpConfig 构造破坏。
 TEST(DdpConfigTest, DefaultsMatchDesignParameterTable) {
     const DdpConfig config;
     // 参考构建：重采样间距/固定步长/打靶间隔与初值裁剪盒边界
@@ -41,7 +40,6 @@ TEST(DdpConfigTest, DefaultsMatchDesignParameterTable) {
     EXPECT_EQ(config.solver.inner.max_iterations, 50);
     EXPECT_DOUBLE_EQ(config.solver.inner.cost_change_tol, 1e-9);
     EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu0, 100.0);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_kappa_d, 1e9);
     // 外层 AL：迭代上限/双指标/缺陷容差/罚权重调度/退火率
     EXPECT_EQ(config.solver.outer.max_outer_iterations, 20);
     EXPECT_DOUBLE_EQ(config.solver.outer.terminal_position_tol, 0.05);
@@ -51,21 +49,11 @@ TEST(DdpConfigTest, DefaultsMatchDesignParameterTable) {
     EXPECT_DOUBLE_EQ(config.solver.outer.mu_max, 1e6);
     EXPECT_DOUBLE_EQ(config.solver.outer.mu_growth_factor, 10.0);
     EXPECT_DOUBLE_EQ(config.solver.outer.anneal_gamma, 0.5);
-    // 代价权重：平滑主项基准 w_j=1.0、w_eta=1.0、w_ref,0=10.0、w_theta=5.0、
-    // 换挡代理默认关闭
+    // 代价权重：平滑主项基准 w_j=1.0、w_eta=1.0、w_ref,0=10.0、w_theta=5.0
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_jerk, 1.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_steer_accel, 1.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_ref_base, 10.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_theta, 5.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_shift, 0.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.shift_beta, 0.1);
-    // 曲率正则与 δ 奇异区护栏：默认关闭
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_curvature, 0.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_delta_guard, 0.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.delta_guard, 0.7);
-    // 曲率正则的轴距系数：默认构造时为零值占位（经 optimizeDdp 按
-    // VehicleParams 注入后方生效，见 ClampToVehicleParams 测试）
-    EXPECT_DOUBLE_EQ(config.solver.cost.wheelbase, 0.0);
     // 阶段二编排：外层上限 16（四数据集标定值：真实长视窗下 8 轮预算
     // 不足，data3/data7 在 10~11 轮收敛）、门控 mu 初值 10、门控容差 1e-2
     EXPECT_EQ(config.solver.stage_two_max_outer_iterations, 16);
@@ -121,9 +109,6 @@ TEST(DdpConfigTest, ClampToVehicleParamsOnlyTightens) {
     EXPECT_DOUBLE_EQ(tight.reference.delta_max, 0.4);
     EXPECT_DOUBLE_EQ(tight.reference.omega_max, 0.3);
     EXPECT_DOUBLE_EQ(tight.reference.a_max, 0.8);
-    // 钳制同时注入曲率正则所需的轴距系数
-    EXPECT_DOUBLE_EQ(tight.solver.cost.wheelbase, 3.0);
-    EXPECT_DOUBLE_EQ(inflated.solver.cost.wheelbase, 3.0);
 }
 
 // 测试场景：默认构造与显式调用 synchronizeAmplitudeBounds。
@@ -167,16 +152,15 @@ TEST(DdpConfigTest, LoadFromJsonOverridesAllFields) {
         "solver": {
             "stage_two_max_outer_iterations": 5,
             "gating_mu_initial": 20.0, "gating_mu_max": 1e5, "gating_tol": 0.05,
-            "seed_mu_cap_ratio": 10.0,
             "inner": {
                 "jerk_max": 2.5, "steer_accel_max": 1.3, "max_iterations": 30,
                 "cost_change_tol": 1e-8, "gradient_tol": 1e-7,
                 "reg_initial": 1e-3, "reg_min": 1e-8, "reg_max": 1e8,
                 "reg_increase": 5.0, "reg_decrease": 0.6,
                 "armijo_gamma": 0.2, "backtrack_beta": 0.4, "max_backtracks": 40,
-                "merit_mu0": 50.0, "merit_rho": 0.6, "merit_kappa_d": 1e-5,
-                "inter_segment_weight": 0.2, "merit_mu_max": 1e3,
-                "domain_guard_margin": 3.0
+                "merit_mu0": 50.0, "merit_mu_max": 1e3,
+                "domain_guard_margin": 3.0, "merit_mu_al_ratio": 1e-3,
+                "convergence_defect_tol": 2e-3
             },
             "outer": {
                 "max_outer_iterations": 15, "terminal_position_tol": 0.08,
@@ -184,42 +168,25 @@ TEST(DdpConfigTest, LoadFromJsonOverridesAllFields) {
                 "defect_tol": 1e-4, "mu_min": 10.0, "mu_max": 1e5,
                 "first_round_mu": 2.0, "amplitude_mu_initial": 3.0,
                 "epsilon_mu": 1e-3, "mu_gate_kappa": 0.8,
-                "mu_growth_factor": 5.0, "anneal_gamma": 0.6,
-                "shift_beta_initial": 0.4, "shift_beta_final": 0.06,
-                "shift_beta_gamma": 0.7, "melt_crit_threshold": 3000.0,
-                "candidate_anneal_gamma": 0.3, "amplitude_mu_max": 1e4,
-                "anneal_hold_rounds": 2
+                "mu_growth_factor": 5.0, "anneal_gamma": 0.6
             },
             "cost": {
                 "weight_jerk": 2.0, "weight_steer_accel": 3.0,
-                "weight_ref_base": 20.0, "weight_theta": 8.0,
-                "weight_shift": 1.0, "shift_beta": 0.2,
-                "weight_curvature": 67.0, "weight_delta_guard": 100.0,
-                "delta_guard": 0.8
+                "weight_ref_base": 20.0, "weight_theta": 8.0
             }
         },
         "esdf": {
             "margin_safe": 0.03, "margin_comf": 0.15,
             "weight_safe": 200.0, "weight_comf": 2.0, "stride": 2
         },
-        "esdf_stage_two": {
-            "weight_safe": 250.0
-        },
         "post_stage": {
             "epsilon_v": 0.03, "v_dwell": 0.08, "shift_delay": 0.5,
             "kappa_pad": 1.5, "seam_speed_tol": 0.03, "dwell_omega_tol": 0.2,
-            "amplitude_check_tol": 0.08, "control_overshoot_tol": 0.4,
+            "amplitude_check_tol": 0.08, "amplitude_check_rel_tol": 0.03,
+            "control_overshoot_tol": 0.4,
             "stage_two_min_tracking_weight": 0.01
         },
-        "cusp_prune": {
-            "max_prune_arc": 0.9, "overlap_ratio": 1.2,
-            "collision_margin": 0.03
-        },
-        "curvature_projection": {
-            "cap_ratio": 0.9
-        },
-        "dual_candidate_select": true,
-        "rescue_margin_safe": 0.05
+        "dual_candidate_select": true
     })json");
     DdpConfig config;
     LoadDdpConfigOverrides(details, &config);
@@ -234,7 +201,6 @@ TEST(DdpConfigTest, LoadFromJsonOverridesAllFields) {
     EXPECT_DOUBLE_EQ(config.solver.gating_mu_initial, 20.0);
     EXPECT_DOUBLE_EQ(config.solver.gating_mu_max, 1e5);
     EXPECT_DOUBLE_EQ(config.solver.gating_tol, 0.05);
-    EXPECT_DOUBLE_EQ(config.solver.seed_mu_cap_ratio, 10.0);
     EXPECT_DOUBLE_EQ(config.solver.inner.jerk_max, 2.5);
     EXPECT_DOUBLE_EQ(config.solver.inner.steer_accel_max, 1.3);
     EXPECT_EQ(config.solver.inner.max_iterations, 30);
@@ -249,11 +215,10 @@ TEST(DdpConfigTest, LoadFromJsonOverridesAllFields) {
     EXPECT_DOUBLE_EQ(config.solver.inner.backtrack_beta, 0.4);
     EXPECT_EQ(config.solver.inner.max_backtracks, 40);
     EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu0, 50.0);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_rho, 0.6);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_kappa_d, 1e-5);
     EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu_max, 1e3);
-    EXPECT_DOUBLE_EQ(config.solver.inner.inter_segment_weight, 0.2);
     EXPECT_DOUBLE_EQ(config.solver.inner.domain_guard_margin, 3.0);
+    EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu_al_ratio, 1e-3);
+    EXPECT_DOUBLE_EQ(config.solver.inner.convergence_defect_tol, 2e-3);
     EXPECT_EQ(config.solver.outer.max_outer_iterations, 15);
     EXPECT_DOUBLE_EQ(config.solver.outer.terminal_position_tol, 0.08);
     EXPECT_DOUBLE_EQ(config.solver.outer.terminal_heading_tol_deg, 2.0);
@@ -267,32 +232,15 @@ TEST(DdpConfigTest, LoadFromJsonOverridesAllFields) {
     EXPECT_DOUBLE_EQ(config.solver.outer.mu_gate_kappa, 0.8);
     EXPECT_DOUBLE_EQ(config.solver.outer.mu_growth_factor, 5.0);
     EXPECT_DOUBLE_EQ(config.solver.outer.anneal_gamma, 0.6);
-    EXPECT_DOUBLE_EQ(config.solver.outer.shift_beta_initial, 0.4);
-    EXPECT_DOUBLE_EQ(config.solver.outer.shift_beta_final, 0.06);
-    EXPECT_DOUBLE_EQ(config.solver.outer.shift_beta_gamma, 0.7);
-    EXPECT_DOUBLE_EQ(config.solver.outer.melt_crit_threshold, 3000.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.candidate_anneal_gamma, 0.3);
-    EXPECT_DOUBLE_EQ(config.solver.outer.amplitude_mu_max, 1e4);
-    EXPECT_EQ(config.solver.outer.anneal_hold_rounds, 2);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_jerk, 2.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_steer_accel, 3.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_ref_base, 20.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.weight_theta, 8.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_shift, 1.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.shift_beta, 0.2);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_curvature, 67.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_delta_guard, 100.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.delta_guard, 0.8);
     EXPECT_DOUBLE_EQ(config.esdf.margin_safe, 0.03);
     EXPECT_DOUBLE_EQ(config.esdf.margin_comf, 0.15);
     EXPECT_DOUBLE_EQ(config.esdf.weight_safe, 200.0);
     EXPECT_DOUBLE_EQ(config.esdf.weight_comf, 2.0);
     EXPECT_EQ(config.esdf.stride, 2);
-    // 阶段二 ESDF 节：以阶段一为底播种、仅覆盖显式字段，出现即启用
-    EXPECT_TRUE(config.esdf_stage_two_enabled);
-    EXPECT_DOUBLE_EQ(config.esdf_stage_two.margin_safe, 0.03);
-    EXPECT_DOUBLE_EQ(config.esdf_stage_two.weight_safe, 250.0);
-    EXPECT_EQ(config.esdf_stage_two.stride, 2);
     EXPECT_DOUBLE_EQ(config.post_stage.epsilon_v, 0.03);
     EXPECT_DOUBLE_EQ(config.post_stage.v_dwell, 0.08);
     EXPECT_DOUBLE_EQ(config.post_stage.shift_delay, 0.5);
@@ -300,14 +248,10 @@ TEST(DdpConfigTest, LoadFromJsonOverridesAllFields) {
     EXPECT_DOUBLE_EQ(config.post_stage.seam_speed_tol, 0.03);
     EXPECT_DOUBLE_EQ(config.post_stage.dwell_omega_tol, 0.2);
     EXPECT_DOUBLE_EQ(config.post_stage.amplitude_check_tol, 0.08);
+    EXPECT_DOUBLE_EQ(config.post_stage.amplitude_check_rel_tol, 0.03);
     EXPECT_DOUBLE_EQ(config.post_stage.control_overshoot_tol, 0.4);
     EXPECT_DOUBLE_EQ(config.post_stage.stage_two_min_tracking_weight, 0.01);
-    EXPECT_DOUBLE_EQ(config.cusp_prune.max_prune_arc, 0.9);
-    EXPECT_DOUBLE_EQ(config.cusp_prune.overlap_ratio, 1.2);
-    EXPECT_DOUBLE_EQ(config.cusp_prune.collision_margin, 0.03);
-    EXPECT_DOUBLE_EQ(config.curvature_projection.cap_ratio, 0.9);
     EXPECT_TRUE(config.dual_candidate_select);
-    EXPECT_DOUBLE_EQ(config.rescue_margin_safe, 0.05);
     // 幅值边界经 reference/inner 单一来源同步进全部消费方
     EXPECT_DOUBLE_EQ(config.solver.cost.v_max, 2.0);
     EXPECT_DOUBLE_EQ(config.solver.cost.a_max, 1.2);
@@ -333,8 +277,6 @@ TEST(DdpConfigTest, LoadFromJsonKeepsDefaultsWhenAbsent) {
     EXPECT_DOUBLE_EQ(config.solver.inner.jerk_max, fresh.solver.inner.jerk_max);
     EXPECT_EQ(config.solver.inner.max_iterations,
               fresh.solver.inner.max_iterations);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_kappa_d,
-                     fresh.solver.inner.merit_kappa_d);
     EXPECT_EQ(config.solver.outer.max_outer_iterations,
               fresh.solver.outer.max_outer_iterations);
     EXPECT_DOUBLE_EQ(config.solver.outer.mu_min, fresh.solver.outer.mu_min);
@@ -347,8 +289,6 @@ TEST(DdpConfigTest, LoadFromJsonKeepsDefaultsWhenAbsent) {
     EXPECT_DOUBLE_EQ(config.solver.cost.v_max, fresh.solver.cost.v_max);
     EXPECT_DOUBLE_EQ(config.esdf.margin_safe, fresh.esdf.margin_safe);
     EXPECT_EQ(config.esdf.stride, fresh.esdf.stride);
-    // 阶段二 ESDF 独立标定缺席 = 关闭（阶段二与阶段一共用同一惩罚）
-    EXPECT_FALSE(config.esdf_stage_two_enabled);
     EXPECT_DOUBLE_EQ(config.post_stage.epsilon_v, fresh.post_stage.epsilon_v);
     EXPECT_DOUBLE_EQ(config.post_stage.omega_max, fresh.post_stage.omega_max);
     EXPECT_DOUBLE_EQ(config.post_stage.eta_max, fresh.post_stage.eta_max);

@@ -4,7 +4,9 @@
 // 供调参过程记录与回归判断。运行示例：
 //   ./build/Release/apa_tune_alm
 // 输出约定：每行一个 变体×数据集 评价；legal=1 表示 Trajectory::validate()
-// 三门（碰撞/终点/运动学）全部通过。
+// 三门（碰撞/终点/运动学）全部通过且幅值硬限复检通过（κ 与 |ω| 不超过
+// 车辆真值上限的 1.02 包络——与 DDP 侧 tune_ddp/生产校验门同一口径，
+// 两条链路的「合法」定义由此统一）
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -47,8 +49,8 @@ std::vector<DatasetCase> BuildDatasets() {
 // 本批次扫描的变体列表（baseline 恒为第一个，作为全部对比的基准）。
 // 当前发货状态仅保留最终默认参数的基线验证；历史扫描批次（jerk_s/
 // gear_cusp/eps_time/melt_arc 共 25 组 + 段数压缩批次 1~7 的变体定义）
-// 见 docs/milestones/milestone-012/tuning-notes.md 与 docs/ALM.md 第四章
-// 调参标定小节收录的完整记录文档，可按需恢复后复跑。
+// 见 docs/ALM.md 第四章调参标定小节收录的完整记录文档，可按需恢复后
+// 复跑。
 // baseline 的通用 Config 基类字段（如 outer_row_num）从生产配置
 // data/alm_config.json 加载，保证调参评价与生产环境同一碰撞模型
 std::vector<TuneVariant> BuildVariants() {
@@ -97,7 +99,7 @@ bool RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
     const auto init_path = Path::FromProto(request.initial_path());
     const PostProcessor processor(vehicle_params, footprint_model, esdf_map);
     const auto result = processor.optimizeAlm(init_path, variant.config);
-    if (!result.success || result.alm_traj.empty()) {
+    if (!result.success || result.optimized_trajectory.empty()) {
         std::cout << "[TUNE] variant=" << variant.name
                   << " dataset=" << dataset.name << " success=0 msg=\""
                   << result.message << "\"" << std::endl;
@@ -106,11 +108,43 @@ bool RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
     const auto& goal_pt = init_path.back();
     const TrajectoryPoint goal(goal_pt.x, goal_pt.y, goal_pt.theta);
     const auto validation =
-        result.alm_traj.validate(goal, esdf_map, footprint_model);
-    // 行驶速度最大 |κ| 与相对车辆物理上限的比值（spec 允许 ~4% 残余）
+        result.optimized_trajectory.validate(goal, esdf_map, footprint_model);
+    // 行驶速度最大 |κ| 与相对车辆物理上限的比值；max|ω| 全轨迹包络
+    // （执行器在驻留转向中同样工作，与 tune_ddp 同一量测口径）
     const double max_kappa =
-        ComputeMaxDrivingKappa(result.alm_traj, vehicle_params.wheelbase);
+        ComputeMaxDrivingKappa(result.optimized_trajectory, vehicle_params.wheelbase);
     const double kappa_ratio = max_kappa / vehicle_params.max_kappa;
+    double max_omega = 0.0;
+    for (const auto& pt : result.optimized_trajectory) {
+        if (pt.hasDeltaDot()) {
+            max_omega = std::max(max_omega, std::abs(pt.getDeltaDot()));
+        }
+    }
+    // 合法性口径与 DDP 链路统一（spec Q4：两条链路的「合法」必须同
+    // 定义才有对比意义）：validate 三门 + 幅值硬限复检（δ 相对 2.1% ≈
+    // κ 相对 2.47%、ω 相对 2.1%——AL 平衡包络 + 车辆余量的一致标定，
+    // 与 tune_ddp/生产校验门同源）
+    const double omega_limit = 1.021 * vehicle_params.max_steer_rate;
+    // ω 超限取证：超限点数与最不利点的上下文（速度/转角/轨迹位置），
+    // 区分「换挡尖点伪影」与「真实可行性缺陷」
+    int omega_over_points = 0;
+    double omega_worst_v = 0.0;
+    double omega_worst_delta = 0.0;
+    std::size_t omega_worst_index = 0;
+    for (std::size_t i = 0; i < result.optimized_trajectory.size(); ++i) {
+        const auto& pt = result.optimized_trajectory[i];
+        if (!pt.hasDeltaDot() || std::abs(pt.getDeltaDot()) <= omega_limit) {
+            continue;
+        }
+        ++omega_over_points;
+        if (std::abs(pt.getDeltaDot()) >= max_omega) {
+            omega_worst_index = i;
+            omega_worst_v = pt.hasV() ? pt.getV() : 0.0;
+            omega_worst_delta = pt.hasDelta() ? pt.getDelta() : 0.0;
+        }
+    }
+    const bool legal = validation.all_passed && kappa_ratio <= 1.0247 &&
+                       max_omega <= omega_limit;
     std::cout << "[TUNE] variant=" << variant.name
               << " dataset=" << dataset.name << " success=1"
               << " maneuvers=" << init_path.numManeuvers() << "->"
@@ -124,10 +158,15 @@ bool RunSingle(const TuneVariant& variant, const DatasetCase& dataset) {
               << " kin_vel=" << validation.max_kinematic_velocity_residual
               << " kin_steer=" << validation.max_kinematic_steer_residual
               << " max_kappa=" << max_kappa << " kappa_ratio=" << kappa_ratio
-              << " legal=" << (validation.all_passed ? 1 : 0)
+              << " max_omega=" << max_omega
+              << " omega_over=" << omega_over_points
+              << " omega_worst=(idx=" << omega_worst_index
+              << ",v=" << omega_worst_v << ",delta=" << omega_worst_delta
+              << ",size=" << result.optimized_trajectory.size() << ")"
+              << " legal=" << (legal ? 1 : 0)
               << " time_ms=" << result.total_time_ms << " msg=\""
               << result.message << "\"" << std::endl;
-    return validation.all_passed;
+    return legal;
 }
 }  // namespace
 

@@ -9,6 +9,7 @@
 #include "../../spatial/esdf_map.h"
 #include "../../util/constants.h"
 #include "../../util/path.h"
+#include "../../util/reeds_shepp.h"
 #include "../../vehicle/vehicle_footprint_model.h"
 #include "../../vehicle/vehicle_params.h"
 
@@ -48,8 +49,6 @@ struct DdpReferenceBuilderConfig {
     // 纵向加速度幅值上限 (m/s²)
     double a_max{1.0};
     // 前轮转角幅值上限 (rad)：默认值取车队车辆物理参数真值
-    // （max_steer_angle=0.47728 rad，对应 κ_max=tanδ_max/L≈0.1724 /m）；
-    // 任何更大的配置值都会在编排入口被车辆参数钳回（只准收紧不准放宽）
     double delta_max{0.47728};
     // 前轮转角速度幅值上限 (rad/s)：默认值取车辆真值 max_steer_rate=0.4
     double omega_max{0.4};
@@ -65,6 +64,7 @@ struct DdpReferenceManeuver {
     double delta_theta{0.0};
     // 在重采样网格上的起/止点索引（含端点；相邻 maneuver 共享边界点索引）
     std::size_t begin_index{0};
+    // 终止索引
     std::size_t end_index{0};
 };
 // 阶段一求解所需的全部前端数据：参考位姿序列、初值序列、cusp/maneuver
@@ -86,59 +86,35 @@ struct DdpReference {
     DdpAlignedVec<DdpState> initial_states;
     // N 个控制初值 [j, η]，恒为零向量
     DdpAlignedVec<DdpControl> initial_controls;
+    // N 个逐步时长 (s)：构建时一律填 dt（均匀网格）。段级时间重分配启用后
+    std::vector<double> step_dt;
+    // 第 k 步的时长：step_dt 未填充时退化为均匀网格 dt
+    double stepDt(std::size_t k) const {
+        return k < step_dt.size() ? step_dt[k] : dt;
+    }
 };
-// cusp 几何预剪枝配置：在构建 DDP 参考之前，对混合 A* 的 maneuver 序列
-// 做一次纯几何的冗余折返剔除。cusp 集决定打靶节点布设、跟踪权重排布与
-// 阶段二接缝门控——「从更少的 cusp 出发」把「跨越离散拓扑变化」的融化
-// 负担从连续优化器肩上卸下来（实测：阶段一内部融化在低临界比段上已被
-// 滞回吸收，进一步融化受收敛收束与锚点冲突限制）
-struct DdpCuspPruneConfig {
-    // 冗余折返的弧长阈值 (m)：位移低于该值的内部 maneuver 才进入候选
-    // （0 = 关闭，输出与输入逐位一致）
-    double max_prune_arc{0.0};
-    // 冗余判据系数 α：折返终点 B 距「此前已覆盖路径」最近点 Q 的距离
-    // |QB| <= α·Δs 才判冗余——B 落在未探索的新区域即为真实位移，绝不剔除
-    double overlap_ratio{1.0};
-    // 缝合桥 ESDF 侵入上限 (m)：外圆半径 − ESDF 距离超过该值即回滚该次
-    // 剔除（同伦类保护：被剪的段可能是绕障必需）
-    double collision_margin{0.02};
-};
-// 对输入路径做换挡几何预剪枝：逐次把「终点落在已覆盖区域内的冗余折返」
-// 整段剔除，并把路径从折返起点附近的已覆盖点 Q 直接缝合到折返终点 B
-// （三重覆盖区消失，maneuver 数净减 2/次）。每次剔除前做三道守卫：
-// 重叠判据（|QB| ≤ α·Δs）、航向一致性（缝合桥方向与两端航向轴的夹角
-// ≈0 或 ≈π，横向桥接对自行车模型不可达）、ESDF 侵入检查（超限即回滚
-// 本次剔除）。首/末 maneuver 无论判据量如何均不参与（承载起点状态与
-// 终点语义）。配置非法抛 std::invalid_argument
-Path PruneRedundantCusps(const Path& path, const ESDFMap& esdf_map,
-                         const VehicleFootprintModel& footprint_model,
-                         const DdpCuspPruneConfig& config);
-
-// 参考保形曲率投影配置：把前端 A* 参考中隐含曲率超过给定上限的弧段，
-// 在保持全部点位、端点航向、换挡点与同伦类的前提下压回可行域（输入
-// 超限 2~9% 会使 AL 幅值约束从首轮即激活、求解器一开始就贴着约束边界
-// 找空间——这是阶段一病态与阶段二碰撞的上游原因之一）。
-// 与已证伪的 V 形折点平滑（L2.1，针对误诊断的「伪影」）不同源：本项
-// 针对的是已实测确证的全局性超限，目标是让参考本身进入可行域
-struct DdpCurvatureProjectionConfig {
-    // 曲率上限相对车辆物理上限的比例（0 = 关闭）：投影目标
-    // κ_proj = ratio · tan(δ_max) / L；取 <1（如 0.95）给求解器在 δ 边界
-    // 留出平衡余量——参考恰好贴限时 AL/跟踪的边界争斗无求解余量
+// RS 换挡点短接配置：允许换挡位姿移动，用有界曲率曲线重连——
+// 唯一能突破「换挡点由前端钉死」的几何前处理
+struct DdpRsShortcutConfig {
+    // 曲率上限比（0=关闭）
     double cap_ratio{0.0};
+    // ESDF 侵入裕度 + 圆心必须在地图内
+    double collision_margin{0.02};
+    // 长度增长上限比（以原始输入长度为基准）
+    double max_length_growth{0.05};
+    // 候选端点扫描步长
+    int index_stride{5};
+    // 离散采样间距
+    double sample_dist{0.05};
+    // 贪心轮数上限
+    int max_rounds{4};
 };
-// 对输入路径做保形曲率投影：以段曲率 κ_i = wrap(Δθ)/ds（与参考构建器
-// δ = atan(L·κ) 反解同一 θ 差分口径）检测超限段，逐 maneuver 执行
-// 「钳制 + 航向守恒再分配」——超限段的 κ 钳到 ±κ_cap，被钳掉的带符号
-// 航向均匀摊到本 maneuver 的未钳段上（摊派后任何段 |κ| 仍 ≤ κ_cap，
-// 否则该 maneuver 整段回滚保持原样）。**只改 θ 不改位置**：端点、
-// 换挡点位置与同伦类自动保持（位移零变化，无需 ESDF 回滚守卫——这正是
-// 本方案相对位置重构的更安全之处）；每 maneuver 的总航向变化严格守恒，
-// maneuver 端点航向逐位不变。整段超限（无可摊容量，如全段贴限的参考）
-// 无法投影——此时上游无几何裕度可言，保持原样由下游机制处理。
-// 配置非法抛 std::invalid_argument；ratio=0 或无超限段时逐位透传
-Path ProjectReferenceCurvature(const Path& path, double wheelbase,
-                               double delta_max,
-                               const DdpCurvatureProjectionConfig& config);
+// RS 换挡点短接：贪心搜索「段数下降最多、其次总长最短」的替换，经
+// ESDF/地图/长度三道守卫
+Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
+                         const VehicleFootprintModel& footprint_model,
+                         double wheelbase, double delta_max,
+                         const DdpRsShortcutConfig& config);
 
 class DdpReferenceBuilder {
    public:
@@ -152,6 +128,7 @@ class DdpReferenceBuilder {
     double sampleDist() const { return config_.sample_dist; }
 
    protected:
+    // 配置
     DdpReferenceBuilderConfig config_;
     // 轴距 (m)：δ = atan(L·κ) 反解的唯一车辆参数依赖
     double wheelbase_{0.0};

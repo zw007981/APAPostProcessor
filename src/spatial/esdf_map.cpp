@@ -83,6 +83,52 @@ std::pair<double, Eigen::Vector2d> ESDFMap::interpolateDistAndGrad(
     return {dist, Eigen::Vector2d(grad_x, grad_y)};
 }
 
+ESDFMap::DistGradIfCloser ESDFMap::getDistAndGradIfCloser(
+    double x, double y, double grad_threshold) const {
+    DistGradIfCloser result;
+    if (!this->inMap(x, y)) {
+        // 图外按实心障碍处理、恒活跃：恢复场一次算全距离与梯度
+        out_of_map_queries_.fetch_add(1, std::memory_order_relaxed);
+        const auto [dist, grad] = recoveredFieldOutside(x, y);
+        result.dist = dist;
+        result.grad_computed = true;
+        result.grad = grad;
+        return result;
+    }
+    // 与 interpolateDistAndGrad 同一表达式（同编译单元同浮点收缩约定，
+    // 保证本查询与全量查询逐位一致）；梯度插值仅在距离低于阈值时进行
+    const auto params = this->calBilinearParams(x, y);
+    const auto& cell_bl = cell_data_[params.idx_bl];
+    const auto& cell_br = cell_data_[params.idx_br];
+    const auto& cell_tl = cell_data_[params.idx_tl];
+    const auto& cell_tr = cell_data_[params.idx_tr];
+    const auto col_ratio = params.col_ratio;
+    const auto row_ratio = params.row_ratio;
+    const auto dist_row_lower =
+        cell_bl.dist + (cell_br.dist - cell_bl.dist) * col_ratio;
+    const auto dist_row_upper =
+        cell_tl.dist + (cell_tr.dist - cell_tl.dist) * col_ratio;
+    result.dist =
+        dist_row_lower + (dist_row_upper - dist_row_lower) * row_ratio;
+    if (result.dist < grad_threshold) {
+        const auto grad_x_row_lower =
+            cell_bl.grad_x + (cell_br.grad_x - cell_bl.grad_x) * col_ratio;
+        const auto grad_x_row_upper =
+            cell_tl.grad_x + (cell_tr.grad_x - cell_tl.grad_x) * col_ratio;
+        const auto grad_x = grad_x_row_lower +
+                            (grad_x_row_upper - grad_x_row_lower) * row_ratio;
+        const auto grad_y_row_lower =
+            cell_bl.grad_y + (cell_br.grad_y - cell_bl.grad_y) * col_ratio;
+        const auto grad_y_row_upper =
+            cell_tl.grad_y + (cell_tr.grad_y - cell_tl.grad_y) * col_ratio;
+        const auto grad_y = grad_y_row_lower +
+                            (grad_y_row_upper - grad_y_row_lower) * row_ratio;
+        result.grad_computed = true;
+        result.grad = Eigen::Vector2d(grad_x, grad_y);
+    }
+    return result;
+}
+
 double ESDFMap::interpolateDist(double x, double y) const {
     // 仅对距离做双线性插值。使用独立 distance_data_ 保持紧凑 stride，
     // 避免 AoS 布局对纯距离查询的 cache 密度损失。

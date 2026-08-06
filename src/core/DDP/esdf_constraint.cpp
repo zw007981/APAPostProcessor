@@ -47,25 +47,55 @@ DdpEsdfPoseCost DdpEsdfConstraint::evaluate(double x, double y,
     Eigen::Vector3d grad3 = Eigen::Vector3d::Zero();
     Eigen::Matrix3d hess3 = Eigen::Matrix3d::Zero();
     for (const auto& local_center : circle_local_centers_) {
-        const auto circle =
-            evaluateCircle(local_center, cos_theta, sin_theta, x, y);
-        if (circle.c_safe > 0.0) {
-            result.cost += config_.weight_safe * circle.c_safe * circle.c_safe *
-                           circle.c_safe;
-            grad3 +=
-                (3.0 * config_.weight_safe * circle.c_safe * circle.c_safe) *
-                circle.grad;
-            hess3 += (6.0 * config_.weight_safe * circle.c_safe) *
-                     (circle.grad * circle.grad.transpose());
+        const double lx = local_center.x();
+        const double ly = local_center.y();
+        // 圆心世界坐标 P = (x,y) + R(θ)·p_local
+        const double cx = x + cos_theta * lx - sin_theta * ly;
+        const double cy = y + sin_theta * lx + cos_theta * ly;
+        // 条件查询：活跃阈值为外圆半径 + margin_comf（车辆外圆模型与
+        // 配置共同决定的安全值）；两个 margin 均不活跃的圆对代价/梯度/
+        // Hessian 的贡献恒为零，梯度插值整体跳过，结果逐位不变
+        const auto query = esdf_map_.getDistAndGradIfCloser(
+            cx, cy, circle_radius_ + config_.margin_comf);
+        // 防御：ESDF 查询返回非有限值（当前实现整数距离场下不可达，属
+        // 保守侵入兜底，梯度取零与逐圆全量路径的防御分支一致）
+        if (!std::isfinite(query.dist)) {
+            const double c_safe = circle_radius_ + config_.margin_safe;
+            const double c_comf = circle_radius_ + config_.margin_comf;
+            result.cost +=
+                config_.weight_safe * c_safe * c_safe * c_safe;
+            result.cost +=
+                config_.weight_comf * c_comf * c_comf * c_comf;
+            continue;
         }
-        if (circle.c_comf > 0.0) {
-            result.cost += config_.weight_comf * circle.c_comf * circle.c_comf *
-                           circle.c_comf;
-            grad3 +=
-                (3.0 * config_.weight_comf * circle.c_comf * circle.c_comf) *
-                circle.grad;
-            hess3 += (6.0 * config_.weight_comf * circle.c_comf) *
-                     (circle.grad * circle.grad.transpose());
+        const double c_safe = circle_radius_ + config_.margin_safe - query.dist;
+        const double c_comf = circle_radius_ + config_.margin_comf - query.dist;
+        if (c_safe <= 0.0 && c_comf <= 0.0) {
+            continue;
+        }
+        // 活跃 ⟺ dist < r+margin_comf ⟹ 梯度必然已计算（阈值同源）；
+        // 圆心随 θ 旋转的几何链式法则：dP/dθ = dR/dθ·p_local
+        const auto& grad = query.grad;
+        const double dcx_dtheta = -sin_theta * lx - cos_theta * ly;
+        const double dcy_dtheta = cos_theta * lx - sin_theta * ly;
+        const Eigen::Vector3d circle_grad(
+            -grad.x(), -grad.y(),
+            -(grad.x() * dcx_dtheta + grad.y() * dcy_dtheta));
+        if (c_safe > 0.0) {
+            result.cost +=
+                config_.weight_safe * c_safe * c_safe * c_safe;
+            grad3 += (3.0 * config_.weight_safe * c_safe * c_safe) *
+                     circle_grad;
+            hess3 += (6.0 * config_.weight_safe * c_safe) *
+                     (circle_grad * circle_grad.transpose());
+        }
+        if (c_comf > 0.0) {
+            result.cost +=
+                config_.weight_comf * c_comf * c_comf * c_comf;
+            grad3 += (3.0 * config_.weight_comf * c_comf * c_comf) *
+                     circle_grad;
+            hess3 += (6.0 * config_.weight_comf * c_comf) *
+                     (circle_grad * circle_grad.transpose());
         }
     }
     // 散布到七维状态的 (x, y, θ) 行/块（布局索引 0/1/2 连续），其余恒零
@@ -87,10 +117,6 @@ DdpEsdfCircleConstraint DdpEsdfConstraint::evaluateCircle(
     const auto [dist, grad] = esdf_map_.getDistAndGrad(cx, cy);
     DdpEsdfCircleConstraint result;
     // 防御：ESDF 查询返回非有限值（当前实现整数距离场下不可达，属
-    // 面向未来实现变更的防御）时按保守侵入处理——C 取最大值、梯度为零，
-    // 不把 NaN 静默传播进代价/导数。（注意与图外语义区分：图外查询
-    // 在 M011 L8 修复后返回穿透深度与指向图内的恢复梯度，走下方正常
-    // 路径，不进入本分支）
     if (!std::isfinite(dist)) {
         result.c_safe = circle_radius_ + config_.margin_safe;
         result.c_comf = circle_radius_ + config_.margin_comf;

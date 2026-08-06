@@ -179,8 +179,8 @@ TEST(PostProcessorAlmTest, AlmTrajFilledOnSuccessAndEmptyOnFailure) {
     for (const auto& maneuver : result.optimized_path.getManeuvers()) {
         path_points += maneuver.points.size();
     }
-    ASSERT_EQ(result.alm_traj.size(), path_points);
-    for (const auto& pt : result.alm_traj) {
+    ASSERT_EQ(result.optimized_trajectory.size(), path_points);
+    for (const auto& pt : result.optimized_trajectory) {
         EXPECT_TRUE(std::isfinite(pt.x));
         EXPECT_TRUE(std::isfinite(pt.y));
         EXPECT_TRUE(std::isfinite(pt.theta));
@@ -190,16 +190,17 @@ TEST(PostProcessorAlmTest, AlmTrajFilledOnSuccessAndEmptyOnFailure) {
     const Path empty_path;
     const auto failed = processor.optimizeAlm(empty_path, AlmConfig{});
     EXPECT_FALSE(failed.success);
-    EXPECT_TRUE(failed.alm_traj.empty());
+    EXPECT_TRUE(failed.optimized_trajectory.empty());
 }
 
 // ============================================================
 // 测试：alm_preprocessed_traj 预处理粗优化轨迹填充
 // ============================================================
 
-// 预处理成功后必须同步填充 alm_preprocessed_traj（预处理粗优化轨迹的离散化
-// 结果，作为"优化前"对比基线）：首点锚定初始路径首点，末点在预处理收敛容差
-// 内贴近初始路径末点，逐点携带状态/控制量；预处理失败时必须为空。
+// 预处理成功后必须填充 intermediate_traces["alm_preprocessed"]（预处理
+// 粗优化轨迹的离散化结果，作为"优化前"对比基线）：首点锚定初始路径首点，
+// 末点在预处理收敛容差内贴近初始路径末点，逐点携带状态/控制量；预处理
+// 失败时 intermediate_traces 中无此项。
 TEST(PostProcessorAlmTest,
      AlmPreprocessedTrajFilledOnSuccessAndEmptyOnFailure) {
     const auto vehicle_params = MakeVehicleParams();
@@ -209,11 +210,20 @@ TEST(PostProcessorAlmTest,
     const auto path = BuildStraightPath(2.0);
     const auto result = processor.optimizeAlm(path, AlmConfig{});
     ASSERT_TRUE(result.success) << result.message;
-    ASSERT_FALSE(result.alm_preprocessed_traj.empty());
+    // 从 intermediate_traces 中查找预处理轨迹
+    const Trajectory* preprocessed = nullptr;
+    for (const auto& [name, traj] : result.intermediate_traces) {
+        if (name == "alm_preprocessed") {
+            preprocessed = &traj;
+            break;
+        }
+    }
+    ASSERT_NE(preprocessed, nullptr);
+    ASSERT_FALSE(preprocessed->empty());
     // 离散化锚定初始路径首点（世界坐标还原积分的锚点）
-    EXPECT_DOUBLE_EQ(result.alm_preprocessed_traj.front().x, path.front().x);
-    EXPECT_DOUBLE_EQ(result.alm_preprocessed_traj.front().y, path.front().y);
-    for (const auto& pt : result.alm_preprocessed_traj) {
+    EXPECT_DOUBLE_EQ(preprocessed->front().x, path.front().x);
+    EXPECT_DOUBLE_EQ(preprocessed->front().y, path.front().y);
+    for (const auto& pt : *preprocessed) {
         EXPECT_TRUE(std::isfinite(pt.x));
         EXPECT_TRUE(std::isfinite(pt.y));
         EXPECT_TRUE(std::isfinite(pt.theta));
@@ -221,14 +231,21 @@ TEST(PostProcessorAlmTest,
         EXPECT_TRUE(pt.hasDelta());
     }
     // 预处理收敛容差默认 0.1 m，叠加离散化积分还原余量后取 0.15 m 上限
-    EXPECT_NEAR(result.alm_preprocessed_traj.back().x, path.back().x, 0.15);
-    EXPECT_NEAR(result.alm_preprocessed_traj.back().y, path.back().y, 0.15);
-    // 预处理失败：无任何离散化产物
+    EXPECT_NEAR(preprocessed->back().x, path.back().x, 0.15);
+    EXPECT_NEAR(preprocessed->back().y, path.back().y, 0.15);
+    // 预处理失败：intermediate_traces 中无 alm_preprocessed 项
     AlmConfig fail_config;
     fail_config.preprocessor.convergence_position_tolerance = 1e-9;
     const auto failed = processor.optimizeAlm(path, fail_config);
     ASSERT_FALSE(failed.success);
-    EXPECT_TRUE(failed.alm_preprocessed_traj.empty());
+    bool has_preprocessed = false;
+    for (const auto& [name, traj] : failed.intermediate_traces) {
+        if (name == "alm_preprocessed") {
+            has_preprocessed = true;
+            break;
+        }
+    }
+    EXPECT_FALSE(has_preprocessed);
 }
 
 // ============================================================
@@ -263,7 +280,7 @@ TEST(PostProcessorAlmTest, PreprocessFailureReturnsFailure) {
     EXPECT_FALSE(result.success);
     EXPECT_TRUE(result.optimized_path.empty());
     EXPECT_NE(result.message.find("preprocessing failed"), std::string::npos);
-    EXPECT_TRUE(result.alm_traj.empty());
+    EXPECT_TRUE(result.optimized_trajectory.empty());
 }
 
 // 空旷直线场景应收敛：终点双指标满足 ALM 收敛判据，轨迹无碰撞、无奇异。
@@ -306,6 +323,83 @@ TEST(PostProcessorAlmTest, EndToEndGearShiftConverges) {
     EXPECT_LE(
         ComputeMaxCollisionDepth(result.optimized_path, esdf_map, footprint),
         0.02);
+}
+
+// ============================================================
+// 测试：PostProcessorResult 重构新字段（Phase 1 双写验证）
+// ============================================================
+
+// 成功路径：optimized_trajectory 包含完整运动学量
+TEST(PostProcessorAlmTest, OptimizedTrajectoryContainsFullKinematics) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    const auto path = BuildStraightPath(2.0);
+    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    ASSERT_TRUE(result.success) << result.message;
+    ASSERT_FALSE(result.optimized_trajectory.empty());
+    for (const auto& pt : result.optimized_trajectory) {
+        EXPECT_TRUE(std::isfinite(pt.x));
+        EXPECT_TRUE(std::isfinite(pt.y));
+        EXPECT_TRUE(std::isfinite(pt.theta));
+        EXPECT_TRUE(pt.hasV());
+        EXPECT_TRUE(pt.hasDelta());
+    }
+}
+
+// algorithm 字段反映实际运行的求解器
+TEST(PostProcessorAlmTest, AlgorithmFieldIsAlm) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    const auto path = BuildStraightPath(2.0);
+    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.algorithm, "alm");
+}
+
+// intermediate_traces 包含预处理轨迹（成功路径）
+TEST(PostProcessorAlmTest, IntermediateTracesContainAlmPreprocessed) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    const auto path = BuildStraightPath(2.0);
+    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    ASSERT_TRUE(result.success) << result.message;
+    // intermediate_traces 应包含 "alm_preprocessed" 条目
+    bool found = false;
+    for (const auto& [name, traj] : result.intermediate_traces) {
+        if (name == "alm_preprocessed") {
+            found = true;
+            EXPECT_FALSE(traj.empty());
+        }
+    }
+    EXPECT_TRUE(found) << "intermediate_traces should contain alm_preprocessed";
+}
+
+// output_level 分级语义
+TEST(PostProcessorAlmTest, OutputLevelReflectsResultQuality) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    // 直线场景：应收敛，输出级别为完全成功
+    {
+        const auto path = BuildStraightPath(2.0);
+        const auto result = processor.optimizeAlm(path, AlmConfig{});
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
+    }
+    // 空路径：直接失败
+    {
+        const Path empty_path;
+        const auto result = processor.optimizeAlm(empty_path, AlmConfig{});
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.output_level, OutputLevel::kFallback);
+    }
 }
 
 }  // namespace apa_post_processor

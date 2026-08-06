@@ -58,7 +58,8 @@ PostProcessorResult DDPPlanningScene::optimize() {
         last_result_.success, last_result_.final_maneuvers,
         last_result_.final_length, last_result_.total_time_ms,
         last_result_.message);
-    ddp_traj_ = last_result_.ddp_traj;
+    // 统一从 optimized_trajectory 读取（与 NMPC/ALM 共用基类 optimized_traj_）
+    optimized_traj_ = last_result_.optimized_trajectory;
     return last_result_;
 }
 }  // namespace apa_post_processor

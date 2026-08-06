@@ -77,28 +77,5 @@ void BM_RolloutFullTrajectory(benchmark::State& state) {
 }
 BENCHMARK(BM_RolloutFullTrajectory);
 
-// 单轮全轨迹二阶张量求值（N 次 hessians 调用）：true MS-DDP 编译期开关
-// 开启后的额外耗时基线（默认关闭，仅供成本评估）
-void BM_HessiansFullTrajectory(benchmark::State& state) {
-    const BicycleDynamics dynamics(kWheelbase);
-    DdpAlignedVec<DdpState> states;
-    DdpAlignedVec<DdpControl> controls;
-    MakeNominalTrajectory(&states, &controls);
-    DdpStateHessianTensor f_xx;
-    DdpControlHessianTensor f_uu;
-    DdpMixedHessianTensor f_ux;
-    for (auto _ : state) {
-        for (std::size_t k = 0; k < kHorizonSteps; ++k) {
-            dynamics.hessians(states[k], controls[k], kDt, &f_xx, &f_uu, &f_ux);
-            benchmark::DoNotOptimize(f_xx);
-            benchmark::DoNotOptimize(f_uu);
-            benchmark::DoNotOptimize(f_ux);
-        }
-    }
-    state.SetItemsProcessed(static_cast<std::int64_t>(state.iterations()) *
-                            static_cast<std::int64_t>(kHorizonSteps));
-}
-BENCHMARK(BM_HessiansFullTrajectory);
-
 }  // namespace
 }  // namespace apa_post_processor

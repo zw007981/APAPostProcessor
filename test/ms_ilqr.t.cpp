@@ -61,11 +61,10 @@ class MsIlqrTestAccess : public MsIlqrSolver {
     using MsIlqrSolver::computeJacobians;
     using MsIlqrSolver::config_;
     using MsIlqrSolver::controls_;
+    using MsIlqrSolver::convergenceAllowed;
     using MsIlqrSolver::cost_eval_;
     using MsIlqrSolver::defects_;
-    using MsIlqrSolver::down_S_;
-    using MsIlqrSolver::down_s_;
-    using MsIlqrSolver::dt_;
+    using MsIlqrSolver::domain_guard_rejections_;
     using MsIlqrSolver::du_lin_;
     using MsIlqrSolver::dv1_;
     using MsIlqrSolver::dv2_;
@@ -95,8 +94,8 @@ class MsIlqrTestAccess : public MsIlqrSolver {
     using MsIlqrSolver::setNominalTrajectory;
     using MsIlqrSolver::setShootingLookup;
     using MsIlqrSolver::states_;
+    using MsIlqrSolver::step_dt_;
     using MsIlqrSolver::total_cost_;
-    using MsIlqrSolver::updateMeritMu;
     using MsIlqrSolver::value_S_;
     using MsIlqrSolver::value_s_;
 };
@@ -398,88 +397,6 @@ TEST(MsIlqrTest, SingleDefectNodeBackward) {
                      1e-9);
     ExpectMatrixNear(stages[0].lu + jac_b0.transpose() * z0, solver.q_u_[0],
                      1e-9);
-    ExpectMatrixNear(s1_gradient, solver.down_s_[0], 1e-9);
-    ExpectMatrixNear(s1_hessian, solver.down_S_[0], 1e-9);
-}
-
-// 单缺陷节点专项（段间惩罚注入位置）：启用 Q_d = w·I 后，回推经过打靶
-// 节点 1 时必须先把下游价值修改为 s₁ - w·d₁、S₁ + w·I，再参与 Q 量装配；
-// 非打靶节点 2 处不得注入。Q_x/Q_u 中惩罚梯度与缺陷修正精确抵消
-// （prox-term 语义），但曲率 S + w·I 必须改变 Q_uu
-TEST(MsIlqrTest, SingleDefectNodeInterSegmentPenalty) {
-    const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
-    const std::size_t num_steps = 2;
-    const DdpReference reference = MakeReference(
-        {Pose(0.0, 0.0, 0.0), Pose(0.05, 0.0, 0.0), Pose(0.10, 0.01, 0.10)},
-        kDt, {1});
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.4, 0.0, 0.03, 0.0);
-    const DdpControl u0 = MakeControl(0.01, 0.02);
-    const DdpControl u1 = MakeControl(-0.02, 0.01);
-    const DdpState x1_integral = dynamics.step(x0, u0, kDt);
-    const DdpState offset =
-        MakeState(0.10, -0.05, 0.02, 0.06, -0.04, 0.01, -0.03);
-    const DdpState x1_injected = x1_integral + offset;
-    DdpAlignedVec<DdpState> initial_states = {x0, x1_injected,
-                                              DdpState::Zero()};
-    const DdpAlignedVec<DdpControl> initial_controls = {u0, u1};
-    const double penalty_weight = 2.5;
-    MsIlqrConfig config = MakeConfig();
-    config.inter_segment_weight = penalty_weight;
-    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
-    PrepareNominal(&solver, reference, MakeMultipliers(num_steps),
-                   MakeCostInput(10.0), initial_states, initial_controls);
-    ASSERT_TRUE(solver.backwardPass());
-    const auto& stages = solver.cost_eval_.stages;
-    DdpStateJacobian jac_a0, jac_a1;
-    DdpControlJacobian jac_b0, jac_b1;
-    dynamics.jacobians(x0, u0, kDt, &jac_a0, &jac_b0);
-    dynamics.jacobians(x1_injected, u1, kDt, &jac_a1, &jac_b1);
-    // 第 k=1 步与未启用惩罚时完全一致（节点 2 非打靶，无注入）
-    const DdpStateHessian s2_hessian = stages[2].lxx;
-    const DdpState s2_gradient = stages[2].lx;
-    const DdpState q_x1 = stages[1].lx + jac_a1.transpose() * s2_gradient;
-    const DdpControl q_u1 = stages[1].lu + jac_b1.transpose() * s2_gradient;
-    const DdpStateHessian q_xx1 =
-        stages[1].lxx + jac_a1.transpose() * s2_hessian * jac_a1;
-    const DdpControlHessian q_uu1 = stages[1].luu +
-                                    jac_b1.transpose() * s2_hessian * jac_b1 +
-                                    1e-12 * DdpControlHessian::Identity();
-    const DdpControlStateHessian q_ux1 =
-        stages[1].lux + jac_b1.transpose() * s2_hessian * jac_a1;
-    const DdpControl ff1 = -q_uu1.ldlt().solve(q_u1);
-    const DdpControlStateHessian gain1 = -q_uu1.ldlt().solve(q_ux1);
-    DdpStateHessian s1_hessian = q_xx1 + gain1.transpose() * q_uu1 * gain1 +
-                                 gain1.transpose() * q_ux1 +
-                                 q_ux1.transpose() * gain1;
-    s1_hessian = 0.5 * (s1_hessian + s1_hessian.transpose());
-    const DdpState s1_gradient = q_x1 + gain1.transpose() * q_uu1 * ff1 +
-                                 gain1.transpose() * q_u1 +
-                                 q_ux1.transpose() * ff1;
-    ExpectMatrixNear(s2_gradient, solver.down_s_[1], 1e-9);
-    ExpectMatrixNear(s2_hessian, solver.down_S_[1], 1e-9);
-    // 注入位置必须恰好是打靶节点 1（第 k=0 步的下游值）
-    const DdpState injected_gradient =
-        s1_gradient - penalty_weight * solver.defects_[1];
-    const DdpStateHessian injected_hessian =
-        s1_hessian + penalty_weight * DdpStateHessian::Identity();
-    ExpectMatrixNear(injected_gradient, solver.down_s_[0], 1e-9);
-    ExpectMatrixNear(injected_hessian, solver.down_S_[0], 1e-9);
-    // Q 量装配必须使用注入后的下游值；同时 s 的 -Q_d·d 与缺陷修正的
-    // +Q_d·d 精确抵消，q_x/q_u 与未启用惩罚时形式一致
-    const DdpState z0_injected =
-        injected_gradient + injected_hessian * solver.defects_[1];
-    ExpectMatrixNear(stages[0].lx + jac_a0.transpose() * z0_injected,
-                     solver.q_x_[0], 1e-9);
-    const DdpState z0_plain = s1_gradient + s1_hessian * solver.defects_[1];
-    ExpectMatrixNear(stages[0].lx + jac_a0.transpose() * z0_plain,
-                     solver.q_x_[0], 1e-9);
-    // 曲率必须带上 w·BᵀB 的增量
-    const DdpControlHessian q_uu0_plain =
-        stages[0].luu + jac_b0.transpose() * s1_hessian * jac_b0 +
-        1e-12 * DdpControlHessian::Identity();
-    ExpectMatrixNear(q_uu0_plain + penalty_weight * jac_b0.transpose() * jac_b0,
-                     solver.q_uu_[0], 1e-9);
 }
 
 // 盒激活场景：收紧跃度盒使最优解 bang-bang，被钳制控制对应的反馈增益行
@@ -707,146 +624,6 @@ TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
                   static_cast<std::int64_t>(num_steps));
 }
 
-// µ_m 自适应：缺陷范数不超过 κ_d 时 µ_m 保持不更新；超过时按官方规则
-// （µ₀ + |EC(1)|/((1-ρ)‖d‖)，棘轮只升不降）刷新；整套更新逻辑只读取
-// EC/缺陷范数/配置，与 AL 乘子/罚权重的取值完全无关
-TEST(MsIlqrTest, MeritMuAdaptiveAndIndependent) {
-    const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
-    const std::size_t num_steps = 12;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
-    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {4, 8, 12});
-    const DdpState offset =
-        MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
-    for (const std::size_t node : {4U, 8U, 12U}) {
-        problem.states[node] += offset;
-    }
-    MsIlqrConfig gated_config = MakeConfig();
-    gated_config.merit_kappa_d = 1e30;
-    MsIlqrTestAccess gated_solver(gated_config, &dynamics, &evaluator);
-    const MsIlqrResult gated_result = gated_solver.solve(
-        problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
-        problem.states, problem.controls);
-    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, gated_result.status);
-    ASSERT_GE(gated_solver.history().size(), 1U);
-    for (const auto& record : gated_solver.history()) {
-        EXPECT_DOUBLE_EQ(gated_config.merit_mu0, record.merit_mu);
-    }
-    MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
-    const MsIlqrResult result =
-        solver.solve(problem.reference, MakeMultipliers(num_steps),
-                     MakeCostInput(10.0), problem.states, problem.controls);
-    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, result.status);
-    double replay_mu = solver.config_.merit_mu0;
-    double previous_dnorm = result.initial_defect_norm;
-    for (const auto& record : solver.history()) {
-        if (previous_dnorm > solver.config_.merit_kappa_d) {
-            const double ec_at_one = record.ec1 + 0.5 * record.ec2;
-            const double threshold =
-                solver.config_.merit_mu0 +
-                std::abs(ec_at_one) /
-                    ((1.0 - solver.config_.merit_rho) * previous_dnorm);
-            replay_mu = std::max(replay_mu, threshold);
-            replay_mu = std::max(replay_mu, solver.config_.merit_mu0);
-        }
-        EXPECT_NEAR(replay_mu, record.merit_mu, 1e-9 * (1.0 + replay_mu));
-        EXPECT_NEAR(record.cost + record.merit_mu * record.defect_norm,
-                    record.merit, 1e-9 * (1.0 + std::abs(record.merit)));
-        previous_dnorm = record.defect_norm;
-    }
-    // AL 独立性：把幅值/终点乘子与罚权重改成任意大值后重跑，µ_m 的
-    // 记录序列仍必须被同一条只含 EC/缺陷范数的规则精确复现
-    DdpCostMultiplierState multipliers = MakeMultipliers(num_steps);
-    multipliers.amplitude_lambda.setConstant(4.5);
-    multipliers.amplitude_mu.setConstant(123.0);
-    multipliers.terminal_lambda.setConstant(-2.0);
-    multipliers.terminal_mu.setConstant(555.0);
-    MsIlqrTestAccess al_solver(MakeConfig(), &dynamics, &evaluator);
-    const MsIlqrResult al_result =
-        al_solver.solve(problem.reference, multipliers, MakeCostInput(10.0),
-                        problem.states, problem.controls);
-    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, al_result.status);
-    double al_replay_mu = al_solver.config_.merit_mu0;
-    double al_previous_dnorm = al_result.initial_defect_norm;
-    for (const auto& record : al_solver.history()) {
-        if (al_previous_dnorm > al_solver.config_.merit_kappa_d) {
-            const double ec_at_one = record.ec1 + 0.5 * record.ec2;
-            const double threshold =
-                al_solver.config_.merit_mu0 +
-                std::abs(ec_at_one) /
-                    ((1.0 - al_solver.config_.merit_rho) * al_previous_dnorm);
-            al_replay_mu = std::max(al_replay_mu, threshold);
-            al_replay_mu = std::max(al_replay_mu, al_solver.config_.merit_mu0);
-        }
-        EXPECT_NEAR(al_replay_mu, record.merit_mu, 1e-9 * (1.0 + al_replay_mu));
-        al_previous_dnorm = record.defect_norm;
-    }
-}
-
-// µ_m 上限封顶：自适应规则产出的棘轮阈值超过 merit_mu_max 时被截断到
-// 上限（小缺陷下的病态放大被拦截），不超过时与不封顶逐位一致；
-// 上限必须不小于 µ₀（构造校验拒绝地板/上限冲突的非法配置）
-TEST(MsIlqrTest, MeritMuAdaptiveCappedAtMax) {
-    const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
-    const std::size_t num_steps = 12;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
-    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {4, 8, 12});
-    const DdpState offset =
-        MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
-    for (const std::size_t node : {4U, 8U, 12U}) {
-        problem.states[node] += offset;
-    }
-    // 第一趟不封顶：记录 µ_m 历史峰值，据此选介于峰值与 µ₀ 之间的上限
-    MsIlqrTestAccess uncapped_solver(MakeConfig(), &dynamics, &evaluator);
-    const auto uncapped = uncapped_solver.solve(
-        problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
-        problem.states, problem.controls);
-    ASSERT_NE(uncapped.status, MsIlqrStatus::REGULARIZATION_OVERFLOW);
-    double peak_mu = 0.0;
-    for (const auto& record : uncapped_solver.history()) {
-        peak_mu = std::max(peak_mu, record.merit_mu);
-    }
-    const double mu0 = uncapped_solver.config_.merit_mu0;
-    ASSERT_GT(peak_mu, mu0);  // 前置：自适应规则确实抬升过 µ_m
-    // 第二趟封顶到 µ₀ 与峰值的中点（保证 ≥µ₀ 且必然截断峰值轮次）：
-    // 逐轮断言 µ_m 恰好是 min(不封顶值, 上限)
-    const double mu_cap = 0.5 * (peak_mu + mu0);
-    MsIlqrConfig capped_config = MakeConfig();
-    capped_config.merit_mu_max = mu_cap;
-    MsIlqrTestAccess capped_solver(capped_config, &dynamics, &evaluator);
-    const auto capped = capped_solver.solve(
-        problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
-        problem.states, problem.controls);
-    ASSERT_NE(capped.status, MsIlqrStatus::REGULARIZATION_OVERFLOW);
-    const auto& uncapped_history = uncapped_solver.history();
-    const auto& capped_history = capped_solver.history();
-    // 两趟历史长度可能不同（封顶改变接受行为），逐轮对比到较短者为止；
-    // 首个分叉点之前的 µ_m 必须精确等于 min(不封顶值, 上限)
-    bool cap_observed = false;
-    for (std::size_t i = 0;
-         i < std::min(uncapped_history.size(), capped_history.size()); ++i) {
-        const double expected = std::min(uncapped_history[i].merit_mu, mu_cap);
-        if (std::abs(capped_history[i].merit_mu - expected) >
-            1e-9 * (1.0 + expected)) {
-            break;  // 求解轨迹分叉后不再可比
-        }
-        if (capped_history[i].merit_mu >= mu_cap - 1e-12) {
-            cap_observed = true;
-        }
-    }
-    EXPECT_TRUE(cap_observed) << "上限从未生效，前置假设不成立";
-    // 全部历史的 µ_m 不得超过上限
-    for (const auto& record : capped_history) {
-        EXPECT_LE(record.merit_mu, mu_cap + 1e-12);
-    }
-    // 非法配置：上限小于 µ₀ → 构造拒绝
-    MsIlqrConfig bad_config = MakeConfig();
-    bad_config.merit_mu_max = 0.5 * bad_config.merit_mu0;
-    EXPECT_THROW(MsIlqrTestAccess(bad_config, &dynamics, &evaluator),
-                 std::invalid_argument);
-}
-
 // 输入契约校验：空指针/非法配置/维度不符/打靶节点越界一律抛
 // std::invalid_argument
 TEST(MsIlqrTest, InputValidation) {
@@ -868,6 +645,11 @@ TEST(MsIlqrTest, InputValidation) {
     MsIlqrConfig bad_gamma = MakeConfig();
     bad_gamma.armijo_gamma = 1.5;
     EXPECT_THROW(MsIlqrSolver(bad_gamma, &dynamics, &evaluator),
+                 std::invalid_argument);
+    // merit 上限小于地板 µ₀：地板与上限冲突、语义不自洽，构造拒绝
+    MsIlqrConfig bad_mu_max = MakeConfig();
+    bad_mu_max.merit_mu_max = 0.5 * bad_mu_max.merit_mu0;
+    EXPECT_THROW(MsIlqrSolver(bad_mu_max, &dynamics, &evaluator),
                  std::invalid_argument);
     const std::size_t num_steps = 4;
     ArcProblem problem =
@@ -948,6 +730,62 @@ TEST(MsIlqrTest, SingleStepProblemSmoke) {
     EXPECT_LT(result.final_defect_norm, 1e-12);
     ASSERT_EQ(2U, solver.states().size());
     EXPECT_LE(result.iterations, 5);
+}
+
+// 收敛出口的可行性守卫：相对代价/梯度判据达标时若打靶缺陷未愈合
+// （‖d‖∞ 超容差），不得判收敛——AL 罚权重极大时增广 Hessian 病态、
+// 线搜索只接受微步，会把「没走动的迭代」误报为收敛（尺度盲且不看
+// 可行性），放行前必须确认缺陷已愈合
+TEST(MsIlqrTest, ConvergenceRequiresFeasibility) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
+    // 容差默认与外层缺陷门同量级（1e-3）：缺陷未愈时不允许收敛出口
+    solver.defects_.resize(3);
+    solver.defects_[0].setZero();
+    solver.defects_[1].setZero();
+    solver.defects_[2].setZero();
+    solver.defects_[1](DDP_IDX_DELTA) = 0.05;
+    EXPECT_FALSE(solver.convergenceAllowed());
+    solver.defects_[1](DDP_IDX_DELTA) = 1e-4;
+    EXPECT_TRUE(solver.convergenceAllowed());
+}
+
+// merit 罚权重与 AL 罚量级挂钩（µ_m = max(µ_m0, c·µ_al)，默认 0 = 关闭、
+// µ_m 钉住 µ₀）：AL 罚权重达到 1e6 量级时，钉住的 µ_m·‖d‖ 项相对增广
+// 代价可忽略，线搜索事实上不再为「修复缺陷」付任何价钱（缺陷修复与
+// 代价下降的交换比失衡）；按 AL 量级同步缩放保持交换比恒定——不用
+// ‖d‖ 作触发/分母（小缺陷不放大，棘轮爆炸机理不成立），必须配
+// merit_mu_max 封顶（c 过大重演「以任意代价歼灭缺陷」的灾难）
+TEST(MsIlqrTest, MeritMuScalesWithAlPenalty) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    MsIlqrConfig config = MakeConfig();
+    config.merit_mu0 = 100.0;
+    config.merit_mu_max = 1e3;
+    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+    // 低于 µ₀：不动（钉住地板）
+    solver.raiseMeritMuFloor(1e-3 * 1e4);  // 10 < 100
+    EXPECT_DOUBLE_EQ(solver.merit_mu_, 100.0);
+    // 高于 µ₀：抬升到 c·µ_al
+    solver.raiseMeritMuFloor(1e-3 * 2e5);  // 200
+    EXPECT_DOUBLE_EQ(solver.merit_mu_, 200.0);
+    // 棘轮只升不降：回调不下降
+    solver.raiseMeritMuFloor(1e-3 * 1e4);
+    EXPECT_DOUBLE_EQ(solver.merit_mu_, 200.0);
+    // 封顶：c·µ_al 超 cap 时截断（防「以任意代价歼灭缺陷」）
+    solver.raiseMeritMuFloor(1e-3 * 1e6);  // 1000 = cap
+    EXPECT_DOUBLE_EQ(solver.merit_mu_, 1e3);
+    solver.raiseMeritMuFloor(1e-2 * 1e6);  // 1e4 > cap
+    EXPECT_DOUBLE_EQ(solver.merit_mu_, 1e3);
+    // 非有限输入拒绝（防御：不污染 µ_m）
+    solver.raiseMeritMuFloor(std::numeric_limits<double>::quiet_NaN());
+    EXPECT_DOUBLE_EQ(solver.merit_mu_, 1e3);
+    // 非法配置（负比率）构造拒绝
+    MsIlqrConfig bad = MakeConfig();
+    bad.merit_mu_al_ratio = -1.0;
+    EXPECT_THROW(MsIlqrSolver(bad, &dynamics, &evaluator),
+                 std::invalid_argument);
 }
 
 // L8.3 前向定义域守卫：两个确定性场景——(A) 名义轨迹本身越出

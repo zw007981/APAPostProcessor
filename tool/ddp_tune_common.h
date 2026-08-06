@@ -85,8 +85,12 @@ TuneVariant MakeVariant(std::string name, TModifier&& modifier) {
 // 批次沿革（逐批假设/实测/结论见 docs/milestones/milestone-011/review-log.md
 // 的实验流水账与 docs/DDP.md 第 3 章实测记录）：本轮攻坚的全部实验变体
 // 已完成评测，最终默认参数取「深退火 γ=0.3 + 阶段二跟踪权重地板 0.015 +
-// 参考重锚阈值 0.01 m + 车辆真值幅值上限」（data/ddp_config.json），
-// 矩阵只留基线作回归验证
+// 车辆真值幅值上限」（data/ddp_config.json），矩阵只留基线作回归验证。
+// 2026-08-05 消融批次（abl_no_reanchor/abl_no_backoff/abl_no_s2floor/
+// abl_no_perelem_s2/abl_no_merit_hook/abl_no_esdf_scale）已评测并撤出：
+// 重锚与罚参数回退与基线逐位一致（机制随之删除），其余四项保留
+// （s2floor/esdf_scale 实测承重，perelem_s2/merit_hook 变化在刀刃噪声带内）——
+// 见 docs/milestones/milestone-013/review-log.md 战术改动 #2
 inline std::vector<TuneVariant> BuildVariants() {
     std::vector<TuneVariant> variants;
     variants.emplace_back(TuneVariant{"baseline", LoadBaselineDdpConfig()});
@@ -117,27 +121,31 @@ inline std::vector<TuneVariant> BuildVariants() {
     // L7.2 双候选择优已采纳进生产默认（dual_candidate_select=true）：
     // data7 选对照解（6→4/15.54/阶段二/碰撞 0），data3/data1 选融化解
     // 逐位不变，④对照解防线由该择优自动满足（证据 tune_l72.log）
-    // L8.6 修复后重判批次（ESDF 边界语义修复使历史碰撞/ineq 量测口径
-    // 变更——以下历史结论在「有洞的可行域」上取得，必须重测重判）：
-    // ① baseline 全量（data6 在修复后的行为是本轮头条证据）；
-    // ② L7.1 时域探针复测（原「四集全灭（碰撞 0.05~0.15）」的碰撞判据
-    //    可能被图外零梯度平台污染）；
-    // ③ L6.1 弧长惩罚最弱档复测（原「穿墙 0.63~0.73」须重查有多少是
-    //    图外误报）
-    variants.emplace_back(MakeVariant("dt_0.07", [](DdpConfig* config) {
-        config->reference.dt = 0.07;
-    }));
-    variants.emplace_back(MakeVariant("dt_0.05", [](DdpConfig* config) {
-        config->reference.dt = 0.05;
-    }));
-    variants.emplace_back(MakeVariant("vp_w0.11", [](DdpConfig* config) {
-        config->solver.cost.weight_velocity = 0.11;
-    }));
-    // ④ margin_safe 0.05 救援复测（历史结论「data6 唯一收敛路径但侵入
-    // 0.63 m」——侵入里有多少是图外零梯度自由区须重判）
-    variants.emplace_back(MakeVariant("rescue_0.05", [](DdpConfig* config) {
-        config->rescue_margin_safe = 0.05;
-    }));
+    // L8.6 修复后重判批次（dt_0.07/dt_0.05/vp_w0.11/rescue_0.05）已全部
+    // 完成评测并撤出矩阵，结论固化：L7.1/L6.1 证伪在封闭可行域上复测
+    // 仍成立；rescue_0.05 健康集逐位不变、data6 依旧回退。固定验收的
+    // 变体列表保持 {baseline, nomelt_control} 两个（见 tool/accept_ddp.sh）
+    // M012 Q1.b/Q1.c 评测批次已完成：ampcap_1e4 零收益不采纳（与 M011
+    // L3.5 同结论）、merit_al1e-3 已采纳进生产默认（data/ddp_config.json
+    // merit_mu_al_ratio=1e-3/merit_mu_max=1e3）——见
+    // docs/milestones/milestone-012/review-log.md 实验流水账
+    // N1 评测批次：幅值罚参数逐元素独立门控（仅硬化真正违反的元素，
+    // 不广播到早已满足的约束）——阶段二形态已采纳进生产默认
+    // （data/ddp_config.json amplitude_mu_per_element_stage_two=true；
+    // 阶段一形态已证伪并移除 JSON 入口）
+    // N2 评测批次：前馈步信赖域盒（饱和方向上的真实步长阻尼）——
+    // 部分有效不采纳（data7 长度越 ALM+5% 门、data6 转为稳定卡死/
+    // 合法绕远），机制实现已随证伪清除删除
+    // Q5 评测批次（arc_length 1.05/1.10/1.15 三档）：data6 全灭证伪
+    // （墙在任何比值都吸附、AL 压墙失稳而非改道；机理与取证见
+    // review-log Q5 条目）——且第 8 维 ℓ 状态即使默认关闭也扰动
+    // 刀刃案例（data3 段数 5→7、data7 +0.49 m），「关闭零成本」
+    // 不成立，已经人工裁决**整体回退到 7 维**（代码与测试移除，
+    // 文档留档）
+    // Q5b 批次（freeze_1_02/freeze_1_05 退火逃逸冻结重试）：证伪
+    // 撤出——1.02 档误伤 data3（瞬态触发冻结锁死 w_ref，阶段二失活），
+    // 两档 data6 均死于「贴参考 ∧ 幅值可行」不可兼得（review-log
+    // Q5b 条目）；机制实现已随证伪清除删除
     return variants;
 }
 }  // namespace ddp_tune

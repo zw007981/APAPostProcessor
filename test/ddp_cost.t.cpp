@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <Eigen/Eigenvalues>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -132,7 +133,7 @@ class DdpCostEvaluatorTest : public ::testing::Test {
     DdpReference reference_;
 };
 
-// 测试构造期配置校验：负权重、非有限权重、非正 shift_beta、非正幅值边界
+// 测试构造期配置校验：负权重、非有限权重、非正幅值边界
 // 均必须抛 std::invalid_argument。因为非法配置会静默污染全部下游求解。
 TEST_F(DdpCostEvaluatorTest, ConstructorThrowsOnInvalidConfig) {
     DdpCostConfig config;
@@ -142,16 +143,10 @@ TEST_F(DdpCostEvaluatorTest, ConstructorThrowsOnInvalidConfig) {
     config.weight_theta = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(DdpCostEvaluator(config, nullptr), std::invalid_argument);
     config.weight_theta = 5.0;
-    config.shift_beta = 0.0;
-    EXPECT_THROW(DdpCostEvaluator(config, nullptr), std::invalid_argument);
-    config.shift_beta = 0.1;
     config.v_max = 0.0;
     EXPECT_THROW(DdpCostEvaluator(config, nullptr), std::invalid_argument);
     config.v_max = 1.5;
     config.delta_max = -0.5;
-    EXPECT_THROW(DdpCostEvaluator(config, nullptr), std::invalid_argument);
-    config.delta_max = 0.55;
-    config.weight_shift = -0.5;
     EXPECT_THROW(DdpCostEvaluator(config, nullptr), std::invalid_argument);
 }
 
@@ -206,7 +201,7 @@ TEST_F(DdpCostEvaluatorTest, EvaluateThrowsOnDimensionMismatch) {
 }
 
 // 测试平滑/跟踪/终点三类二次项的全要素有限差分对拍（相对误差 < 1e-6）。
-// 幅值 AL 未激活、换挡代理关闭、ESDF 缺省时全部代价项都是精确二次型，
+// 幅值 AL 未激活、ESDF 缺省时全部代价项都是精确二次型，
 // GN 形 Hessian 与精确 Hessian 一致：梯度用"总代价五点差分"对拍
 // （代价按阶段解耦，∂total/∂x_k 即阶段 k 的 lx），Hessian 用"解析梯度
 // 再做中心差分"对拍，同时覆盖 lx/lu/lxx/luu/lux 全部五个输出。
@@ -538,415 +533,6 @@ TEST_F(DdpCostEvaluatorTest, AnnealMaskExemptsPointsFromDecay) {
                          round3_nomask.stages[0].cost_tracking, 1e-12);
 }
 
-// 测试换挡代理门的同号关闭行为：v 与显式一步预测 v⁺=v+a·dt 同号时
-// 贡献在数值上为零（σ_β 是光滑门而非硬门，|v|/β 足够大时按指数趋零）；
-// 同时钉住纯状态性质——对控制的导数 lu/luu/lux 恒为零。
-TEST_F(DdpCostEvaluatorTest, ShiftProxyZeroWhenSameSign) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_shift = 2.0;
-    config.shift_beta = 0.05;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    // 全程 v=±1.0、a=0：v⁺=v 同号，|v|/β=20 时门漏损 ~e^(-40)
-    for (const double sign : {1.0, -1.0}) {
-        auto states = MakeStates();
-        for (auto& state : states) {
-            state(DDP_IDX_V) = sign * 1.0;
-            state(DDP_IDX_A) = 0.0;
-        }
-        const auto result = EvaluateAll(evaluator, reference_, states, controls,
-                                        multipliers, 0.0);
-        for (std::size_t k = 0; k < kNumSteps; ++k) {
-            EXPECT_LT(result.stages[k].cost_shift, 1e-12);
-            EXPECT_LT(result.stages[k].lx.norm(), 1e-12);
-            EXPECT_LT(result.stages[k].lxx.norm(), 1e-12);
-            EXPECT_TRUE(result.stages[k].lu.isZero());
-            EXPECT_TRUE(result.stages[k].luu.isZero());
-            EXPECT_TRUE(result.stages[k].lux.isZero());
-        }
-    }
-}
-
-// 测试换挡代理门的变号惩罚与有限差分对拍。
-// 门内（v>0、v⁺<0）代价按 ℓ=w_g·[σ(v)σ(−v⁺)+σ(−v)σ(v⁺)] 取手推值；
-// 梯度/Hessian（精确二阶，纯状态 (v,a) 块）与数值差分对拍 < 1e-6；
-// 显式预测 v⁺=v+a·dt 刻意不代入动力学链，控制导数必须恒零。
-TEST_F(DdpCostEvaluatorTest, ShiftProxyMatchesHandDerivedAndFd) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_shift = 2.0;
-    config.shift_beta = 0.1;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    auto states = MakeStates();
-    states[1](DDP_IDX_V) = 0.08;
-    states[1](DDP_IDX_A) = -1.0;
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    const auto result =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    // 手推代价：v⁺=0.08−0.1=−0.02，A=σ(0.8)、D=σ(−0.2)，ℓ=2·(A+D−2AD)
-    const double sig_v = 0.5 * (1.0 + std::tanh(0.8));
-    const double sig_w = 0.5 * (1.0 + std::tanh(-0.2));
-    EXPECT_NEAR(2.0 * (sig_v + sig_w - 2.0 * sig_v * sig_w),
-                result.stages[1].cost_shift, 1e-12);
-    // 纯状态：控制导数恒零（即使在门内梯度非零处）
-    EXPECT_TRUE(result.stages[1].lu.isZero());
-    EXPECT_TRUE(result.stages[1].luu.isZero());
-    EXPECT_TRUE(result.stages[1].lux.isZero());
-    // 梯度对拍（总代价五点差分，门区光滑不跨折点）
-    for (const int comp : {DDP_IDX_V, DDP_IDX_A}) {
-        auto cost_at = [&](double offset) {
-            auto perturbed = states;
-            perturbed[1](comp) += offset;
-            return TotalCost(evaluator, reference_, perturbed, controls,
-                             multipliers, 0.0);
-        };
-        ExpectComponentClose(FivePointCentral(cost_at, 1e-5),
-                             result.stages[1].lx(comp), 1e-6);
-    }
-    // Hessian 断言：换挡代理的 (v,a) 块做负特征值截断的 PSD 投影（门区
-    // 精确二阶导不定，负曲率注入 Riccati 会破坏 GN 假设）——本用例状态
-    // （v=0.08、a=−1.0、β=0.1）位于门区，精确块实测不定，投影必须激活。
-    // 测试侧从 σ_β 定义独立重算精确块并施加同一投影规则，逐项对照
-    const double beta = 0.1;
-    const double tanh_v = std::tanh(0.08 / beta);
-    const double tanh_w = std::tanh(-0.02 / beta);
-    const double dsig_v = (1.0 - tanh_v * tanh_v) / (2.0 * beta);
-    const double dsig_w = (1.0 - tanh_w * tanh_w) / (2.0 * beta);
-    const double ddsig_v = -tanh_v * (1.0 - tanh_v * tanh_v) / (beta * beta);
-    const double ddsig_w = -tanh_w * (1.0 - tanh_w * tanh_w) / (beta * beta);
-    const double dp_da = 1.0 - 2.0 * 0.5 * (1.0 + tanh_w);
-    const double dp_dd = 1.0 - 2.0 * 0.5 * (1.0 + tanh_v);
-    const double h_vv_exact =
-        2.0 * (ddsig_v * dp_da + ddsig_w * dp_dd - 4.0 * dsig_v * dsig_w);
-    const double h_va_exact =
-        2.0 * 0.1 * (ddsig_w * dp_dd - 2.0 * dsig_v * dsig_w);
-    const double h_aa_exact = 2.0 * 0.01 * ddsig_w * dp_dd;
-    const double trace = h_vv_exact + h_aa_exact;
-    const double root = std::hypot(0.5 * (h_vv_exact - h_aa_exact), h_va_exact);
-    const double lambda_max = 0.5 * trace + root;
-    const double lambda_min = 0.5 * trace - root;
-    EXPECT_LT(lambda_min, 0.0);  // 前置：精确块确实不定（投影被激活）
-    EXPECT_GT(lambda_max, 0.0);
-    double ux = h_va_exact;
-    double uy = lambda_max - h_vv_exact;
-    const double alt_x = lambda_max - h_aa_exact;
-    if (alt_x * alt_x + h_va_exact * h_va_exact > ux * ux + uy * uy) {
-        ux = alt_x;
-        uy = h_va_exact;
-    }
-    const double norm = std::hypot(ux, uy);
-    ux /= norm;
-    uy /= norm;
-    const auto& lxx = result.stages[1].lxx;
-    EXPECT_NEAR(lambda_max * ux * ux, lxx(DDP_IDX_V, DDP_IDX_V), 1e-6);
-    EXPECT_NEAR(lambda_max * ux * uy, lxx(DDP_IDX_V, DDP_IDX_A), 1e-6);
-    EXPECT_NEAR(lambda_max * uy * uy, lxx(DDP_IDX_A, DDP_IDX_A), 1e-6);
-    // PSD 性质直断：投影后最小特征值非负
-    const double out_trace =
-        lxx(DDP_IDX_V, DDP_IDX_V) + lxx(DDP_IDX_A, DDP_IDX_A);
-    const double out_root = std::hypot(
-        0.5 * (lxx(DDP_IDX_V, DDP_IDX_V) - lxx(DDP_IDX_A, DDP_IDX_A)),
-        lxx(DDP_IDX_V, DDP_IDX_A));
-    EXPECT_GE(0.5 * out_trace - out_root, -1e-12);
-}
-
-// 测试逐轮 β 输入通道：DdpCostInput.shift_beta > 0 时覆盖配置静态值
-// （外层退火调度的落点——门宽逐轮收窄时同一状态必须给出不同代价）；
-// shift_beta = 0 回退配置静态值（既有调用方行为逐位不变）；
-// shift_beta < 0 或非有限必须抛 std::invalid_argument（错误调度会静默
-// 污染换挡判决的数值形态）
-TEST_F(DdpCostEvaluatorTest, ShiftProxyUsesPerRoundInputBeta) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_shift = 2.0;
-    config.shift_beta = 0.1;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    auto states = MakeStates();
-    states[1](DDP_IDX_V) = 0.08;
-    states[1](DDP_IDX_A) = -1.0;
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    DdpCostInput input;
-    input.tracking_weight = 0.0;
-    // 默认（0 = 未指定）：回退配置静态值 0.1，与既有行为逐位一致
-    const auto fallback =
-        evaluator.evaluate(reference_, states, controls, multipliers, input);
-    input.shift_beta = 0.1;
-    const auto explicit_same =
-        evaluator.evaluate(reference_, states, controls, multipliers, input);
-    EXPECT_DOUBLE_EQ(fallback.stages[1].cost_shift,
-                     explicit_same.stages[1].cost_shift);
-    // 逐轮覆盖：β=0.3（宽门）与 β=0.1 的代价必须不同；宽门在 |v|=0.08
-    // 处的门漏损更大、变号惩罚更低
-    input.shift_beta = 0.3;
-    const auto wide =
-        evaluator.evaluate(reference_, states, controls, multipliers, input);
-    EXPECT_GT(wide.stages[1].cost_shift, 0.0);
-    EXPECT_NE(wide.stages[1].cost_shift, fallback.stages[1].cost_shift);
-    // 非法逐轮 β 显式拒绝
-    input.shift_beta = -0.1;
-    EXPECT_THROW(
-        evaluator.evaluate(reference_, states, controls, multipliers, input),
-        std::invalid_argument);
-    input.shift_beta = std::numeric_limits<double>::quiet_NaN();
-    EXPECT_THROW(
-        evaluator.evaluate(reference_, states, controls, multipliers, input),
-        std::invalid_argument);
-}
-
-// 测试换挡代理与门控的互斥：门控计划在场（阶段二模式）时即使
-// weight_shift>0，换挡代理也必须整体关闭——阶段二的换挡位置已被符号门/
-// 接缝零速等式钉死，代理继续惩罚保留的换挡只会与门控等式对拉
-TEST_F(DdpCostEvaluatorTest, ShiftProxySuppressedWhenGatingPlanPresent) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_shift = 2.0;
-    config.shift_beta = 0.1;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    // 构造 v 在阶段 1→2 变号的状态（换挡代理门内），同时给出门控计划
-    auto states = MakeStates();
-    states[1](DDP_IDX_V) = 0.3;
-    states[1](DDP_IDX_A) = 0.0;
-    states[2](DDP_IDX_V) = -0.3;
-    states[2](DDP_IDX_A) = 0.0;
-    const auto controls = MakeControls();
-    // 阶段一模式（无计划）：换挡代理正常生效（前置断言，证明本用例的状态
-    // 确实位于代理门内，互斥关闭前后的对照有效）
-    const auto stage_one_multipliers =
-        DdpCostMultiplierState::MakeZero(kNumSteps);
-    DdpCostInput stage_one_input;
-    stage_one_input.tracking_weight = 0.0;
-    const auto stage_one_eval = evaluator.evaluate(
-        reference_, states, controls, stage_one_multipliers, stage_one_input);
-    EXPECT_GT(stage_one_eval.stages[1].cost_shift, 0.0);
-    // 阶段二模式（计划 + 门控乘子同在场）：换挡代理整体关闭
-    DdpGatingPlan plan;
-    plan.sign_gate = {0, 0, 0, 0};
-    plan.seam_indices = {2};
-    plan.seam_lookup = {-1, -1, 0, -1};
-    plan.dwell_v_cap = {0.0, 0.0, 0.0, 0.0};
-    auto gating_multipliers =
-        DdpCostMultiplierState::MakeStageTwoZero(kNumSteps, 1);
-    gating_multipliers.gating_sign_mu.setConstant(10.0);
-    gating_multipliers.gating_seam_mu.setConstant(10.0);
-    gating_multipliers.gating_dwell_mu.setConstant(10.0);
-    DdpCostInput gating_input;
-    gating_input.tracking_weight = 0.0;
-    gating_input.gating_plan = &plan;
-    const auto gating_eval = evaluator.evaluate(
-        reference_, states, controls, gating_multipliers, gating_input);
-    for (const auto& stage : gating_eval.stages) {
-        EXPECT_DOUBLE_EQ(stage.cost_shift, 0.0);
-    }
-    // 门控项确实在场（接缝等式 μ=10、v=-0.3 → ½μv²=0.45），排除「求值
-    // 根本没进门控分支」的假阳性
-    EXPECT_GT(gating_eval.stages[2].cost_gating, 0.0);
-}
-
-// 测试候选待融段的差异化跟踪权重：候选掩码点的跟踪项按
-// candidate_tracking_weight 取值（深退火把融化裁决权交还平滑项），
-// 权重选择优先级为「豁免掩码（w_ref,0）> 候选掩码 > 普通退火权重」；
-// 掩码尺寸不符必须抛 std::invalid_argument
-TEST_F(DdpCostEvaluatorTest, MeltCandidateMaskOverridesTrackingWeight) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_ref_base = 10.0;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    const auto states = MakeStates();
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    DdpCostInput input;
-    input.tracking_weight = 4.0;            // 普通点的退火权重
-    input.candidate_tracking_weight = 0.5;  // 候选点的深退火权重
-    std::vector<bool> candidate_mask(kNumSteps + 1, false);
-    candidate_mask[1] = true;
-    input.melt_candidate_mask = &candidate_mask;
-    const auto result =
-        evaluator.evaluate(reference_, states, controls, multipliers, input);
-    // 阶段 1（候选点）：只含候选权重 0.5 的跟踪代价（其余权重均为零）
-    const double err_x = states[1](DDP_IDX_X) - reference_.poses[1].x;
-    const double err_y = states[1](DDP_IDX_Y) - reference_.poses[1].y;
-    EXPECT_NEAR(0.5 * 0.5 * (err_x * err_x + err_y * err_y) * kDt,
-                result.stages[1].cost_tracking, 1e-12);
-    // 阶段 0/2（非候选点）：按普通退火权重 4.0
-    const double err0_x = states[0](DDP_IDX_X) - reference_.poses[0].x;
-    const double err0_y = states[0](DDP_IDX_Y) - reference_.poses[0].y;
-    EXPECT_NEAR(0.5 * 4.0 * (err0_x * err0_x + err0_y * err0_y) * kDt,
-                result.stages[0].cost_tracking, 1e-12);
-    // 豁免掩码优先于候选掩码：同点同时被两者覆盖时恒用 w_ref,0
-    std::vector<bool> exempt_mask(kNumSteps + 1, false);
-    exempt_mask[1] = true;
-    input.anneal_exempt_mask = &exempt_mask;
-    const auto exempt_result =
-        evaluator.evaluate(reference_, states, controls, multipliers, input);
-    EXPECT_NEAR(0.5 * 10.0 * (err_x * err_x + err_y * err_y) * kDt,
-                exempt_result.stages[1].cost_tracking, 1e-12);
-    // 掩码尺寸不符显式拒绝
-    const std::vector<bool> bad_mask(2, false);
-    input.melt_candidate_mask = &bad_mask;
-    EXPECT_THROW(
-        evaluator.evaluate(reference_, states, controls, multipliers, input),
-        std::invalid_argument);
-}
-
-// 测试 δ 奇异区护栏：|δ|≤δ_guard 时代价/梯度/Hessian 恒零（健康解行为
-// 逐位不变）；|δ| 越出护栏时按 w·max(0,|δ|−δ_guard)² 手推值激活，
-// C¹ 边界连续；梯度/Hessian 与有限差分对拍；护栏阈值不在 (δ_max, π/2)
-// 内时构造显式拒绝
-TEST_F(DdpCostEvaluatorTest, DeltaGuardActivatesOnlyBeyondThreshold) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_delta_guard = 3.0;
-    config.delta_guard = 0.7;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    // 未越界（|δ|=0.6 < 0.7）：全部为零
-    auto states = MakeStates();
-    states[1](DDP_IDX_DELTA) = 0.6;
-    const auto inactive =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    EXPECT_DOUBLE_EQ(inactive.stages[1].cost_delta_guard, 0.0);
-    EXPECT_DOUBLE_EQ(inactive.stages[1].lx(DDP_IDX_DELTA), 0.0);
-    EXPECT_DOUBLE_EQ(inactive.stages[1].lxx(DDP_IDX_DELTA, DDP_IDX_DELTA), 0.0);
-    // 越界（δ=−0.9）：excess=−0.2 方向沿 −δ；手推代价/梯度/Hessian
-    states[1](DDP_IDX_DELTA) = -0.9;
-    const auto active =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    EXPECT_NEAR(active.stages[1].cost_delta_guard, 3.0 * 0.04, 1e-12);
-    EXPECT_NEAR(active.stages[1].lx(DDP_IDX_DELTA), 2.0 * 3.0 * 0.2 * (-1.0),
-                1e-12);
-    EXPECT_NEAR(active.stages[1].lxx(DDP_IDX_DELTA, DDP_IDX_DELTA), 6.0, 1e-12);
-    // 梯度 FD 对拍
-    auto cost_at = [&](double offset) {
-        auto perturbed = states;
-        perturbed[1](DDP_IDX_DELTA) += offset;
-        return TotalCost(evaluator, reference_, perturbed, controls,
-                         multipliers, 0.0);
-    };
-    ExpectComponentClose(FivePointCentral(cost_at, 1e-5),
-                         active.stages[1].lx(DDP_IDX_DELTA), 1e-6);
-    // 非法阈值显式拒绝（≤δ_max 或 ≥π/2）
-    DdpCostConfig bad = MakeZeroWeightConfig();
-    bad.weight_delta_guard = 1.0;
-    bad.delta_guard = 0.4;  // < δ_max=0.55
-    EXPECT_THROW(DdpCostEvaluator(bad, nullptr), std::invalid_argument);
-    bad.delta_guard = 1.6;  // > π/2
-    EXPECT_THROW(DdpCostEvaluator(bad, nullptr), std::invalid_argument);
-}
-
-// 测试曲率正则项：ℓ_κ = w·(tanδ/L)²（积分型、含 dt）——代价/梯度/精确
-// Hessian 的手推值与有限差分对拍；Hessian 处处正定（天然 PSD，直接进
-// Riccati 无需投影）；控制导数恒零；权重启用但轴距未注入（=0）时构造
-// 显式拒绝（静默放行会让正则项恒零失效）
-TEST_F(DdpCostEvaluatorTest, CurvaturePenaltyMatchesHandDerivedAndFd) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_curvature = 67.0;
-    config.wheelbase = 3.0;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    auto states = MakeStates();
-    states[1](DDP_IDX_DELTA) = 0.3;
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    const auto result =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    // 手推：tan(0.3)=0.30934、sec²(0.3)=1.09571、w·tan²/L²·dt
-    const double tan_d = std::tan(0.3);
-    const double sec2_d = 1.0 / (std::cos(0.3) * std::cos(0.3));
-    const double inv_l2 = 1.0 / 9.0;
-    EXPECT_NEAR(result.stages[1].cost_curvature,
-                67.0 * tan_d * tan_d * inv_l2 * kDt, 1e-12);
-    EXPECT_NEAR(result.stages[1].lx(DDP_IDX_DELTA),
-                2.0 * 67.0 * tan_d * sec2_d * inv_l2 * kDt, 1e-12);
-    EXPECT_NEAR(result.stages[1].lxx(DDP_IDX_DELTA, DDP_IDX_DELTA),
-                2.0 * 67.0 * (sec2_d * sec2_d + 2.0 * tan_d * tan_d * sec2_d) *
-                    inv_l2 * kDt,
-                1e-12);
-    // 纯状态项：控制导数恒零
-    EXPECT_TRUE(result.stages[1].lu.isZero());
-    EXPECT_TRUE(result.stages[1].luu.isZero());
-    EXPECT_TRUE(result.stages[1].lux.isZero());
-    // 梯度 FD 对拍（总代价五点差分）
-    auto cost_at = [&](double offset) {
-        auto perturbed = states;
-        perturbed[1](DDP_IDX_DELTA) += offset;
-        return TotalCost(evaluator, reference_, perturbed, controls,
-                         multipliers, 0.0);
-    };
-    ExpectComponentClose(FivePointCentral(cost_at, 1e-5),
-                         result.stages[1].lx(DDP_IDX_DELTA), 1e-6);
-    // Hessian FD 对拍（解析梯度中心差分；精确二阶可直接对拍）
-    auto grad_at = [&](double offset) {
-        auto perturbed = states;
-        perturbed[1](DDP_IDX_DELTA) += offset;
-        return EvaluateAll(evaluator, reference_, perturbed, controls,
-                           multipliers, 0.0)
-            .stages[1]
-            .lx(DDP_IDX_DELTA);
-    };
-    EXPECT_NEAR((grad_at(1e-5) - grad_at(-1e-5)) / 2e-5,
-                result.stages[1].lxx(DDP_IDX_DELTA, DDP_IDX_DELTA), 1e-6);
-    // δ=0 处代价/梯度为零、Hessian 为 2w/L²·dt > 0（全轨迹最小曲率点
-    // 仍有正曲率——正则项在原点附近是凸碗）
-    for (auto& state : states) {
-        state(DDP_IDX_DELTA) = 0.0;
-    }
-    const auto at_zero =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    EXPECT_DOUBLE_EQ(at_zero.stages[1].cost_curvature, 0.0);
-    EXPECT_DOUBLE_EQ(at_zero.stages[1].lx(DDP_IDX_DELTA), 0.0);
-    EXPECT_NEAR(at_zero.stages[1].lxx(DDP_IDX_DELTA, DDP_IDX_DELTA),
-                2.0 * 67.0 / 9.0 * kDt, 1e-12);
-    // 启用但轴距未注入：构造显式拒绝
-    DdpCostConfig bad = MakeZeroWeightConfig();
-    bad.weight_curvature = 10.0;
-    bad.wheelbase = 0.0;
-    EXPECT_THROW(DdpCostEvaluator(bad, nullptr), std::invalid_argument);
-}
-
-// 测试弧长惩罚项：ℓ_v = w_v·v²（积分型、含 dt）——固定 dt 网格下总时长
-// 是常数，本项是弧长的同向凸代理、也是代价函数中唯一反对轨迹跑飞
-// （绕大圈）的项；手推代价/梯度/Hessian（2w_v>0 天然 PSD）与 FD 对拍；
-// 控制导数恒零；v=0 处代价/梯度为零、凸碗 Hessian 2w_v·dt
-TEST_F(DdpCostEvaluatorTest, VelocityPenaltyMatchesHandDerivedAndFd) {
-    DdpCostConfig config = MakeZeroWeightConfig();
-    config.weight_velocity = 0.45;
-    const DdpCostEvaluator evaluator(config, nullptr);
-    auto states = MakeStates();
-    states[1](DDP_IDX_V) = 0.6;
-    const auto controls = MakeControls();
-    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
-    const auto result =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    EXPECT_NEAR(result.stages[1].cost_velocity, 0.45 * 0.36 * kDt, 1e-12);
-    EXPECT_NEAR(result.stages[1].lx(DDP_IDX_V), 2.0 * 0.45 * 0.6 * kDt, 1e-12);
-    EXPECT_NEAR(result.stages[1].lxx(DDP_IDX_V, DDP_IDX_V), 2.0 * 0.45 * kDt,
-                1e-12);
-    // 纯状态项：控制导数恒零
-    EXPECT_TRUE(result.stages[1].lu.isZero());
-    EXPECT_TRUE(result.stages[1].luu.isZero());
-    EXPECT_TRUE(result.stages[1].lux.isZero());
-    // 梯度 FD 对拍
-    auto cost_at = [&](double offset) {
-        auto perturbed = states;
-        perturbed[1](DDP_IDX_V) += offset;
-        return TotalCost(evaluator, reference_, perturbed, controls,
-                         multipliers, 0.0);
-    };
-    ExpectComponentClose(FivePointCentral(cost_at, 1e-5),
-                         result.stages[1].lx(DDP_IDX_V), 1e-6);
-    // v=0 处凸碗：代价/梯度为零、Hessian 2w_v·dt > 0
-    for (auto& state : states) {
-        state(DDP_IDX_V) = 0.0;
-    }
-    const auto at_zero =
-        EvaluateAll(evaluator, reference_, states, controls, multipliers, 0.0);
-    EXPECT_DOUBLE_EQ(at_zero.stages[1].cost_velocity, 0.0);
-    EXPECT_DOUBLE_EQ(at_zero.stages[1].lx(DDP_IDX_V), 0.0);
-    EXPECT_NEAR(at_zero.stages[1].lxx(DDP_IDX_V, DDP_IDX_V), 0.9 * kDt, 1e-12);
-    // 非法权重显式拒绝
-    DdpCostConfig bad = MakeZeroWeightConfig();
-    bad.weight_velocity = -1.0;
-    EXPECT_THROW(DdpCostEvaluator(bad, nullptr), std::invalid_argument);
-}
-
 // 测试终点 AL 等式：c=[x−xg, y−yg, wrap(θ−θg), v, a] 的 λᵀc+½μc² 手推值、
 // 梯度 λ+μ∘c、GN Hessian diag(μ)（选择矩阵常量，GN 即精确）；
 // δ_N/ω_N 不承载终点约束，对应导数行/列必须恒为零。
@@ -1146,6 +732,62 @@ TEST_F(DdpCostEvaluatorTest, CostDtScalingConventionIsPinned) {
     EXPECT_GT(coarse.stages[0].cost_smooth, 0.0);
     EXPECT_DOUBLE_EQ(coarse.stages[kNumSteps].cost_terminal,
                      fine.stages[kNumSteps].cost_terminal);
+}
+
+
+TEST_F(DdpCostEvaluatorTest, EsdfScaleMultipliesEsdfChannelLinearly) {
+    // 第 0 列整列占据的墙场（64×64、分辨率 0.125）
+    std::vector<Position> cells;
+    cells.reserve(64);
+    for (int row = 0; row < 64; ++row) {
+        cells.emplace_back(Position{0.0, row * 0.125});
+    }
+    const GridMap grid_map(0.125, 64, 64, Position{0.0, 0.0}, cells);
+    const ESDFMap esdf_map(grid_map);
+    const VehicleParams veh_params(4.3, 1.8, 2.7, 0.6, 0.8);
+    const VehicleFootprintModel footprint_model(veh_params, 233, 2, 1);
+    const DdpEsdfConstraint esdf_constraint(esdf_map, footprint_model,
+                                            DdpEsdfConstraintConfig{});
+    const DdpCostEvaluator evaluator(MakeZeroWeightConfig(), &esdf_constraint);
+    // 全部状态平行贴墙，使 ESDF 惩罚在每个阶段都激活
+    auto states = MakeStates();
+    for (auto& state : states) {
+        state(DDP_IDX_X) = 0.5;
+        state(DDP_IDX_Y) = 4.0;
+        state(DDP_IDX_THETA) = kHalfPi;
+    }
+    const auto controls = MakeControls();
+    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
+    const auto evaluate_with_scale = [&](double esdf_scale) {
+        DdpCostInput input;
+        input.tracking_weight = 0.0;
+        input.esdf_scale = esdf_scale;
+        return evaluator.evaluate(reference_, states, controls, multipliers,
+                                  input);
+    };
+    const auto unit = evaluate_with_scale(1.0);
+    constexpr double kScale = 7.5;
+    const auto scaled = evaluate_with_scale(kScale);
+    ASSERT_GT(unit.total_cost, 0.0);
+    EXPECT_DOUBLE_EQ(scaled.total_cost, kScale * unit.total_cost);
+    for (std::size_t k = 0; k < unit.stages.size(); ++k) {
+        EXPECT_DOUBLE_EQ(scaled.stages[k].cost_esdf,
+                         kScale * unit.stages[k].cost_esdf)
+            << "stage " << k;
+        EXPECT_TRUE(scaled.stages[k].lx.isApprox(kScale * unit.stages[k].lx))
+            << "stage " << k;
+        EXPECT_TRUE(scaled.stages[k].lxx.isApprox(kScale * unit.stages[k].lxx))
+            << "stage " << k;
+    }
+    // 默认因子恒为 1：不写 esdf_scale 的既有调用方行为逐位不变
+    const DdpCostInput default_input;
+    EXPECT_DOUBLE_EQ(default_input.esdf_scale, 1.0);
+    // 非法因子必须显式拒绝，而不是静默产出无避障能力的解
+    EXPECT_THROW(evaluate_with_scale(0.0), std::invalid_argument);
+    EXPECT_THROW(evaluate_with_scale(-1.0), std::invalid_argument);
+    EXPECT_THROW(evaluate_with_scale(std::numeric_limits<double>::infinity()),
+                 std::invalid_argument);
+    EXPECT_THROW(evaluate_with_scale(std::nan("")), std::invalid_argument);
 }
 
 }  // namespace

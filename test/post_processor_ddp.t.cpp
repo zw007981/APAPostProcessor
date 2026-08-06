@@ -116,7 +116,7 @@ TEST(PostProcessorDdpTest, EmptyPathReturnsFailure) {
     const auto result = processor.optimizeDdp(empty_path, DdpConfig{});
     EXPECT_FALSE(result.success);
     EXPECT_TRUE(result.optimized_path.empty());
-    EXPECT_TRUE(result.ddp_traj.empty());
+    EXPECT_TRUE(result.optimized_trajectory.empty());
     EXPECT_FALSE(result.message.empty());
     EXPECT_DOUBLE_EQ(result.final_length, 0.0);
     EXPECT_EQ(result.final_maneuvers, 0);
@@ -137,7 +137,7 @@ TEST(PostProcessorDdpTest, DegeneratePathReturnsFailure) {
     const auto result = processor.optimizeDdp(path, DdpConfig{});
     EXPECT_FALSE(result.success);
     EXPECT_TRUE(result.optimized_path.empty());
-    EXPECT_TRUE(result.ddp_traj.empty());
+    EXPECT_TRUE(result.optimized_trajectory.empty());
     EXPECT_FALSE(result.message.empty());
     EXPECT_DOUBLE_EQ(result.final_length, 0.0);
     EXPECT_EQ(result.final_maneuvers, 0);
@@ -205,8 +205,8 @@ TEST(PostProcessorDdpTest, DdpTrajFilledOnSuccessAndEmptyOnFailure) {
     const auto path = BuildStraightPath(2.0);
     const auto result = processor.optimizeDdp(path, MakeSyntheticDdpConfig());
     ASSERT_TRUE(result.success) << result.message;
-    ASSERT_FALSE(result.ddp_traj.empty());
-    for (const auto& pt : result.ddp_traj) {
+    ASSERT_FALSE(result.optimized_trajectory.empty());
+    for (const auto& pt : result.optimized_trajectory) {
         EXPECT_TRUE(std::isfinite(pt.x));
         EXPECT_TRUE(std::isfinite(pt.y));
         EXPECT_TRUE(std::isfinite(pt.theta));
@@ -215,13 +215,13 @@ TEST(PostProcessorDdpTest, DdpTrajFilledOnSuccessAndEmptyOnFailure) {
         EXPECT_TRUE(pt.hasT());
     }
     // 时间戳严格单调（驻留插入只拉伸时间轴）
-    for (std::size_t i = 1; i < result.ddp_traj.size(); ++i) {
-        EXPECT_GT(result.ddp_traj[i].getT(), result.ddp_traj[i - 1].getT());
+    for (std::size_t i = 1; i < result.optimized_trajectory.size(); ++i) {
+        EXPECT_GT(result.optimized_trajectory[i].getT(), result.optimized_trajectory[i - 1].getT());
     }
     const Path empty_path;
     const auto failed = processor.optimizeDdp(empty_path, DdpConfig{});
     EXPECT_FALSE(failed.success);
-    EXPECT_TRUE(failed.ddp_traj.empty());
+    EXPECT_TRUE(failed.optimized_trajectory.empty());
 }
 
 // ============================================================
@@ -269,26 +269,6 @@ TEST(PostProcessorDdpTest, EndToEndGearShiftCompletes) {
         0.02);
 }
 
-// margin 延续救援的「健康输入零副作用」语义（显式钉住）：默认路径本身
-// 收敛时救援分支绝不触发，开启 rescue_margin_safe 的输出必须与关闭时
-// 逐位一致（救援只发生在默认配置完整链路失败之后）
-TEST(PostProcessorDdpTest, RescueMarginDoesNotAlterHealthyRun) {
-    const auto vehicle_params = MakeVehicleParams();
-    const auto footprint = MakeFootprintModel(vehicle_params);
-    const auto esdf_map = MakeLargeEmptyEsdfMap();
-    const PostProcessor processor(vehicle_params, footprint, esdf_map);
-    const auto path = BuildGearShiftPath();
-    const auto baseline = processor.optimizeDdp(path, MakeSyntheticDdpConfig());
-    ASSERT_TRUE(baseline.success) << baseline.message;
-    auto rescued_config = MakeSyntheticDdpConfig();
-    rescued_config.rescue_margin_safe = 0.05;
-    const auto rescued = processor.optimizeDdp(path, rescued_config);
-    ASSERT_TRUE(rescued.success) << rescued.message;
-    EXPECT_EQ(rescued.message, baseline.message);
-    EXPECT_EQ(rescued.final_maneuvers, baseline.final_maneuvers);
-    EXPECT_DOUBLE_EQ(rescued.final_length, baseline.final_length);
-}
-
 // 短倒退换挡场景（倒退段仅 0.5 m）：实测阶段二门控重解内层未收敛
 // （ρ_reg 溢出），但阶段一解干净收敛——分级降级结构应输出阶段一降级
 // 候选（阶段一解 + 修剪 + 驻留插入，过同一合法性门）而非整体回退。
@@ -308,7 +288,7 @@ TEST(PostProcessorDdpTest, ShortReversalOutputsStageOneCandidate) {
     EXPECT_NE(result.message.find("stage_two_convergence"), std::string::npos)
         << result.message;
     EXPECT_FALSE(result.optimized_path.empty());
-    EXPECT_FALSE(result.ddp_traj.empty());
+    EXPECT_FALSE(result.optimized_trajectory.empty());
     EXPECT_TRUE(IsPathFinite(result.optimized_path));
     EXPECT_LE(TerminalPositionError(result.optimized_path, path), 0.05);
     EXPECT_LE(TerminalHeadingErrorDeg(result.optimized_path, path), 1.5);
@@ -355,6 +335,78 @@ TEST(PostProcessorDdpTest, PreferControlCandidateTruthTable) {
     melt.success = true;
     control.final_length = melt.final_length;
     EXPECT_FALSE(PostProcessor::PreferControlCandidate(melt, control));
+}
+
+// ============================================================
+// 测试：PostProcessorResult 重构新字段（Phase 1 双写验证）
+// ============================================================
+
+// 成功路径：optimized_trajectory 包含完整运动学量与时间戳
+TEST(PostProcessorDdpTest, OptimizedTrajectoryContainsFullKinematics) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    const auto path = BuildStraightPath(2.0);
+    const auto result = processor.optimizeDdp(path, MakeSyntheticDdpConfig());
+    ASSERT_TRUE(result.success) << result.message;
+    ASSERT_FALSE(result.optimized_trajectory.empty());
+    for (const auto& pt : result.optimized_trajectory) {
+        EXPECT_TRUE(std::isfinite(pt.x));
+        EXPECT_TRUE(std::isfinite(pt.y));
+        EXPECT_TRUE(std::isfinite(pt.theta));
+        EXPECT_TRUE(pt.hasV());
+        EXPECT_TRUE(pt.hasDelta());
+        EXPECT_TRUE(pt.hasT());
+    }
+    // 时间戳严格单调（驻留插入只拉伸时间轴）
+    for (std::size_t i = 1; i < result.optimized_trajectory.size(); ++i) {
+        EXPECT_GT(result.optimized_trajectory[i].getT(),
+                  result.optimized_trajectory[i - 1].getT());
+    }
+}
+
+// algorithm 字段必须反映实际运行的求解器
+TEST(PostProcessorDdpTest, AlgorithmFieldIsDdp) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    const auto path = BuildStraightPath(2.0);
+    const auto result = processor.optimizeDdp(path, MakeSyntheticDdpConfig());
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.algorithm, "ddp");
+}
+
+// output_level 分级语义：成功=2, 降级=1, 失败=0
+TEST(PostProcessorDdpTest, OutputLevelReflectsResultQuality) {
+    const auto vehicle_params = MakeVehicleParams();
+    const auto footprint = MakeFootprintModel(vehicle_params);
+    const auto esdf_map = MakeLargeEmptyEsdfMap();
+    const PostProcessor processor(vehicle_params, footprint, esdf_map);
+    // 直线场景：阶段二应收敛，输出级别为完全成功
+    {
+        const auto path = BuildStraightPath(2.0);
+        const auto result =
+            processor.optimizeDdp(path, MakeSyntheticDdpConfig());
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
+    }
+    // 短倒退场景：阶段二不收敛，降级到阶段一候选
+    {
+        const auto path = BuildShortReversalPath();
+        const auto result =
+            processor.optimizeDdp(path, MakeSyntheticDdpConfig());
+        ASSERT_TRUE(result.success);
+        EXPECT_EQ(result.output_level, OutputLevel::kDegraded);
+    }
+    // 空路径：直接失败
+    {
+        const Path empty_path;
+        const auto result = processor.optimizeDdp(empty_path, DdpConfig{});
+        EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.output_level, OutputLevel::kFallback);
+    }
 }
 
 }  // namespace apa_post_processor

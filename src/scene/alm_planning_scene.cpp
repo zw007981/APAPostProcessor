@@ -43,8 +43,16 @@ PostProcessorResult ALMPlanningScene::optimize() {
         last_result_.success, last_result_.final_maneuvers,
         last_result_.final_length, last_result_.total_time_ms,
         last_result_.message);
-    alm_traj_ = last_result_.alm_traj;
-    alm_preprocessed_traj_ = last_result_.alm_preprocessed_traj;
+    // 从 intermediate_traces 中提取预处理轨迹（"优化前"基线）
+    alm_preprocessed_traj_ = Trajectory{};
+    for (const auto& [name, traj] : last_result_.intermediate_traces) {
+        if (name == "alm_preprocessed") {
+            alm_preprocessed_traj_ = traj;
+            break;
+        }
+    }
+    // 统一从 optimized_trajectory 读取（与 NMPC/DDP 共用基类 optimized_traj_）
+    optimized_traj_ = last_result_.optimized_trajectory;
     return last_result_;
 }
 }  // namespace apa_post_processor

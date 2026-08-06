@@ -2,6 +2,8 @@
 
 #include <cmath>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -77,46 +79,6 @@ void NumericJacobians(const BicycleDynamics& dynamics, const DdpState& x,
     }
 }
 
-// 对 jacobians() 的解析输出再做中心差分，得到数值二阶张量：
-// f_xx[:,:,k] = ∂A/∂x_k，f_ux[:,iw,:] = ∂A/∂u_iw，f_uu[:,iw,iz] = ∂B/∂u_iw
-// 的对应切片
-void NumericHessians(const BicycleDynamics& dynamics, const DdpState& x,
-                     const DdpControl& u, double dt,
-                     DdpStateHessianTensor* num_fxx,
-                     DdpControlHessianTensor* num_fuu,
-                     DdpMixedHessianTensor* num_fux) {
-    for (int k = 0; k < DDP_STATE_DIM; ++k) {
-        const double h = 1e-6 * std::max(1.0, std::abs(x(k)));
-        DdpState x_plus = x, x_minus = x;
-        x_plus(k) += h;
-        x_minus(k) -= h;
-        DdpStateJacobian a_plus, a_minus;
-        DdpControlJacobian b_ignored1, b_ignored2;
-        dynamics.jacobians(x_plus, u, dt, &a_plus, &b_ignored1);
-        dynamics.jacobians(x_minus, u, dt, &a_minus, &b_ignored2);
-        const DdpStateJacobian da = (a_plus - a_minus) / (2.0 * h);
-        for (int r = 0; r < DDP_STATE_DIM; ++r) {
-            (*num_fxx)[r].col(k) = da.row(r);
-        }
-    }
-    for (int k = 0; k < DDP_CONTROL_DIM; ++k) {
-        const double h = 1e-6 * std::max(1.0, std::abs(u(k)));
-        DdpControl u_plus = u, u_minus = u;
-        u_plus(k) += h;
-        u_minus(k) -= h;
-        DdpStateJacobian a_plus, a_minus, a_ignored1, a_ignored2;
-        DdpControlJacobian b_plus, b_minus;
-        dynamics.jacobians(x, u_plus, dt, &a_plus, &b_plus);
-        dynamics.jacobians(x, u_minus, dt, &a_minus, &b_minus);
-        const DdpStateJacobian da = (a_plus - a_minus) / (2.0 * h);
-        const DdpControlJacobian db = (b_plus - b_minus) / (2.0 * h);
-        for (int r = 0; r < DDP_STATE_DIM; ++r) {
-            (*num_fux)[r].row(k) = da.row(r);
-            (*num_fuu)[r].col(k) = db.row(r);
-        }
-    }
-}
-
 // 全元素对拍：逐元素应用混合判据，失败时打印元素坐标与数值
 template <typename TDerivedA, typename TDerivedB>
 void ExpectMatrixAllNear(const Eigen::MatrixBase<TDerivedA>& analytic,
@@ -148,50 +110,6 @@ TEST(BicycleDynamicsTest, JacobiansMatchFiniteDifferenceAtOperatingPoints) {
                          &numeric_b);
         ExpectMatrixAllNear(analytic_a, numeric_a, point.name + " A");
         ExpectMatrixAllNear(analytic_b, numeric_b, point.name + " B");
-    }
-}
-
-// 测试完整二阶张量与「解析雅可比的有限差分」的全部切片对拍。
-// 验证链：step ←FD— jacobians ←FD— hessians，三张量 f_xx/f_uu/f_ux
-// 的每一个元素都被覆盖，而非只查 x⁺/y⁺/θ⁺ 行的显眼切片。
-TEST(BicycleDynamicsTest, HessiansMatchFiniteDifferenceOfJacobians) {
-    const BicycleDynamics dynamics(kWheelbase);
-    for (const auto& point : MakeOperatingPoints()) {
-        DdpStateHessianTensor analytic_fxx, numeric_fxx;
-        DdpControlHessianTensor analytic_fuu, numeric_fuu;
-        DdpMixedHessianTensor analytic_fux, numeric_fux;
-        dynamics.hessians(point.x, point.u, kDt, &analytic_fxx, &analytic_fuu,
-                          &analytic_fux);
-        NumericHessians(dynamics, point.x, point.u, kDt, &numeric_fxx,
-                        &numeric_fuu, &numeric_fux);
-        for (int r = 0; r < DDP_STATE_DIM; ++r) {
-            ExpectMatrixAllNear(
-                analytic_fxx[r], numeric_fxx[r],
-                point.name + " f_xx[row " + std::to_string(r) + "]");
-            ExpectMatrixAllNear(
-                analytic_fuu[r], numeric_fuu[r],
-                point.name + " f_uu[row " + std::to_string(r) + "]");
-            ExpectMatrixAllNear(
-                analytic_fux[r], numeric_fux[r],
-                point.name + " f_ux[row " + std::to_string(r) + "]");
-        }
-    }
-}
-
-// 测试线性输出行（v⁺/a⁺/δ⁺/ω⁺）的张量切片恒为零：
-// 这四行对 (x,u) 皆为线性，二阶导数张量切片在结构上必须恒等于零矩阵。
-TEST(BicycleDynamicsTest, LinearRowsHaveZeroHessianSlices) {
-    const BicycleDynamics dynamics(kWheelbase);
-    for (const auto& point : MakeOperatingPoints()) {
-        DdpStateHessianTensor f_xx;
-        DdpControlHessianTensor f_uu;
-        DdpMixedHessianTensor f_ux;
-        dynamics.hessians(point.x, point.u, kDt, &f_xx, &f_uu, &f_ux);
-        for (int r = DDP_IDX_V; r < DDP_STATE_DIM; ++r) {
-            EXPECT_TRUE(f_xx[r].isZero(0.0)) << point.name << " f_xx row " << r;
-            EXPECT_TRUE(f_uu[r].isZero(0.0)) << point.name << " f_uu row " << r;
-            EXPECT_TRUE(f_ux[r].isZero(0.0)) << point.name << " f_ux row " << r;
-        }
     }
 }
 
@@ -382,6 +300,35 @@ TEST(BicycleDynamicsTest, VelocitySignCrossingIsSmoothAndFinite) {
         }
     }
     EXPECT_TRUE(crossed_zero);
+}
+
+// 转角切线线性化的参考实现：阈值内取精确 tanδ，超阈后沿断点切线做
+// 奇偶对称的 C¹ 线性延拓
+double ReferenceTan(double delta, double threshold) {
+    if (threshold > 0.0 && std::abs(delta) > threshold) {
+        const double tan_a = std::tan(threshold);
+        const double sec2_a = 1.0 + tan_a * tan_a;
+        return std::copysign(tan_a + sec2_a * (std::abs(delta) - threshold),
+                             delta);
+    }
+    return std::tan(delta);
+}
+
+// 从 step() 结果反解本步实际使用的 tanδ⁺：Δθ = v⁺·tanδ⁺·dt/L
+double ExtractTanFromStep(const BicycleDynamics& dynamics, const DdpState& x,
+                          const DdpControl& u) {
+    const DdpState next = dynamics.step(x, u, kDt);
+    const double v_plus = next(DDP_IDX_V);
+    const double dtheta = next(DDP_IDX_THETA) - x(DDP_IDX_THETA);
+    return dtheta * kWheelbase / (v_plus * kDt);
+}
+
+// 构造一个 δ⁺ 落在指定值、且 v⁺ 非零的运行点（ω=0/加速度链为零，
+// 使 δ⁺=δ、v⁺=v，便于直接对照解析式）
+DdpState MakeSteerPoint(double delta, double v) {
+    DdpState x;
+    x << 0.0, 0.0, 0.3, v, 0.0, delta, 0.0;
+    return x;
 }
 
 }  // namespace

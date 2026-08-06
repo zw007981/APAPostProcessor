@@ -144,6 +144,26 @@ target_include_directories(apa_proto_lib PUBLIC
 )
 
 # ==========================================
+# 2.1 链接时优化（LTO/IPO，作用于本仓库自有目标）
+# ==========================================
+# 跨编译单元内联消除热点调用链开销（如 ESDF 双线性查询在 esdf_map.cpp
+# 与 DDP/ALM/NMPC 各约束求值单元之间的调用边界）；声明位置在第三方
+# add_subdirectory 之后，第三方库目标不受影响；工具链不支持时打印
+# WARNING 优雅跳过，不阻断构建
+# 注意必须连带校验 C 语言：stc_SQP_core_lib（OBJECT 库）含 C 源文件，
+# 链接它的可执行目标会把 C 带入语言闭包，只校验 CXX 会在生成期报
+# "doesn't support IPO for current compiler"
+enable_language(C)
+include(CheckIPOSupported)
+check_ipo_supported(LANGUAGES C CXX RESULT ipo_supported OUTPUT ipo_check_output)
+if(ipo_supported)
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION TRUE)
+    message(STATUS "LTO/IPO enabled for project targets.")
+else()
+    message(WARNING "LTO/IPO not supported, skipped: ${ipo_check_output}")
+endif()
+
+# ==========================================
 # 3. 源码打包与依赖解耦
 # ==========================================
 # 提取 src 下所有 cpp，但剔除 main.cpp，作为核心业务代码
@@ -180,17 +200,6 @@ target_compile_definitions(apa_core_lib PUBLIC
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     target_compile_options(apa_core_lib PUBLIC -march=native)
     message(STATUS "Enabling -march=native for x86_64 SIMD optimizations.")
-endif()
-
-# DDP 完整二阶动力学项（true MS-DDP）实验开关：默认 OFF（Gauss-Newton/
-# iLQR，丢弃 s'·f_** 张量红项）。开启后内层回推补回完整二阶收缩，设计
-# 预期是换取局部二次收敛（Li 2023 Fig.3 实测结论）；副作用是 Q_uu 更
-# 频繁失去正定性、ρ_reg 触发率上升。必须 PUBLIC 传播：开关改变
-# bicycle_dynamics.h 的 constexpr 状态，所有包含该头的编译单元必须一致
-option(APA_DDP_FULL_HESSIAN "Enable full second-order dynamics terms (true MS-DDP) in the DDP backward pass" OFF)
-if(APA_DDP_FULL_HESSIAN)
-    target_compile_definitions(apa_core_lib PUBLIC DDP_ENABLE_FULL_HESSIAN)
-    message(STATUS "DDP full Hessian (true MS-DDP) backward pass: ENABLED")
 endif()
 
 # ==========================================
@@ -254,12 +263,30 @@ target_link_libraries(apa_tune_ddp PRIVATE apa_core_lib stc_SQP_core_lib)
 add_executable(apa_tune_alm ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_alm.cpp)
 target_link_libraries(apa_tune_alm PRIVATE apa_core_lib stc_SQP_core_lib)
 
+# DDP 四数据集可视化报告工具：运行 DDP 求解器并输出对比图 + 回归指标表
+add_executable(apa_ddp_report ${CMAKE_CURRENT_SOURCE_DIR}/tool/ddp_report.cpp)
+target_link_libraries(apa_ddp_report PRIVATE apa_core_lib stc_SQP_core_lib)
+
+# DDP 四数据集 profiling 驱动：与生产入口同款的场景链路（不做可视化），
+# 单进程内重复跑四个数据集供 perf 采样，配合 tool/profile_ddp.sh 生成火焰图
+add_executable(apa_profile_ddp ${CMAKE_CURRENT_SOURCE_DIR}/tool/profile_ddp.cpp)
+target_link_libraries(apa_profile_ddp PRIVATE apa_core_lib stc_SQP_core_lib)
+
+# NMPC 四数据集调参驱动：逐数据集执行 PostProcessor::optimize 并输出
+# 机器可读评价行，供三种算法跨数据集回归基线统一记录
+add_executable(apa_tune_nmpc ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_nmpc.cpp)
+target_link_libraries(apa_tune_nmpc PRIVATE apa_core_lib stc_SQP_core_lib)
+
 # DDP 后处理链路四断点审计驱动：复刻 optimizeDdp 装配并逐步手动编排，对
 # 阶段一解/修剪环节/阶段二解/驻留与最终输出四个断点转储全量结构化量测
 # （12 项校验判据不短路），供口径审计取证；stc_SQP_core_lib 需显式再次
 # 链接，理由同主程序
 add_executable(apa_audit_ddp_post ${CMAKE_CURRENT_SOURCE_DIR}/tool/audit_ddp_post.cpp)
 target_link_libraries(apa_audit_ddp_post PRIVATE apa_core_lib stc_SQP_core_lib)
+
+# 几何换挡点优化器先导实验：用 Reeds-Shepp 曲线对原始参考路径做跨换挡点
+# 短接，在严格无碰撞前提下考察换挡段数的可压缩空间。一次性诊断工具，
+# 结论落盘后连同本目标一并删除
 
 # ==========================================
 # 5. Ninja 动态并发池优化 (Ninja Pool Hack)

@@ -124,6 +124,21 @@ class ESDFMap {
                              double* grad_y_out) const;
     // 查询符号距离（正值 = 障碍物外部；图外 = −穿透深度，见类注释）
     double getDist(double x, double y) const;
+    // 条件梯度查询的返回结构：距离恒返回，梯度仅在活跃时计算
+    struct DistGradIfCloser {
+        // 符号距离（图外语义同 getDistAndGrad）
+        double dist{0.0};
+        // 梯度是否已计算（dist < grad_threshold 或图外恢复场时为 true）
+        bool grad_computed{false};
+        // 距离场梯度（grad_computed 为 false 时未定义）
+        Eigen::Vector2d grad{Eigen::Vector2d::Zero()};
+    };
+    // 条件梯度查询：距离照常返回；仅当 dist < grad_threshold 时才计算
+    // 梯度。调用方必须保证 grad_threshold 是梯度消费者的最大活跃距离
+    // （阈值以上梯度无人使用，跳过安全）；越界查询照常计数一次，
+    // 恢复场语义同 getDistAndGrad（图外恒活跃、梯度必计算）
+    DistGradIfCloser getDistAndGradIfCloser(double x, double y,
+                                            double grad_threshold) const;
     double getResolution() const { return resolution_; }
     int getWidth() const { return width_; }
     int getHeight() const { return height_; }

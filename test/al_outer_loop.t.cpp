@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "core/DDP/al_outer_loop.h"
@@ -62,17 +63,128 @@ DdpAlignedVec<DdpState> MakeZeroDefects(std::size_t num_poses) {
     return defects;
 }
 
-// 构造只含终点残差、幅值约束全满足的快照（violation_norm = ‖c‖）
+// 构造只含终点残差、幅值约束全满足的快照（violation_norm = ‖c‖）；
+// 归一化聚合字段同步填充（门控只消费环比语义，任一自洽尺度均可）
 AlConstraintSnapshot MakeTerminalOnlySnapshot(double c_x) {
     AlConstraintSnapshot snapshot;
     snapshot.amplitude_g = Eigen::VectorXd::Constant(5, -1.0);
     snapshot.terminal_c << c_x, 0.0, 0.0, 0.0, 0.0;
     snapshot.max_amplitude_violation = 0.0;
+    snapshot.terminal_violation_norm = std::abs(c_x);
+    snapshot.amplitude_violation_norm = 0.0;
     snapshot.terminal_position_error = std::abs(c_x);
     snapshot.terminal_heading_error_deg = 0.0;
     snapshot.defect_norm_inf = 0.0;
     snapshot.violation_norm = std::abs(c_x);
     return snapshot;
+}
+
+// 白盒访问：派生类将受保护成员/方法公开给单元测试
+class AlOuterLoopTestAccess : public AlOuterLoop {
+   public:
+    using AlOuterLoop::AlOuterLoop;
+    using AlOuterLoop::AmplitudeScale;
+    using AlOuterLoop::round_;
+};
+
+// 测试 ESDF 逐轮量级调度：ESDF 是固定权重软代价，AL 罚权重却每轮 ×10
+// 增长，交换比随轮次单调向 AL 倾斜。触发原因是编排层每轮取该因子写入
+// 代价输入。预期行为：默认配置恒返回 1（既有行为逐位不变）；启用后
+// 第 r 轮为 γ^r 并被上限封顶，且首轮必为 1（冷启动数值行为不受影响）；
+// 增长率/上限小于 1（等于随轮次削弱避障，与机制意图相反）必须拒绝
+TEST(AlOuterLoopTest, EsdfScaleFollowsRoundScheduleAndClampsAtMax) {
+    AlOuterLoopTestAccess default_loop(AlOuterLoopConfig{}, DdpCostConfig{});
+    EXPECT_DOUBLE_EQ(default_loop.esdfScale(), 1.0);
+    default_loop.round_ = 12;
+    EXPECT_DOUBLE_EQ(default_loop.esdfScale(), 1.0);
+    AlOuterLoopConfig config;
+    config.esdf_scale_growth = 2.0;
+    config.esdf_scale_max = 16.0;
+    AlOuterLoopTestAccess loop(config, DdpCostConfig{});
+    // 首轮恒为 1：γ⁰ = 1，冷启动轮次与关闭态完全一致
+    EXPECT_DOUBLE_EQ(loop.esdfScale(), 1.0);
+    loop.round_ = 3;
+    EXPECT_DOUBLE_EQ(loop.esdfScale(), 8.0);
+    // 触顶后封顶，不随轮次继续发散
+    loop.round_ = 4;
+    EXPECT_DOUBLE_EQ(loop.esdfScale(), 16.0);
+    loop.round_ = 30;
+    EXPECT_DOUBLE_EQ(loop.esdfScale(), 16.0);
+    for (const double growth : {0.5, -1.0}) {
+        AlOuterLoopConfig bad = config;
+        bad.esdf_scale_growth = growth;
+        EXPECT_THROW(AlOuterLoop(bad, DdpCostConfig{}), std::invalid_argument);
+    }
+    AlOuterLoopConfig bad_max = config;
+    bad_max.esdf_scale_max = 0.5;
+    EXPECT_THROW(AlOuterLoop(bad_max, DdpCostConfig{}), std::invalid_argument);
+    AlOuterLoopConfig nonfinite = config;
+    nonfinite.esdf_scale_growth = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(AlOuterLoop(nonfinite, DdpCostConfig{}),
+                 std::invalid_argument);
+}
+
+// 归一化尺度钉住与非法索引拒绝：v²/a²/ω² 平方形态尺度为 2×上限²
+// （边界处线性化，使归一化违反度一阶等价于状态相对超限），δ 双侧
+// 线性形态尺度为 δ_max；未登记的约束索引必须显式抛出（扩展约束
+// 维度时漏补尺度会静默按错误尺度归一化，属调用方逻辑错误）
+TEST(AlOuterLoopTest, AmplitudeScalePinnedAndRejectsUnknownIndex) {
+    const DdpCostConfig cost;
+    EXPECT_DOUBLE_EQ(
+        AlOuterLoopTestAccess::AmplitudeScale(cost, DDP_AMP_V),
+        2.0 * cost.v_max * cost.v_max);
+    EXPECT_DOUBLE_EQ(
+        AlOuterLoopTestAccess::AmplitudeScale(cost, DDP_AMP_A),
+        2.0 * cost.a_max * cost.a_max);
+    EXPECT_DOUBLE_EQ(
+        AlOuterLoopTestAccess::AmplitudeScale(cost, DDP_AMP_OMEGA),
+        2.0 * cost.omega_max * cost.omega_max);
+    EXPECT_DOUBLE_EQ(
+        AlOuterLoopTestAccess::AmplitudeScale(cost, DDP_AMP_DELTA_POS),
+        cost.delta_max);
+    EXPECT_DOUBLE_EQ(
+        AlOuterLoopTestAccess::AmplitudeScale(cost, DDP_AMP_DELTA_NEG),
+        cost.delta_max);
+    EXPECT_THROW(AlOuterLoopTestAccess::AmplitudeScale(cost, -1),
+                 std::logic_error);
+    EXPECT_THROW(AlOuterLoopTestAccess::AmplitudeScale(
+                     cost, DDP_AMPLITUDE_CONSTRAINT_DIM + 1),
+                 std::logic_error);
+}
+
+// 同一容差对全部物理量等严格（Q4 归一化的核心命题）：对 v/a/ω/δ
+// 分别构造「状态恰为上限的 1.019 倍」与「1.023 倍」的快照，四个
+// 物理量的 inequality_ok 必须在同一相对超限处翻转（均 1.019 通过、
+// 1.023 不通过）。边界残差说明：平方形态在边界处经 2×上限² 线性化，
+// 翻转点相对线性形态有 O(tol²)≈0.02% 的固有错位（平方项精确值的
+// 一阶近似），本测试的翻转检查点取 1.019/1.023 避开该错位带
+TEST(AlOuterLoopTest, InequalityTolIsUniformlyStrictAcrossQuantities) {
+    const DdpCostConfig cost_config;
+    AlOuterLoop loop(AlOuterLoopConfig{}, cost_config);
+    auto poses = MakeLinePoses(2, 0.05);
+    const auto reference = MakeReference(poses, {});
+    const auto defects = MakeZeroDefects(2);
+    const auto measure_with = [&](double v, double a, double omega,
+                                  double delta) {
+        DdpAlignedVec<DdpState> states;
+        states.push_back(
+            MakeState(0.0, 0.0, 0.0, v, a, delta, omega));
+        states.push_back(MakeState(0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0));
+        return loop.checkTermination(loop.measure(reference, states, defects))
+            .inequality_ok;
+    };
+    const double omega_max = cost_config.omega_max;
+    const double delta_max = cost_config.delta_max;
+    // 1.019× 上限：四个物理量全部通过
+    EXPECT_TRUE(measure_with(1.019 * cost_config.v_max, 0.0, 0.0, 0.0));
+    EXPECT_TRUE(measure_with(0.0, 1.019 * cost_config.a_max, 0.0, 0.0));
+    EXPECT_TRUE(measure_with(0.0, 0.0, 1.019 * omega_max, 0.0));
+    EXPECT_TRUE(measure_with(0.0, 0.0, 0.0, 1.019 * delta_max));
+    // 1.023× 上限：四个物理量全部不通过（翻转点一致）
+    EXPECT_FALSE(measure_with(1.023 * cost_config.v_max, 0.0, 0.0, 0.0));
+    EXPECT_FALSE(measure_with(0.0, 1.023 * cost_config.a_max, 0.0, 0.0));
+    EXPECT_FALSE(measure_with(0.0, 0.0, 1.023 * omega_max, 0.0));
+    EXPECT_FALSE(measure_with(0.0, 0.0, 0.0, 1.023 * delta_max));
 }
 
 // 测试非法配置逐项被构造校验拒绝：迭代上限/容差/clip 区间/门控/退火
@@ -125,30 +237,6 @@ TEST(AlOuterLoopConfigTest, InvalidConfigThrows) {
     config = AlOuterLoopConfig{};
     config.anneal_gamma = 1.0;
     EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    // 换挡代理 β 退火调度：门宽必须满足 0<β_final<=β_initial 且 0<γ_β<1
-    config = AlOuterLoopConfig{};
-    config.shift_beta_initial = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.shift_beta_final = -0.05;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.shift_beta_initial = 0.05;
-    config.shift_beta_final = 0.3;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.shift_beta_gamma = 1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    // 候选段差异化退火：临界比阈值必须为正、候选退火率满足 0<γ_cand<1
-    config = AlOuterLoopConfig{};
-    config.melt_crit_threshold = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.candidate_anneal_gamma = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.candidate_anneal_gamma = 1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
     // 代价配置提供幅值边界，同样必须为正有限
     DdpCostConfig bad_cost;
     bad_cost.v_max = 0.0;
@@ -192,11 +280,14 @@ TEST(AlOuterLoopTest, MeasureComputesExactResidualsAndAggregates) {
     const auto reference = MakeReference(poses, {});
     DdpAlignedVec<DdpState> states;
     states.reserve(4);
+    const double delta_max = DdpCostConfig{}.delta_max;
     // k=0：v 超限 0.1 → g_v = 1.6²−1.5² = 0.31
     states.push_back(MakeState(0.0, 0.0, 0.0, 1.6, 0.0, 0.0, 0.0));
-    // k=1：a 超限 → g_a = 1.2²−1.0² = 0.44；δ=0.7 → g_δ⁺=0.15、g_δ⁻=−1.25
+    // k=1：a 超限 → g_a = 1.2²−1.0² = 0.44；δ=0.7 → g_δ⁺=0.7−δ_max、
+    // g_δ⁻=−0.7−δ_max
     states.push_back(MakeState(0.05, 0.0, 0.0, 0.0, 1.2, 0.7, 0.0));
-    // k=2：δ=−0.7 → g_δ⁺=−1.25、g_δ⁻=0.15；ω=0.6 → g_ω = 0.36−0.25 = 0.11
+    // k=2：δ=−0.7 → g_δ⁺=−0.7−δ_max、g_δ⁻=0.7−δ_max；ω=0.6 →
+    // g_ω = 0.6²−0.5² = 0.11
     states.push_back(MakeState(0.1, 0.0, 0.0, 0.0, 0.0, -0.7, 0.6));
     // 终点：位置残差 (0.05, −0.1)；θ 残差 0.1−0.1−3π/2 → wrap 后 +π/2；
     // v_N=0.03、a_N=−0.02
@@ -209,10 +300,14 @@ TEST(AlOuterLoopTest, MeasureComputesExactResidualsAndAggregates) {
     ASSERT_EQ(snapshot.amplitude_g.size(), 15);
     EXPECT_NEAR(snapshot.amplitude_g(DDP_AMP_V), 0.31, 1e-12);
     EXPECT_NEAR(snapshot.amplitude_g(5 + DDP_AMP_A), 0.44, 1e-12);
-    EXPECT_NEAR(snapshot.amplitude_g(5 + DDP_AMP_DELTA_POS), 0.15, 1e-12);
-    EXPECT_NEAR(snapshot.amplitude_g(5 + DDP_AMP_DELTA_NEG), -1.25, 1e-12);
-    EXPECT_NEAR(snapshot.amplitude_g(10 + DDP_AMP_DELTA_POS), -1.25, 1e-12);
-    EXPECT_NEAR(snapshot.amplitude_g(10 + DDP_AMP_DELTA_NEG), 0.15, 1e-12);
+    EXPECT_NEAR(snapshot.amplitude_g(5 + DDP_AMP_DELTA_POS), 0.7 - delta_max,
+                1e-12);
+    EXPECT_NEAR(snapshot.amplitude_g(5 + DDP_AMP_DELTA_NEG), -0.7 - delta_max,
+                1e-12);
+    EXPECT_NEAR(snapshot.amplitude_g(10 + DDP_AMP_DELTA_POS), -0.7 - delta_max,
+                1e-12);
+    EXPECT_NEAR(snapshot.amplitude_g(10 + DDP_AMP_DELTA_NEG), 0.7 - delta_max,
+                1e-12);
     EXPECT_NEAR(snapshot.amplitude_g(10 + DDP_AMP_OMEGA), 0.11, 1e-12);
     // 终点 c = [x−xg, y−yg, wrap(θ−θg), v, a]
     EXPECT_NEAR(snapshot.terminal_c(0), 0.05, 1e-12);
@@ -220,14 +315,31 @@ TEST(AlOuterLoopTest, MeasureComputesExactResidualsAndAggregates) {
     EXPECT_NEAR(snapshot.terminal_c(2), 0.5 * PI, 1e-9);
     EXPECT_NEAR(snapshot.terminal_c(3), 0.03, 1e-12);
     EXPECT_NEAR(snapshot.terminal_c(4), -0.02, 1e-12);
-    // 聚合量
-    EXPECT_NEAR(snapshot.max_amplitude_violation, 0.44, 1e-12);
+    // 聚合量（量纲归一化：各约束残差除以其自然尺度——v² 除 2×2.25、
+    // a² 除 2×1.0、ω² 除 2×0.5²、δ 线性除 δ_max，统一为
+    // 「相对上限的比例」；终点组门控比较量保持原始范数 ‖c‖，诊断联合
+    // 范数的终点分量除以各自容差、v/a 分量除以物理上限）
+    EXPECT_NEAR(snapshot.max_amplitude_violation,
+                (0.7 - delta_max) / delta_max, 1e-12);
     EXPECT_NEAR(snapshot.terminal_position_error, std::hypot(0.05, 0.1), 1e-12);
     EXPECT_NEAR(snapshot.terminal_heading_error_deg, 90.0, 1e-6);
     EXPECT_NEAR(snapshot.defect_norm_inf, 0.007, 1e-12);
-    const double expected_norm = std::sqrt(
-        0.05 * 0.05 + 0.1 * 0.1 + 0.25 * PI * PI + 0.03 * 0.03 + 0.02 * 0.02 +
-        0.31 * 0.31 + 0.44 * 0.44 + 0.15 * 0.15 + 0.15 * 0.15 + 0.11 * 0.11);
+    const double terminal_raw_expected =
+        std::sqrt(0.05 * 0.05 + 0.1 * 0.1 + 0.25 * PI * PI + 0.03 * 0.03 +
+                  0.02 * 0.02);
+    EXPECT_NEAR(snapshot.terminal_violation_norm, terminal_raw_expected,
+                1e-9);
+    const double terminal_normalized_sq_expected =
+        std::pow(0.05 / 0.05, 2) + std::pow(0.1 / 0.05, 2) +
+        std::pow(0.5 * PI / (1.5 * PI / 180.0), 2) +
+        std::pow(0.03 / 1.5, 2) + std::pow(0.02 / 1.0, 2);
+    const double amplitude_expected = std::sqrt(
+        std::pow(0.31 / (2.0 * 2.25), 2) + std::pow(0.44 / 2.0, 2) +
+        2 * std::pow(0.15 / 0.55, 2) + std::pow(0.11 / (2.0 * 0.25), 2));
+    EXPECT_NEAR(snapshot.amplitude_violation_norm, amplitude_expected, 1e-9);
+    const double expected_norm =
+        std::sqrt(terminal_normalized_sq_expected +
+                  amplitude_expected * amplitude_expected);
     EXPECT_NEAR(snapshot.violation_norm, expected_norm, 1e-9);
 }
 
@@ -289,180 +401,6 @@ TEST(AlOuterLoopTest, AnnealExemptMaskSingleManeuverAllExempt) {
 
 // 测试跟踪权重退火调度：w_ref(r) = w_ref,0·γ^r，随 update 推进轮次逐轮
 // 几何衰减（豁免点不衰减由掩码保证，不在本用例范围）
-// 测试候选待融段掩码的生成规则：临界比 crit=T⁵·n_pts·dt 低于阈值的
-// 内部 maneuver 覆盖点被标记；首/末段（融化保护：承载起点状态与终点
-// 语义）与高临界比内部段不标记；无 maneuver 元数据的参考不标记任何点
-TEST(AlOuterLoopTest, MeltCandidateMaskMarksOnlyLowCritInteriorManeuvers) {
-    AlOuterLoopConfig config;
-    config.melt_crit_threshold = 5000.0;
-    const DdpCostConfig cost_config;
-    AlOuterLoop loop(config, cost_config);
-    // 5 个 maneuver（N=266）：首段 [0,60]（T=6，crit≈4.7e4，本就超阈）
-    // / 微段 [60,66]（T=0.6，crit≈0.054）/ 大段 [66,186]（T=12，crit 巨大）
-    // / 中段 [186,216]（T=3，crit≈753）/ 末段 [216,266]（保护）
-    auto poses = MakeLinePoses(267, 0.05);
-    const std::vector<DdpReferenceManeuver> maneuvers = {
-        MakeManeuver(1, 0, 60), MakeManeuver(-1, 60, 66),
-        MakeManeuver(1, 66, 186), MakeManeuver(-1, 186, 216),
-        MakeManeuver(1, 216, 266)};
-    const auto reference = MakeReference(poses, maneuvers);
-    const auto mask = loop.makeMeltCandidateMask(reference);
-    ASSERT_EQ(mask.size(), 267);
-    // 首/末段保护：无论临界比如何都不参与候选标记（边界共享点归候选段
-    // 的闭区间覆盖，与豁免掩码同一约定：点 60/216 被候选段标记）
-    for (std::size_t k = 0; k < 60; ++k) {
-        EXPECT_FALSE(mask[k]) << "first maneuver point " << k;
-    }
-    for (std::size_t k = 217; k <= 266; ++k) {
-        EXPECT_FALSE(mask[k]) << "last maneuver point " << k;
-    }
-    // 低临界比内部段（微段/中段）整段标记（含与邻段共享的边界点）
-    for (std::size_t k = 60; k <= 66; ++k) {
-        EXPECT_TRUE(mask[k]) << "micro maneuver point " << k;
-    }
-    for (std::size_t k = 186; k <= 216; ++k) {
-        EXPECT_TRUE(mask[k]) << "mid maneuver point " << k;
-    }
-    // 高临界比内部段不标记
-    for (std::size_t k = 67; k < 186; ++k) {
-        EXPECT_FALSE(mask[k]) << "large maneuver point " << k;
-    }
-    // 无元数据参考（合成用例）：不标记任何点
-    const auto no_meta = loop.makeMeltCandidateMask(
-        MakeReference(poses, std::vector<DdpReferenceManeuver>{}));
-    ASSERT_EQ(no_meta.size(), 267);
-    for (const bool flag : no_meta) {
-        EXPECT_FALSE(flag);
-    }
-}
-
-// 测试候选段退火权重的独立调度：候选点按 γ_cand 快速衰减（深退火把
-// 「是否值得保留」的裁决权交还平滑项），与全局 γ 解耦
-TEST(AlOuterLoopTest, CandidateTrackingWeightAnnealsIndependently) {
-    AlOuterLoopConfig config;
-    config.anneal_gamma = 0.5;
-    config.candidate_anneal_gamma = 0.25;
-    DdpCostConfig cost_config;
-    cost_config.weight_ref_base = 10.0;
-    AlOuterLoop loop(config, cost_config);
-    EXPECT_DOUBLE_EQ(loop.candidateTrackingWeight(), 10.0);
-    const std::size_t num_steps = 1;
-    auto multipliers = loop.makeInitialMultipliers(num_steps);
-    loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.candidateTrackingWeight(), 2.5);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 5.0);
-    loop.update(MakeTerminalOnlySnapshot(0.01), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.candidateTrackingWeight(), 0.625);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 2.5);
-}
-
-// 测试退火终点自适应（逃逸指标冻结）：任一启用指标越阈即冻结退火——
-// w_ref 停在当前深度不再衰减（全路段同时、无段间对拉）；冻结期间 μ
-// 增长同步冻结（λ 继续累积——AL 本职机制），避免「违反度平台期被判
-// 未充分下降」的伪 μ 增长；冻结滞回（reset 前不自动解冻）；默认全关
-// 时上报零副作用
-TEST(AlOuterLoopTest, AnnealFreezeStopsScheduleOnly) {
-    AlOuterLoopConfig config;
-    config.anneal_gamma = 0.5;
-    config.anneal_freeze_length_growth = 1.05;
-    config.anneal_freeze_lateral_deviation = 1.0;
-    config.anneal_freeze_defect = 0.3;
-    config.amplitude_mu_initial = 1000.0;
-    DdpCostConfig cost_config;
-    cost_config.weight_ref_base = 10.0;
-    AlOuterLoop loop(config, cost_config);
-    auto multipliers = loop.makeInitialMultipliers(1);
-    EXPECT_FALSE(loop.annealFrozen());
-    // 第 0 轮正常退火：update 后 w_ref 减半、μ 按门控正常推进
-    loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 5.0);
-    // 触发冻结（长度环比 1.2 > 1.05 阈值）→ 冻结标志置位
-    loop.reportEscapeIndicators(1.2, 0.0, 0.0, 0.0);
-    EXPECT_TRUE(loop.annealFrozen());
-    // 冻结后的 update：w_ref 停在 5.0 不再衰减；冻结只停退火——违反度
-    // 未充分下降时 μ 门控增长照常（AL 本职工作，冻结发生在求解中段）
-    const double mu_before = loop.mu();
-    const bool increased =
-        loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
-    EXPECT_TRUE(increased);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 5.0);
-    EXPECT_GT(loop.mu(), mu_before);
-    // λ 照常累积（AL 本职机制不受冻结影响）
-    EXPECT_GT(multipliers.terminal_lambda(0), 0.0);
-    // 冻结滞回：继续 update 仍冻结（不自动解冻）
-    loop.update(MakeTerminalOnlySnapshot(0.08), 50.0, &multipliers);
-    EXPECT_TRUE(loop.annealFrozen());
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 5.0);
-    // reset 解除冻结，调度从头开始
-    loop.reset();
-    EXPECT_FALSE(loop.annealFrozen());
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 10.0);
-}
-
-// 测试逃逸指标的越阈语义：未启用（=0）的指标不参与判定；四个指标任一
-// 独立越阈均触发冻结；非法阈值（负数）构造拒绝
-TEST(AlOuterLoopTest, AnnealFreezeIndicatorSemantics) {
-    // 全部关闭（默认）：任何上报都不冻结
-    {
-        AlOuterLoop loop(AlOuterLoopConfig{}, DdpCostConfig{});
-        loop.reportEscapeIndicators(1e9, 1e9, 1e9, 0.0);
-        EXPECT_FALSE(loop.annealFrozen());
-    }
-    // 仅长度指标启用：仅长度越阈触发，其余指标越阈不触发
-    {
-        AlOuterLoopConfig config;
-        config.anneal_freeze_length_growth = 1.1;
-        AlOuterLoop loop(config, DdpCostConfig{});
-        loop.reportEscapeIndicators(1.0, 1e9, 1e9, 0.0);
-        EXPECT_FALSE(loop.annealFrozen());
-        loop.reportEscapeIndicators(1.2, 0.0, 0.0, 0.0);
-        EXPECT_TRUE(loop.annealFrozen());
-    }
-    // 仅偏离指标启用
-    {
-        AlOuterLoopConfig config;
-        config.anneal_freeze_lateral_deviation = 0.5;
-        AlOuterLoop loop(config, DdpCostConfig{});
-        loop.reportEscapeIndicators(0.0, 0.4, 0.0, 0.0);
-        EXPECT_FALSE(loop.annealFrozen());
-        loop.reportEscapeIndicators(0.0, 0.6, 0.0, 0.0);
-        EXPECT_TRUE(loop.annealFrozen());
-    }
-    // 仅缺陷指标启用
-    {
-        AlOuterLoopConfig config;
-        config.anneal_freeze_defect = 0.3;
-        AlOuterLoop loop(config, DdpCostConfig{});
-        loop.reportEscapeIndicators(0.0, 0.0, 0.2, 0.0);
-        EXPECT_FALSE(loop.annealFrozen());
-        loop.reportEscapeIndicators(0.0, 0.0, 0.4, 0.0);
-        EXPECT_TRUE(loop.annealFrozen());
-    }
-    // 仅绝对长度比指标启用
-    {
-        AlOuterLoopConfig config;
-        config.anneal_freeze_ref_length_ratio = 1.2;
-        AlOuterLoop loop(config, DdpCostConfig{});
-        loop.reportEscapeIndicators(1e9, 1e9, 1e9, 1.1);
-        EXPECT_FALSE(loop.annealFrozen());
-        loop.reportEscapeIndicators(0.0, 0.0, 0.0, 1.3);
-        EXPECT_TRUE(loop.annealFrozen());
-    }
-    // 非法阈值显式拒绝
-    AlOuterLoopConfig bad;
-    bad.anneal_freeze_length_growth = -1.0;
-    EXPECT_THROW(AlOuterLoop(bad, DdpCostConfig{}), std::invalid_argument);
-    bad = AlOuterLoopConfig{};
-    bad.anneal_freeze_lateral_deviation = -0.1;
-    EXPECT_THROW(AlOuterLoop(bad, DdpCostConfig{}), std::invalid_argument);
-    bad = AlOuterLoopConfig{};
-    bad.anneal_freeze_defect = -0.1;
-    EXPECT_THROW(AlOuterLoop(bad, DdpCostConfig{}), std::invalid_argument);
-    bad = AlOuterLoopConfig{};
-    bad.anneal_freeze_ref_length_ratio = -0.1;
-    EXPECT_THROW(AlOuterLoop(bad, DdpCostConfig{}), std::invalid_argument);
-}
-
 TEST(AlOuterLoopTest, TrackingWeightAnnealsGeometricallyWithRound) {
     AlOuterLoopConfig config;
     config.anneal_gamma = 0.5;
@@ -478,61 +416,6 @@ TEST(AlOuterLoopTest, TrackingWeightAnnealsGeometricallyWithRound) {
     loop.update(MakeTerminalOnlySnapshot(0.01), 50.0, &multipliers);
     EXPECT_DOUBLE_EQ(loop.trackingWeight(), 2.5);
     EXPECT_EQ(loop.round(), 2);
-}
-
-// 测试换挡代理门宽 β 的逐轮退火调度：β(r)=max(β_final, β_initial·γ_β^r)
-// ——宽门启动（梯度覆盖大 |v| 范围、非凸项可优化），逐轮收窄到地板值
-// （逼近阶跃的换挡判决）；到达地板后保持，不再继续收窄（β→0 的梯度在
-// v=0 处爆炸，必须留地板）
-TEST(AlOuterLoopTest, ShiftBetaAnnealsAndFloorsPerRound) {
-    AlOuterLoopConfig config;
-    config.shift_beta_initial = 0.3;
-    config.shift_beta_final = 0.05;
-    config.shift_beta_gamma = 0.5;
-    const DdpCostConfig cost_config;
-    AlOuterLoop loop(config, cost_config);
-    EXPECT_DOUBLE_EQ(loop.shiftBeta(), 0.3);
-    const std::size_t num_steps = 1;
-    auto multipliers = loop.makeInitialMultipliers(num_steps);
-    loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.shiftBeta(), 0.15);
-    loop.update(MakeTerminalOnlySnapshot(0.01), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.shiftBeta(), 0.075);
-    loop.update(MakeTerminalOnlySnapshot(0.001), 50.0, &multipliers);
-    // 0.3·0.5³=0.0375 < β_final → 地板 0.05
-    EXPECT_DOUBLE_EQ(loop.shiftBeta(), 0.05);
-    loop.update(MakeTerminalOnlySnapshot(0.0001), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.shiftBeta(), 0.05);
-}
-
-// 测试分段常数退火：前 anneal_hold_rounds 轮保持 w_ref,0（先让 AL 把
-// 约束建立起来），之后按 γ 几何退火；hold=0 时退化为纯几何退火
-TEST(AlOuterLoopTest, TrackingWeightHoldsThenAnneals) {
-    AlOuterLoopConfig config;
-    config.anneal_gamma = 0.3;
-    config.anneal_hold_rounds = 3;
-    DdpCostConfig cost_config;
-    cost_config.weight_ref_base = 10.0;
-    AlOuterLoop loop(config, cost_config);
-    const std::size_t num_steps = 1;
-    auto multipliers = loop.makeInitialMultipliers(num_steps);
-    // 保持期（r=0..3）：恒为 w_ref,0（保持 k 轮后首个退火值出现在 r=k+1）
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 10.0);
-    loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 10.0);
-    loop.update(MakeTerminalOnlySnapshot(0.09), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 10.0);
-    loop.update(MakeTerminalOnlySnapshot(0.08), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 10.0);
-    // 退火期（r=4 起）：w_ref,0·γ^(r−hold)
-    loop.update(MakeTerminalOnlySnapshot(0.07), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 3.0);
-    loop.update(MakeTerminalOnlySnapshot(0.06), 50.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.trackingWeight(), 0.9);
-    // 非法保持轮数显式拒绝
-    AlOuterLoopConfig bad;
-    bad.anneal_hold_rounds = -1;
-    EXPECT_THROW(AlOuterLoop(bad, cost_config), std::invalid_argument);
 }
 
 // 测试自适应 μ⁰ 标定：首轮内层收敛后按 μ⁰=clip(J_s′/max(‖c‖²,ε),μ_min,
@@ -675,6 +558,9 @@ TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
         Eigen::VectorXd::Constant(DDP_AMPLITUDE_CONSTRAINT_DIM, -1.0);
     snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.3;
     snapshot.terminal_c << 0.5, 0.0, 0.0, 0.0, 0.0;
+    // 归一化聚合字段（δ 线性形态尺度 = delta_max = 0.55）
+    snapshot.terminal_violation_norm = 0.5;
+    snapshot.amplitude_violation_norm = 0.3 / 0.55;
     loop.update(snapshot, 100.0, &multipliers);
     EXPECT_DOUBLE_EQ(loop.mu(), 400.0);
     EXPECT_DOUBLE_EQ(loop.muAmplitude(), 1000.0);
@@ -683,6 +569,8 @@ TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
     // 0.29 > 0.9·0.3=0.27）→ 仅 μ_amp 增长（×φ），μ_term 不动
     snapshot.terminal_c << 0.1, 0.0, 0.0, 0.0, 0.0;
     snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.29;
+    snapshot.terminal_violation_norm = 0.1;
+    snapshot.amplitude_violation_norm = 0.29 / 0.55;
     const bool increased = loop.update(snapshot, 100.0, &multipliers);
     EXPECT_TRUE(increased);
     EXPECT_DOUBLE_EQ(loop.mu(), 400.0);
@@ -692,6 +580,8 @@ TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
     // 两组均不增长
     snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.1;
     snapshot.terminal_c << 0.05, 0.0, 0.0, 0.0, 0.0;
+    snapshot.terminal_violation_norm = 0.05;
+    snapshot.amplitude_violation_norm = 0.1 / 0.55;
     const bool increased3 = loop.update(snapshot, 100.0, &multipliers);
     EXPECT_FALSE(increased3);
     EXPECT_DOUBLE_EQ(loop.mu(), 400.0);
@@ -715,45 +605,46 @@ TEST(AlOuterLoopTest, MuGrowthClippedAtMuMax) {
     EXPECT_DOUBLE_EQ(multipliers.terminal_mu(0), 1e6);
 }
 
-// 测试幅值组的独立 μ 上限：幅值组增长封顶 amplitude_mu_max（终端组仍可
-// 到全局 μ_max）——长视窗死亡螺旋由两组共用同一 μ_max 的指数攀升驱动；
-// 幅值组独立封顶后 λ 按 μ·g 持续累积（AL 的本职机制，罚中心逐轮内移），
-// 内层 Riccati 不再被无界罚权重推入病态。amplitude_mu_max 默认等于
-// mu_max（既有行为不变），且不得小于幅值初始罚权重
-TEST(AlOuterLoopTest, AmplitudeGroupHasIndependentMuCap) {
+// 逐元素幅值罚参数（N1）：启用后 5N 个幅值约束元素各自维护 μ_j——
+// 仅本元素违反未充分下降才提升（逐元素封顶全局 μ_max）；λ 更新按逐
+// 元素 μ_j 累积；muAmplitude 返回全元素最大值（病态条件驱动量）
+TEST(AlOuterLoopTest, PerElementGatingGrowsOnlyViolatingElements) {
     AlOuterLoopConfig config;
-    config.amplitude_mu_initial = 1000.0;
-    config.amplitude_mu_max = 1e4;
+    config.amplitude_mu_per_element = true;
+    config.amplitude_mu_initial = 1.0;
+    config.mu_max = 100.0;  // 封顶验证：逐元素上限统一为全局 μ_max
     AlOuterLoop loop(config, DdpCostConfig{});
     auto multipliers = loop.makeInitialMultipliers(1);
-    // 首轮：标定（μ_term=400），记录基线违反度；幅值违反 0.3
     AlConstraintSnapshot snapshot;
     snapshot.amplitude_g =
         Eigen::VectorXd::Constant(DDP_AMPLITUDE_CONSTRAINT_DIM, -1.0);
+    snapshot.amplitude_g(DDP_AMP_V) = 0.5;
     snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.3;
     snapshot.terminal_c << 0.5, 0.0, 0.0, 0.0, 0.0;
+    snapshot.terminal_violation_norm = 0.5;
+    snapshot.amplitude_violation_norm = 1.0;
+    // 首轮：λ 按 μ=1 累积（λ_v=0.5），首轮只记录不增长
     loop.update(snapshot, 100.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.mu(), 400.0);
-    EXPECT_DOUBLE_EQ(loop.muAmplitude(), 1000.0);
-    // 次轮：幅值违反停滞（0.29 > 0.9·0.3）→ μ_amp 1000→1e4（未触顶）；
-    // 终端充分下降不增长
-    snapshot.terminal_c << 0.1, 0.0, 0.0, 0.0, 0.0;
-    snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.29;
+    for (int i = 0; i < DDP_AMPLITUDE_CONSTRAINT_DIM; ++i) {
+        EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(i), 1.0) << "i=" << i;
+    }
+    // 次轮：v 违反上升（0.5→0.55）、δ 违反下降（0.3→0.1）→ 仅 v 的
+    // μ 1→10，λ_v 按 μ=1 再累积 0.55（合计 1.05）
+    snapshot.amplitude_g(DDP_AMP_V) = 0.55;
+    snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.1;
     loop.update(snapshot, 100.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.muAmplitude(), 10000.0);
-    // 第三轮：幅值违反仍停滞 → min(φ·1e4, 1e4) 钉在独立上限 1e4
-    // （全局 μ_max=1e6 不约束幅值组）；终端组违反停滞则继续增长
-    snapshot.amplitude_g(DDP_AMP_DELTA_POS) = 0.28;
-    snapshot.terminal_c << 0.095, 0.0, 0.0, 0.0, 0.0;
+    EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(DDP_AMP_V), 10.0);
+    EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(DDP_AMP_DELTA_POS), 1.0);
+    EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(DDP_AMP_A), 1.0);
+    EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(DDP_AMP_OMEGA), 1.0);
+    EXPECT_DOUBLE_EQ(loop.muAmplitude(), 10.0);
+    // 第三轮：v 违反继续上升（0.55→0.6）→ μ 10→100（逐元素封顶）；
+    // λ_v 按 μ=10 累积 10·0.6（合计 7.05）
+    snapshot.amplitude_g(DDP_AMP_V) = 0.6;
     loop.update(snapshot, 100.0, &multipliers);
-    EXPECT_DOUBLE_EQ(loop.muAmplitude(), 10000.0);
-    EXPECT_DOUBLE_EQ(loop.mu(), 4000.0);
-    EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(0), 10000.0);
-    // 非法配置：独立上限小于幅值初始罚权重 → 构造拒绝
-    AlOuterLoopConfig bad;
-    bad.amplitude_mu_initial = 1000.0;
-    bad.amplitude_mu_max = 100.0;
-    EXPECT_THROW(AlOuterLoop(bad, DdpCostConfig{}), std::invalid_argument);
+    EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(DDP_AMP_V), 100.0);
+    EXPECT_DOUBLE_EQ(multipliers.amplitude_lambda(DDP_AMP_V),
+                     0.5 + 0.55 + 10.0 * 0.6);
 }
 
 // 测试联合终止判据：终点双指标 + 状态不等式违反度 + 缺陷范数三类
@@ -829,6 +720,21 @@ TEST(AlOuterLoopTest, UpdateRejectsMismatchedMultiplierSizes) {
     multipliers.amplitude_lambda.resize(3);
     EXPECT_THROW(loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers),
                  std::invalid_argument);
+}
+
+// 测试初始乘子的幅值罚广播：全部 5N 个分量共用同一初始 μ。触发原因是
+// 乘子按 5 元素周期布局，尺寸或起算值错位会静默改变全部约束的硬化速度。
+// 预期行为：每个分量都等于配置的幅值初始罚权重
+TEST(AlOuterLoopTest, MakeInitialMultipliersBroadcastsAmplitudeMu) {
+    AlOuterLoopConfig config;
+    config.amplitude_mu_initial = 7.0;
+    AlOuterLoop loop(config, DdpCostConfig{});
+    const auto multipliers = loop.makeInitialMultipliers(3);
+    ASSERT_EQ(multipliers.amplitude_mu.size(),
+              3 * DDP_AMPLITUDE_CONSTRAINT_DIM);
+    for (Eigen::Index i = 0; i < multipliers.amplitude_mu.size(); ++i) {
+        EXPECT_DOUBLE_EQ(multipliers.amplitude_mu(i), 7.0);
+    }
 }
 
 }  // namespace
