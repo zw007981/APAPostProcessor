@@ -51,6 +51,9 @@ struct DdpPostStageConfig {
     double control_overshoot_tol{0.3};
     // 阶段二跟踪权重地板：深退火时防精化因跟踪过弱脱离热启动邻域
     double stage_two_min_tracking_weight{0.0};
+    // true=阶段一末轮跟踪权重已退火到地板时跳过阶段二：深退火
+    // 收尾后精化驱动力耗尽，阶段二无收益或负收益；默认 false
+    bool skip_stage_two_when_weight_exhausted{false};
     // 校验配置
     TrajectoryValidationConfig validation{};
     DdpPostStageConfig() { validation.max_terminal_heading_error_deg = 1.5; }

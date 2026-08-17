@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "core/DDP/bicycle_dynamics.h"
@@ -131,8 +132,11 @@ void BM_MsIlqrNonlinearRollout(benchmark::State& state) {
     benchmark::DoNotOptimize(success);
     solver.linearRollout();
     for (auto _ : state) {
+        // 第 5 参为 merit 早停阈值：取正无穷禁用 ESDF 早停，压测
+        // 完整非线性 rollout 路径（本 bench 无 ESDF 约束，阈值无影响）
         double cost = solver.nonlinearRollout(
-            0.8, problem.reference, problem.multipliers, problem.input);
+            0.8, problem.reference, problem.multipliers, problem.input,
+            std::numeric_limits<double>::infinity());
         benchmark::DoNotOptimize(cost);
     }
 }

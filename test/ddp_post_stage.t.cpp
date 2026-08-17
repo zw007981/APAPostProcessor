@@ -1216,6 +1216,91 @@ TEST(DdpPostStageTest, StageTwoTrackingWeightFloorApplies) {
                      4.0 * stage_one_final_weight);
 }
 
+// 权重耗尽跳过正例：地板设到极大值使任何末轮跟踪权重都判「耗尽」，
+// 阶段一候选合法即跳过阶段二，状态 SUCCESS_STAGE_ONE_ONLY
+TEST(DdpPostStageTest, SkipStageTwoWhenWeightExhausted) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED)
+        << "outer=" << stage_one.report.outer_iterations;
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = 1.85;
+    goal.y = 0.0;
+    goal.theta = 0.0;
+    DdpPostStageConfig skip_config;
+    skip_config.skip_stage_two_when_weight_exhausted = true;
+    skip_config.stage_two_min_tracking_weight = 1e9;
+    DdpPostStage skip_post_stage(skip_config, &fixture.reference_builder,
+                                 &fixture.solver, MakeVehicleParams());
+    const auto skipped = skip_post_stage.run(path, reference, stage_one, goal,
+                                             esdf_map, footprint_model);
+    EXPECT_EQ(skipped.status, DdpPostStageStatus::SUCCESS_STAGE_ONE_ONLY);
+    EXPECT_FALSE(skipped.stage_two.has_value());
+    EXPECT_FALSE(skipped.used_fallback);
+    EXPECT_FALSE(skipped.trajectory.empty());
+}
+
+// 权重耗尽跳过反例：地板 0（默认）时末轮权重（退火几何衰减恒正）
+// 恒高于地板 → 判据不满足、继续阶段二（SUCCESS + stage_two 在场）
+TEST(DdpPostStageTest, WeightNotExhaustedRunsStageTwo) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED)
+        << "outer=" << stage_one.report.outer_iterations;
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = 1.85;
+    goal.y = 0.0;
+    goal.theta = 0.0;
+    DdpPostStageConfig keep_config;
+    keep_config.skip_stage_two_when_weight_exhausted = true;
+    DdpPostStage keep_stage(keep_config, &fixture.reference_builder,
+                            &fixture.solver, MakeVehicleParams());
+    const auto kept = keep_stage.run(path, reference, stage_one, goal,
+                                     esdf_map, footprint_model);
+    EXPECT_EQ(kept.status, DdpPostStageStatus::SUCCESS);
+    EXPECT_TRUE(kept.stage_two.has_value());
+}
+
+// 阶段一候选不合法时不得跳过：goal 放到参考末端之外使阶段一候选
+// 终点门失败（trajectory 无值），即使权重耗尽判据成立也必须进入
+// 阶段二（stage_two 在场）；阶段二同样过不了终点门，最终两候选
+// 均不合法 → VALIDATION_FAILED 回退（绝不输出非法候选）
+TEST(DdpPostStageTest, WeightExhaustedDoesNotSkipIllegalStageOne) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const DdpReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaDdpStatus::CONVERGED)
+        << "outer=" << stage_one.report.outer_iterations;
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const VehicleFootprintModel footprint_model(MakeVehicleParams(), 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = 5.0;
+    goal.y = 0.0;
+    goal.theta = 0.0;
+    DdpPostStageConfig skip_config;
+    skip_config.skip_stage_two_when_weight_exhausted = true;
+    skip_config.stage_two_min_tracking_weight = 1e9;
+    DdpPostStage skip_post_stage(skip_config, &fixture.reference_builder,
+                                 &fixture.solver, MakeVehicleParams());
+    const auto result = skip_post_stage.run(path, reference, stage_one, goal,
+                                            esdf_map, footprint_model);
+    EXPECT_EQ(result.status, DdpPostStageStatus::VALIDATION_FAILED);
+    EXPECT_TRUE(result.used_fallback);
+    EXPECT_TRUE(result.stage_two.has_value());
+}
+
 // 保留换挡场景全链路：「前进 1.0 → 倒退 2.0」——后处理恢复 2 个 maneuver，
 // 阶段二门控重解后插入驻留（总时长相应增加、驻留段 |v|≤v_dwell、时间戳
 // 严格单调），六项校验全过，maneuver 数不增

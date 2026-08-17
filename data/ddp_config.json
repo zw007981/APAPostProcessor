@@ -18,7 +18,8 @@
         }
     },
     "post_stage": {
-        "stage_two_min_tracking_weight": 0.015
+        "stage_two_min_tracking_weight": 0.015,
+        "skip_stage_two_when_weight_exhausted": true
     },
     "dual_candidate_select": true,
     "rs_shortcut": {

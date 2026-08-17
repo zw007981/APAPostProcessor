@@ -119,14 +119,40 @@ DdpCostEvaluation DdpCostEvaluator::evaluate(
     }
     DdpCostEvaluation result;
     result.stages.resize(num_poses);
+    // 阶段 A：非 ESDF 项（平滑/跟踪/幅值 AL/门控）逐阶段求值
     for (std::size_t k = 0; k < num_steps; ++k) {
         evaluateRunningStage(k, reference, states, controls, multipliers, input,
                              &result.stages[k]);
+    }
+    evaluateTerminalStage(reference, states, multipliers,
+                          &result.stages[num_steps]);
+    // 廉价小计按全量求值的固定顺序累加（阶段 0..N-1 后加终端阶段）
+    for (std::size_t k = 0; k <= num_steps; ++k) {
         result.total_cost += result.stages[k].totalCost();
     }
-    evaluateTerminalStage(reference, states, multipliers, input.esdf_scale,
-                          &result.stages[num_steps]);
-    result.total_cost += result.stages[num_steps].totalCost();
+    // 线搜索早停：ESDF 代价恒非负 ⟹ 廉价小计是完整代价的下界——
+    // 小计已超阈值时完整代价必然也超，ESDF 求值整段跳过
+    if (result.total_cost > input.screen_cost_threshold) {
+        result.esdf_screened_out = true;
+        return result;
+    }
+    // 阶段 B：ESDF 项按阶段顺序补入（每阶段「先廉价后 ESDF」的累加
+    // 顺序与全量求值路径一致，接受路径的数值逐位不变）
+    for (std::size_t k = 0; k < num_steps; ++k) {
+        if (esdf_constraint_ != nullptr && esdf_constraint_->isSampled(k)) {
+            accumulateEsdfStage(states[k], input.esdf_scale, &result.stages[k]);
+        }
+    }
+    // 终端阶段恒评估 ESDF（终点避障不抽样）
+    if (esdf_constraint_ != nullptr) {
+        accumulateEsdfStage(states[num_steps], input.esdf_scale,
+                            &result.stages[num_steps]);
+    }
+    // 完整总代价按同一固定顺序重算
+    result.total_cost = 0.0;
+    for (std::size_t k = 0; k <= num_steps; ++k) {
+        result.total_cost += result.stages[k].totalCost();
+    }
     return result;
 }
 
@@ -175,19 +201,20 @@ void DdpCostEvaluator::evaluateRunningStage(
     if (input.gating_plan != nullptr) {
         accumulateGatingConstraints(k, x, multipliers, *input.gating_plan, out);
     }
-    // ESDF 双 margin 惩罚：按 stride 时间轴抽样
-    if (esdf_constraint_ != nullptr && esdf_constraint_->isSampled(k)) {
-        const auto esdf = esdf_constraint_->evaluate(x(DDP_IDX_X), x(DDP_IDX_Y),
-                                                     x(DDP_IDX_THETA));
-        out->cost_esdf += input.esdf_scale * esdf.cost;
-        out->lx += input.esdf_scale * esdf.gradient;
-        out->lxx += input.esdf_scale * esdf.hessian;
-    }
+}
+
+void DdpCostEvaluator::accumulateEsdfStage(
+    const DdpState& x, double esdf_scale, DdpStageCostDerivatives* out) const {
+    const auto esdf = esdf_constraint_->evaluate(
+        x(DDP_IDX_X), x(DDP_IDX_Y), x(DDP_IDX_THETA));
+    out->cost_esdf += esdf_scale * esdf.cost;
+    out->lx += esdf_scale * esdf.gradient;
+    out->lxx += esdf_scale * esdf.hessian;
 }
 
 void DdpCostEvaluator::evaluateTerminalStage(
     const DdpReference& reference, const DdpAlignedVec<DdpState>& states,
-    const DdpCostMultiplierState& multipliers, double esdf_scale,
+    const DdpCostMultiplierState& multipliers,
     DdpStageCostDerivatives* out) const {
     // 显式清零：防御调用方复用输出缓冲的场景（当前 evaluate 总是给零值阶段）
     *out = DdpStageCostDerivatives{};
@@ -207,14 +234,6 @@ void DdpCostEvaluator::evaluateTerminalStage(
     for (int i = 0; i < DDP_TERMINAL_CONSTRAINT_DIM; ++i) {
         out->lx(kRows[i]) += scale(i);
         out->lxx(kRows[i], kRows[i]) += multipliers.terminal_mu(i);
-    }
-    // 终端阶段恒评估 ESDF（终点避障不抽样）
-    if (esdf_constraint_ != nullptr) {
-        const auto esdf = esdf_constraint_->evaluate(x(DDP_IDX_X), x(DDP_IDX_Y),
-                                                     x(DDP_IDX_THETA));
-        out->cost_esdf += esdf_scale * esdf.cost;
-        out->lx += esdf_scale * esdf.gradient;
-        out->lxx += esdf_scale * esdf.hessian;
     }
 }
 

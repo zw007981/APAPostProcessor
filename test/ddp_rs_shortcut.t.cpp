@@ -2,9 +2,9 @@
 // 短接消除、碰撞守卫回滚、长度增长守卫回滚、端点保持、关闭时逐位透传、
 // 配置校验。
 // 与前两级几何前处理的本质区别：cusp 剪枝与曲率投影都严格保持前端给出
-// 的同伦类（换挡点位置由前端钉死），本级主动更换同伦类——用有界曲率的
-// RS 曲线重连路径上的两点，因此每次替换都必须由逐点 ESDF 校验与长度
-// 增长上限兜底。
+// 的同伦类（换挡点位置由前端钉死），本级主动更换同伦类——以 maneuver
+// 边界为节点做动态规划全局择优，用有界曲率的 RS 曲线直连节点对，因此
+// 每次替换都必须由逐点 ESDF 校验与长度增长上限兑底。
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -55,9 +55,7 @@ DdpRsShortcutConfig MakeConfig(double cap_ratio) {
     config.cap_ratio = cap_ratio;
     config.collision_margin = 0.02;
     config.max_length_growth = 1.0;
-    config.index_stride = 5;
     config.sample_dist = 0.05;
-    config.max_rounds = 4;
     return config;
 }
 
@@ -167,7 +165,7 @@ TEST(DdpRsShortcutTest, ShortcutCurvatureRespectsCap) {
 }
 
 // 测试碰撞守卫：在 U 形绕行的中间空旷区横一道墙。墙距两条臂均 10 m、
-// 距弯道 6 m，因此原路径仍无碰撞；而空旷环境下会被贪心选中的那条
+// 距弯道 6 m，因此原路径仍无碰撞；而空旷环境下会被选中的那条
 // 穿中间区短接恰好撞墙。守卫失效时输出将直接携带碰撞，因此这里断言
 // 的是真实契约——短接不得引入新碰撞，而不是“不允许存在任何短接”
 TEST(DdpRsShortcutTest, CollidingShortcutIsRejected) {
@@ -203,8 +201,8 @@ TEST(DdpRsShortcutTest, LengthGrowthGuardBoundsOutputLength) {
     EXPECT_LE(output.length(), input.length() + 1e-9);
 }
 
-// 测试关闭时逐位透传：cap_ratio=0 与 max_rounds=0 都必须让本级完全
-// 无副作用，这是「新机制默认关闭且关闭时位一致」的硬要求
+// 测试关闭时逐位透传：cap_ratio=0 必须让本级完全无副作用，这是
+// 「新机制默认关闭且关闭时位一致」的硬要求
 TEST(DdpRsShortcutTest, DisabledConfigPassesPathThrough) {
     const Path input = BuildDetourPath();
     const ESDFMap map = MakeEmptyMap();
@@ -214,16 +212,10 @@ TEST(DdpRsShortcutTest, DisabledConfigPassesPathThrough) {
         ShortcutShiftPoints(input, map, footprint, kWheelbase, kDeltaMax, off);
     EXPECT_EQ(passthrough.size(), input.size());
     EXPECT_EQ(passthrough.numManeuvers(), input.numManeuvers());
-    DdpRsShortcutConfig zero_rounds = MakeConfig(0.9);
-    zero_rounds.max_rounds = 0;
-    const Path unchanged = ShortcutShiftPoints(input, map, footprint,
-                                               kWheelbase, kDeltaMax,
-                                               zero_rounds);
-    EXPECT_EQ(unchanged.size(), input.size());
 }
 
-// 测试配置校验：比例越界、负裕度、非正扫描步长/采样间距、非正车辆参数
-// 都必须显式抛出，静默降级会让上层以为短接已生效
+// 测试配置校验：比例越界、负裕度、非正采样间距、非正车辆参数都必须
+// 显式抛出，静默降级会让上层以为短接已生效
 TEST(DdpRsShortcutTest, InvalidConfigThrows) {
     const Path input = BuildDetourPath();
     const ESDFMap map = MakeEmptyMap();
@@ -237,11 +229,6 @@ TEST(DdpRsShortcutTest, InvalidConfigThrows) {
     EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, kWheelbase,
                                      kDeltaMax, bad_margin),
                  std::invalid_argument);
-    DdpRsShortcutConfig bad_stride = MakeConfig(0.9);
-    bad_stride.index_stride = 0;
-    EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, kWheelbase,
-                                     kDeltaMax, bad_stride),
-                 std::invalid_argument);
     DdpRsShortcutConfig bad_sample = MakeConfig(0.9);
     bad_sample.sample_dist = 0.0;
     EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, kWheelbase,
@@ -250,6 +237,49 @@ TEST(DdpRsShortcutTest, InvalidConfigThrows) {
     EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, 0.0, kDeltaMax,
                                      MakeConfig(0.9)),
                  std::invalid_argument);
+}
+
+// 测试尊重节点出车方向：输入首段为前进，任何被采纳的 RS 直连都必须
+// 以前进起步，输出首段方向恒为前进。触发原因是节点出车方向约束是
+// 「换挡节点不得凭空变向」语义的载体
+TEST(DdpRsShortcutTest, RespectsNodeDepartureDirection) {
+    const Path input = BuildDetourPath();
+    const ESDFMap map = MakeEmptyMap();
+    const VehicleFootprintModel footprint = MakeFootprint();
+    const Path output = ShortcutShiftPoints(input, map, footprint, kWheelbase,
+                                            kDeltaMax, MakeConfig(0.9));
+    ASSERT_EQ(output.getManeuvers().front().direction, Direction::FORWARD);
+    EXPECT_NEAR(output.front().x, input.front().x, 1e-9);
+    EXPECT_NEAR(output.front().theta, input.front().theta, 1e-9);
+}
+
+// 测试重构保持终点位姿：终链为多段（含尖点）RS 时，回溯重构必须保持
+// 连接段内部 maneuver 的顺序——整表 reverse 会把段内顺序一并反转、
+// 终点漂移到中间尖点处，下游以短接终点为目标的收敛检查会全部失效。
+// 预期行为：输出终点与输入终点逐位一致
+// 一并反转、终点漂移到中间尖点处，下游以短接终点为目标的收敛检查
+// 会全部失效。预期行为：输出终点与输入终点逐位一致
+TEST(DdpRsShortcutTest, ReconstructionPreservesTerminalPose) {
+    // 前进 10 m 后倒回 (0,0.5)：唯一优于原路径的直连是以尖点收尾的
+    // 前进起步 RS 曲线（纯横向偏移构型下同向前进词族不可行）
+    Path input;
+    input.addPoint({0.0, 0.0, 0.0});
+    AppendLine(&input, 10.0, 0.0, 0.0);
+    AppendLine(&input, 0.0, 0.5, 0.0);
+    input.finalize();
+    ASSERT_EQ(input.numManeuvers(), 2u);
+    DdpRsShortcutConfig config = MakeConfig(1.0);
+    config.max_length_growth = 1.0;
+    const ESDFMap map = MakeEmptyMap();
+    const VehicleFootprintModel footprint = MakeFootprint();
+    const Path output = ShortcutShiftPoints(input, map, footprint, kWheelbase,
+                                            kDeltaMax, config);
+    // 前提校验：确实用 RS 直连替换了原路径（长度显著缩短），
+    // 否则本用例退化为原样透传、测不到重构顺序
+    EXPECT_LT(output.length(), input.length() - 0.5);
+    EXPECT_NEAR(output.back().x, input.back().x, 1e-9);
+    EXPECT_NEAR(output.back().y, input.back().y, 1e-9);
+    EXPECT_NEAR(output.back().theta, input.back().theta, 1e-9);
 }
 
 }  // namespace

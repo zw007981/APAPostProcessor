@@ -73,6 +73,8 @@ void AlOuterLoop::reset() {
     prev_terminal_violation_ = -1.0;
     prev_amplitude_violation_ = -1.0;
     mu_increase_count_ = 0;
+    last_terminal_growth_ = false;
+    last_amplitude_growth_ = false;
 }
 
 double AlOuterLoop::trackingWeight() const {
@@ -305,6 +307,8 @@ bool AlOuterLoop::update(const AlConstraintSnapshot& snapshot, double base_cost,
     if (increase_terminal || amplitude_grew) {
         ++mu_increase_count_;
     }
+    last_terminal_growth_ = increase_terminal;
+    last_amplitude_growth_ = amplitude_grew;
     prev_terminal_violation_ = terminal_violation;
     prev_amplitude_violation_ = amplitude_violation;
     // μ 写回乘子状态（下一轮内层即以新罚权重求解）

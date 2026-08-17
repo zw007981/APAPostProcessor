@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "../util/logger.h"
+#include "../util/omp_threads.h"
 
 namespace apa_post_processor {
 namespace {
@@ -255,8 +256,7 @@ struct BSplineObjective {
         // omp_get_max_threads()，而是按物理核心数的 1/4 动态选择线程数，
         // 并保证至少 2 线程（若机器支持）、不超过 omp_get_max_threads()。
         // 该策略在不同平台间更可移植，后续可基于多平台 benchmark 数据继续调优。
-        const int n_threads = std::min(omp_get_max_threads(),
-                                       std::max(2, omp_get_max_threads() / 4));
+        const int n_threads = EffectiveOmpThreads(4, 2);
         std::vector<std::vector<Eigen::Vector2d>> thread_collision_grads(
             static_cast<std::size_t>(n_threads),
             std::vector<Eigen::Vector2d>(control_point_count,

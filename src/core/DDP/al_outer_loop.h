@@ -31,9 +31,8 @@ struct AlOuterLoopConfig {
     double first_round_mu{1.0};
     // 幅值不等式初始罚权重
     double amplitude_mu_initial{1.0};
-    // 逐元素门控：各约束独立维护 μ_j，避免单点顽固违反广播到全局
-    // 阶段一恒 false（四数据集证伪），阶段二独立开关（违反局域在接缝邻域）
-    bool amplitude_mu_per_element{false};
+    // true=阶段一逐元素门控：仅对顽固违反元素加压，其余保持轻量
+    bool amplitude_mu_per_element{true};
     // 阶段二逐元素门控开关
     bool amplitude_mu_per_element_stage_two{false};
     // μ⁰ 标定小量 ε_μ
@@ -109,6 +108,10 @@ class AlOuterLoop {
     double mu() const { return mu_terminal_; }
     // 幅值组当前罚权重（逐元素模式取最大元素，标量模式取标量值）
     double muAmplitude() const;
+    // 上一轮更新中终点组是否触发增长（提前退出判据消费）
+    bool wantedTerminalGrowth() const { return last_terminal_growth_; }
+    // 上一轮更新中幅值组是否触发增长（提前退出判据消费）
+    bool wantedAmplitudeGrowth() const { return last_amplitude_growth_; }
     // 标定后的 μ⁰（首轮后生效）
     double calibratedMu() const { return mu_calibrated_; }
     // 累计 μ 增长次数
@@ -167,5 +170,9 @@ class AlOuterLoop {
     double prev_amplitude_violation_{-1.0};
     // μ 增长计数
     std::int64_t mu_increase_count_{0};
+    // 上一轮更新中终点组是否触发增长（门控判定结果）
+    bool last_terminal_growth_{false};
+    // 上一轮更新中幅值组是否触发增长（门控判定结果）
+    bool last_amplitude_growth_{false};
 };
 }  // namespace apa_post_processor

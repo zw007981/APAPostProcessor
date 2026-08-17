@@ -6,17 +6,42 @@
 #include <utility>
 
 namespace apa_post_processor {
+bool EscalationStuck(const EscalationState& s) {
+    if (!s.inner_stationary) {
+        return false;
+    }
+    if (!s.terminal_ok && !(s.terminal_wanted && s.terminal_pinned)) {
+        return false;
+    }
+    if (!s.inequality_ok && !(s.amplitude_wanted && s.amplitude_pinned)) {
+        return false;
+    }
+    if (s.has_gating && !s.gating_ok &&
+        !(s.gating_wanted && s.gating_pinned)) {
+        return false;
+    }
+    return true;
+}
 ApaDdpSolver::ApaDdpSolver(ApaDdpSolverConfig config,
                            const BicycleDynamics* dynamics,
                            const DdpCostEvaluator* cost_evaluator)
     : config_(std::move(config)),
       dynamics_(dynamics),
       cost_evaluator_(cost_evaluator),
-      outer_loop_(config_.outer, config_.cost),
-      inner_solver_(std::make_unique<MsIlqrSolver>(config_.inner, dynamics_,
-                                                   cost_evaluator_)) {
+      outer_loop_(config_.outer, config_.cost) {
+    resetInnerSolver();
     if (dynamics_ == nullptr || cost_evaluator_ == nullptr) {
         throw std::invalid_argument("ApaDdpSolver: 动力学与代价求值层必须非空");
+    }
+}
+
+void ApaDdpSolver::resetInnerSolver() {
+    if (config_.inner.use_virtual_control) {
+        inner_solver_ = std::make_unique<MsIlqrSolverVirtualControl>(
+            config_.inner, dynamics_, cost_evaluator_);
+    } else {
+        inner_solver_ = std::make_unique<MsIlqrSolver>(
+            config_.inner, dynamics_, cost_evaluator_);
     }
 }
 
@@ -31,7 +56,8 @@ MsIlqrResult ApaDdpSolver::solveInnerResilient(
     const DdpReference& reference, AlOuterLoop* outer,
     DdpCostMultiplierState* multipliers, const DdpCostInput& cost_input,
     const DdpAlignedVec<DdpState>& warm_states,
-    const DdpAlignedVec<DdpControl>& warm_controls, double mu_round,
+    const DdpAlignedVec<DdpControl>& warm_controls,
+    DdpAlignedVec<DdpState>* virtual_controls, double mu_round,
     ApaDdpReport* report) {
     const auto raise_merit_floor = [&]() {
         if (config_.inner.merit_mu_al_ratio > 0.0) {
@@ -40,19 +66,32 @@ MsIlqrResult ApaDdpSolver::solveInnerResilient(
                 MeritAlHook(mu_round, outer->muAmplitude()));
         }
     };
+    // 虚拟控制热启动：空数组让内层反解初始化（首轮 rollout 复现热启动
+    // 轨迹、初始缺陷恒零），非空则逐轮续接
+    const DdpAlignedVec<DdpState>* w_in =
+        config_.inner.use_virtual_control && virtual_controls != nullptr &&
+                !virtual_controls->empty()
+            ? virtual_controls
+            : nullptr;
+    const auto write_back = [&]() {
+        if (config_.inner.use_virtual_control && virtual_controls != nullptr) {
+            *virtual_controls = inner_solver_->virtualControls();
+        }
+    };
     raise_merit_floor();
     MsIlqrResult result = inner_solver_->solve(
-        reference, *multipliers, cost_input, warm_states, warm_controls);
+        reference, *multipliers, cost_input, warm_states, warm_controls, w_in);
     if (result.status != MsIlqrStatus::REGULARIZATION_OVERFLOW) {
+        write_back();
         return result;
     }
     // 冷重启兜底：溢出部分源于陈旧 QP 活动集热启动与衰减到地板的
-    inner_solver_ = std::make_unique<MsIlqrSolver>(config_.inner, dynamics_,
-                                                   cost_evaluator_);
+    resetInnerSolver();
     ++report->inner_restarts;
     raise_merit_floor();
     result = inner_solver_->solve(reference, *multipliers, cost_input,
-                                  warm_states, warm_controls);
+                                  warm_states, warm_controls, w_in);
+    write_back();
     return result;
 }
 
@@ -60,7 +99,8 @@ void ApaDdpSolver::runOuterLoop(
     const DdpReference& reference, AlOuterLoop* outer,
     DdpCostMultiplierState* multipliers,
     const DdpAlignedVec<DdpState>& warm_start_states,
-    const DdpAlignedVec<DdpControl>& warm_start_controls, int max_rounds,
+    const DdpAlignedVec<DdpControl>& warm_start_controls,
+    DdpAlignedVec<DdpState>* warm_virtual_controls, int max_rounds,
     double tracking_weight, const std::vector<bool>* anneal_exempt_mask,
     const DdpGatingPlan* gating_plan, ApaDdpReport* report,
     double* out_max_sign_violation, double* out_max_dwell_violation,
@@ -79,6 +119,8 @@ void ApaDdpSolver::runOuterLoop(
     // 门控状态（仅阶段二使用）
     double gating_mu = config_.gating_mu_initial;
     double prev_gating_violation = -1.0;
+    // 升级耗尽连续轮计数（阶段二提前退出判据的观测窗）
+    int exhausted_streak = 0;
     // 热启动轨迹
     auto warm_states = warm_start_states;
     auto warm_controls = warm_start_controls;
@@ -93,12 +135,19 @@ void ApaDdpSolver::runOuterLoop(
         const double mu_round = outer->mu();
         MsIlqrResult inner_result = solveInnerResilient(
             reference, outer, multipliers, cost_input, warm_states,
-            warm_controls, mu_round, report);
+            warm_controls, warm_virtual_controls, mu_round, report);
         report->total_inner_iterations += inner_result.iterations;
         report->domain_guard_rejections += inner_result.domain_guard_rejections;
         if (inner_result.status == MsIlqrStatus::REGULARIZATION_OVERFLOW) {
             report->status = ApaDdpStatus::INNER_SOLVER_FAILED;
             break;
+        }
+        // 虚拟控制残余 ‖w‖∞（开关关闭时为 0）：增广问题收敛判据的附加项
+        double w_inf = 0.0;
+        if (config_.inner.use_virtual_control) {
+            for (const auto& w : inner_solver_->virtualControls()) {
+                w_inf = std::max(w_inf, w.cwiseAbs().maxCoeff());
+            }
         }
         const auto snapshot = outer->measure(
             reference, inner_solver_->states(), inner_solver_->defects());
@@ -118,12 +167,15 @@ void ApaDdpSolver::runOuterLoop(
         record.outer_index = round;
         record.tracking_weight = cost_input.tracking_weight;
         record.mu = mu_round;
+        record.mu_amplitude = multipliers->amplitude_mu.maxCoeff();
+        record.mu_gating = gating_mu;
         record.base_cost = base_cost;
         record.augmented_cost = inner_result.final_cost;
         record.terminal_position_error = snapshot.terminal_position_error;
         record.terminal_heading_error_deg = snapshot.terminal_heading_error_deg;
         record.max_amplitude_violation = snapshot.max_amplitude_violation;
         record.defect_norm_inf = snapshot.defect_norm_inf;
+        record.virtual_control_norm_inf = w_inf;
         record.inner_status = inner_result.status;
         record.inner_iterations = inner_result.iterations;
         const auto check = outer->checkTermination(snapshot);
@@ -138,6 +190,7 @@ void ApaDdpSolver::runOuterLoop(
             snapshot.terminal_heading_error_deg;
         report->max_amplitude_violation = snapshot.max_amplitude_violation;
         report->defect_norm_inf = snapshot.defect_norm_inf;
+        report->virtual_control_norm_inf = w_inf;
         report->final_cost = base_cost;
         report->terminal_ok = check.terminal_ok;
         report->inequality_ok = check.inequality_ok;
@@ -156,7 +209,11 @@ void ApaDdpSolver::runOuterLoop(
         if (out_gating_ok != nullptr) {
             *out_gating_ok = gating_ok;
         }
-        if (check.converged() && gating_ok) {
+        // 增广路径不设额外收敛判据：内层 w 稳态随对偶残差缩放、
+        // 不要求趋零（软代价权重 1/R 决定扰动量级）；外层原始三组
+        // 判据承担可行性验收，内层溢出已由上方分支拦截
+        const bool virtual_ok = true;
+        if (check.converged() && gating_ok && virtual_ok) {
             report->status = ApaDdpStatus::CONVERGED;
             report->history.push_back(std::move(record));
             break;
@@ -170,9 +227,34 @@ void ApaDdpSolver::runOuterLoop(
             outer->update(snapshot, base_cost, multipliers);
         report->history.push_back(std::move(record));
         // 阶段二专属：门控乘子更新
+        bool gating_wanted = false;
         if (has_gating) {
             updateGating(gating_snapshot, multipliers, &gating_mu,
-                         &prev_gating_violation);
+                         &prev_gating_violation, &gating_wanted);
+        }
+        // 阶段二提前退出（仅目标逐轮冻结的外层：阶段一含退火，不动点
+        // 论证不成立）：连续两轮「升级耗尽」即停——第一轮证明 μ 已无
+        // 空间且 λ 增量已注入，第二轮证明 λ 漂移也未带来 μ_gate_kappa
+        // 级下降；任何一组仍有升级空间都会复位计数，自适应于求解难度
+        if (anneal_exempt_mask == nullptr) {
+            const EscalationState state{
+                check.terminal_ok, outer->wantedTerminalGrowth(),
+                outer->mu() >= config_.outer.mu_max,
+                check.inequality_ok, outer->wantedAmplitudeGrowth(),
+                multipliers->amplitude_mu.maxCoeff() >= config_.outer.mu_max,
+                gating_ok, gating_wanted,
+                gating_mu >= config_.gating_mu_max, has_gating,
+                inner_result.status == MsIlqrStatus::CONVERGED_COST ||
+                    inner_result.status == MsIlqrStatus::CONVERGED_GRADIENT};
+            if (EscalationStuck(state)) {
+                ++exhausted_streak;
+                if (exhausted_streak >= 2) {
+                    report->status = ApaDdpStatus::ESCALATION_EXHAUSTED;
+                    break;
+                }
+            } else {
+                exhausted_streak = 0;
+            }
         }
         // δ 投影热启动
         warm_states = inner_solver_->states();
@@ -185,6 +267,8 @@ void ApaDdpSolver::runOuterLoop(
     }
     report->mu_initial_calibrated = outer->calibratedMu();
     report->mu_final = outer->mu();
+    report->mu_amplitude_final = multipliers->amplitude_mu.maxCoeff();
+    report->mu_gating_final = gating_mu;
 }
 
 ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
@@ -210,8 +294,10 @@ ApaDdpStageOneResult ApaDdpSolver::solveStageOne(
     outer_loop_.reset();
     auto multipliers = outer_loop_.makeInitialMultipliers(num_steps);
     const auto exempt_mask = outer_loop_.makeAnnealExemptMask(reference);
+    DdpAlignedVec<DdpState> warm_virtual;
     runOuterLoop(reference, &outer_loop_, &multipliers, warm_start_states,
-                 warm_start_controls, config_.outer.max_outer_iterations,
+                 warm_start_controls, &warm_virtual,
+                 config_.outer.max_outer_iterations,
                  /*tracking_weight=*/0.0, &exempt_mask,
                  /*gating_plan=*/nullptr, &result.report,
                  /*out_max_sign_violation=*/nullptr,
@@ -294,8 +380,10 @@ ApaDdpStageTwoResult ApaDdpSolver::solveStageTwo(
     multipliers.gating_seam_mu.setConstant(config_.gating_mu_initial);
     multipliers.gating_dwell_mu.setConstant(config_.gating_mu_initial);
     ApaDdpStageTwoResult result;
+    DdpAlignedVec<DdpState> warm_virtual;
     runOuterLoop(reference, &outer, &multipliers, warm_states, warm_controls,
-                 config_.stage_two_max_outer_iterations, tracking_weight,
+                 &warm_virtual, config_.stage_two_max_outer_iterations,
+                 tracking_weight,
                  /*anneal_exempt_mask=*/nullptr, &gating_plan, &result.report,
                  &result.max_sign_violation, &result.max_dwell_violation,
                  &result.max_seam_speed, &result.gating_ok);
@@ -355,7 +443,8 @@ ApaDdpSolver::GatingSnapshot ApaDdpSolver::measureGating(
 bool ApaDdpSolver::updateGating(const GatingSnapshot& snapshot,
                                 DdpCostMultiplierState* multipliers,
                                 double* gating_mu,
-                                double* prev_violation) const {
+                                double* prev_violation,
+                                bool* out_wanted) const {
     if (multipliers == nullptr || gating_mu == nullptr ||
         prev_violation == nullptr ||
         multipliers->gating_sign_lambda.size() != snapshot.sign_g.size() ||
@@ -372,13 +461,18 @@ bool ApaDdpSolver::updateGating(const GatingSnapshot& snapshot,
             .cwiseMax(0.0);
     multipliers->gating_seam_lambda += *gating_mu * snapshot.seam_c;
     // 门控 μ 增长（单组门控）：首轮只记录不增长（与外层标定轮同一约定），
-    bool increased = false;
-    if (*prev_violation >= 0.0 &&
+    const bool wanted =
+        *prev_violation >= 0.0 &&
         snapshot.violation_norm >
-            config_.outer.mu_gate_kappa * *prev_violation) {
+            config_.outer.mu_gate_kappa * *prev_violation;
+    bool increased = false;
+    if (wanted) {
         *gating_mu = std::min(config_.outer.mu_growth_factor * *gating_mu,
                               config_.gating_mu_max);
         increased = true;
+    }
+    if (out_wanted != nullptr) {
+        *out_wanted = wanted;
     }
     *prev_violation = snapshot.violation_norm;
     multipliers->gating_sign_mu.setConstant(*gating_mu);

@@ -380,6 +380,8 @@ void LoadDdpConfigOverrides(const nlohmann::json& details, DdpConfig* config) {
                            &config->solver.inner.merit_mu_al_ratio);
     LoadJsonFieldIfPresent(inner, "domain_guard_margin",
                            &config->solver.inner.domain_guard_margin);
+    LoadJsonFieldIfPresent(inner, "use_virtual_control",
+                           &config->solver.inner.use_virtual_control);
     // 外层 AL 节
     const auto& outer = JsonSectionOrEmpty(solver, "outer");
     LoadJsonFieldIfPresent(outer, "max_outer_iterations",
@@ -452,7 +454,11 @@ void LoadDdpConfigOverrides(const nlohmann::json& details, DdpConfig* config) {
                            &config->post_stage.control_overshoot_tol);
     LoadJsonFieldIfPresent(post_stage, "stage_two_min_tracking_weight",
                            &config->post_stage.stage_two_min_tracking_weight);
-    // Reeds-Shepp 换挡点短接节（参考构建前的同伦类重选，默认关闭）
+    LoadJsonFieldIfPresent(
+        post_stage, "skip_stage_two_when_weight_exhausted",
+        &config->post_stage.skip_stage_two_when_weight_exhausted);
+    // Reeds-Shepp 换挡点短接节（参考构建前的同伦类重选，默认关闭；
+    // 编排为 maneuver 边界节点的动态规划全局择优）
     const auto& rs_shortcut = JsonSectionOrEmpty(details, "rs_shortcut");
     LoadJsonFieldIfPresent(rs_shortcut, "cap_ratio",
                            &config->rs_shortcut.cap_ratio);
@@ -460,12 +466,18 @@ void LoadDdpConfigOverrides(const nlohmann::json& details, DdpConfig* config) {
                            &config->rs_shortcut.collision_margin);
     LoadJsonFieldIfPresent(rs_shortcut, "max_length_growth",
                            &config->rs_shortcut.max_length_growth);
-    LoadJsonFieldIfPresent(rs_shortcut, "index_stride",
-                           &config->rs_shortcut.index_stride);
     LoadJsonFieldIfPresent(rs_shortcut, "sample_dist",
                            &config->rs_shortcut.sample_dist);
-    LoadJsonFieldIfPresent(rs_shortcut, "max_rounds",
-                           &config->rs_shortcut.max_rounds);
+    LoadJsonFieldIfPresent(rs_shortcut, "segment_fixed_cost",
+                           &config->rs_shortcut.segment_fixed_cost);
+    LoadJsonFieldIfPresent(rs_shortcut, "short_segment_weight",
+                           &config->rs_shortcut.short_segment_weight);
+    LoadJsonFieldIfPresent(rs_shortcut, "short_segment_length",
+                           &config->rs_shortcut.short_segment_length);
+    LoadJsonFieldIfPresent(rs_shortcut, "rs_timing_csv",
+                           &config->rs_shortcut.rs_timing_csv);
+    LoadJsonFieldIfPresent(rs_shortcut, "rs_timing_tag",
+                           &config->rs_shortcut.rs_timing_tag);
     // 融化开/关双候选择优（顶层字段，默认 false = 关闭）
     LoadJsonFieldIfPresent(details, "dual_candidate_select",
                            &config->dual_candidate_select);

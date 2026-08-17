@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -778,6 +779,57 @@ DdpPostStageResult DdpPostStage::run(
                      config_.prune.pivot_heading_threshold, original_path);
         return result;
     }
+    // 阶段一降级候选（阶段一解 + 修剪 + 驻留插入）的统一构造与
+    // 验证：门控开启时前置调用判断能否跳过阶段二，否则沿用原顺序
+    // 在阶段二失败后作为降级回退
+    struct StageOneCandidate {
+        // 构造条件是否满足（状态数 >=2 且参考 dt 合法）
+        bool available{false};
+        // 构造且通过合法性门时的输出轨迹（未过门则无值）
+        std::optional<Trajectory> trajectory;
+    };
+    const auto build_stage_one_candidate = [&]() {
+        StageOneCandidate cand;
+        if (stage_one_result.states.size() < 2 ||
+            stage_one_reference.dt <= 0.0) {
+            return cand;
+        }
+        cand.available = true;
+        const auto seam_indices = collectKeptSeamIndices(runs, maneuvers);
+        const auto seam_plans = buildStageOneSeamPlans(
+            stage_one_result.states, seam_indices, stage_one_reference.dt);
+        Trajectory output =
+            insertDwells(stage_one_result.states, stage_one_reference.dt,
+                         seam_plans, &result.diagnostics.seams);
+        if (validateOutput(output, stage_one_result.states,
+                           stage_one_result.controls, original_path.length(),
+                           goal, esdf_map, footprint_model,
+                           &result.diagnostics)) {
+            cand.trajectory = std::move(output);
+        }
+        return cand;
+    };
+    // 阶段一末轮跟踪权重：融化调度深退火后的实际量，阶段二精化
+    // 的驱动力来源，退火到地板后精化已无可释放的驱动力
+    const double stage_one_final_weight =
+        stage_one_result.report.history.empty()
+            ? solver_->config().cost.weight_ref_base
+            : stage_one_result.report.history.back().tracking_weight;
+    // 权重耗尽门控：末轮权重已到地板时阶段二精化无驱动力，直接
+    // 输出阶段一候选；候选未过合法性门仍须进入阶段二兜底
+    const bool weight_skip =
+        config_.skip_stage_two_when_weight_exhausted &&
+        stage_one_final_weight <= config_.stage_two_min_tracking_weight;
+    if (weight_skip) {
+        auto candidate = build_stage_one_candidate();
+        if (candidate.trajectory.has_value()) {
+            result.status = DdpPostStageStatus::SUCCESS_STAGE_ONE_ONLY;
+            result.used_fallback = false;
+            result.trajectory = std::move(*candidate.trajectory);
+            return result;
+        }
+        // 候选不过门：进入阶段二与原有降级链兜底
+    }
     // ============ 候选一：阶段二门控精化（必须重解，禁止直接拼接）====
     const Path pruned_path = ReconstructPath(maneuvers);
     DdpReference stage_two_reference;
@@ -807,10 +859,6 @@ DdpPostStageResult DdpPostStage::run(
         DdpAlignedVec<DdpControl> warm_controls;
         buildStageTwoWarmStart(pruned_path, stage_two_reference, &warm_states,
                                &warm_controls);
-        const double stage_one_final_weight =
-            stage_one_result.report.history.empty()
-                ? solver_->config().cost.weight_ref_base
-                : stage_one_result.report.history.back().tracking_weight;
         // 跟踪权重地板（默认 0 = 不启用）：深退火调度下阶段一末轮权重
         // 可能远低于精化所需的保持量级，钳到地板避免门控失稳
         const double stage_two_weight = std::max(
@@ -842,22 +890,14 @@ DdpPostStageResult DdpPostStage::run(
         }
     }
     // ============ 候选二：阶段一降级（阶段一解 + 修剪 + 驻留插入）====
-    if (stage_one_result.states.size() >= 2 && stage_one_reference.dt > 0.0) {
-        const auto seam_indices = collectKeptSeamIndices(runs, maneuvers);
-        const auto seam_plans = buildStageOneSeamPlans(
-            stage_one_result.states, seam_indices, stage_one_reference.dt);
-        Trajectory stage_one_output =
-            insertDwells(stage_one_result.states, stage_one_reference.dt,
-                         seam_plans, &result.diagnostics.seams);
-        if (validateOutput(stage_one_output, stage_one_result.states,
-                           stage_one_result.controls, original_path.length(),
-                           goal, esdf_map, footprint_model,
-                           &result.diagnostics)) {
-            result.status = DdpPostStageStatus::SUCCESS_STAGE_ONE_ONLY;
-            result.used_fallback = false;
-            result.trajectory = std::move(stage_one_output);
-            return result;
-        }
+    const auto candidate = build_stage_one_candidate();
+    if (candidate.trajectory.has_value()) {
+        result.status = DdpPostStageStatus::SUCCESS_STAGE_ONE_ONLY;
+        result.used_fallback = false;
+        result.trajectory = std::move(*candidate.trajectory);
+        return result;
+    }
+    if (candidate.available) {
         // 降级候选也不过门：两个候选均失败，以降级候选的失败门项回退
         makeFallback(&result, DdpPostStageStatus::VALIDATION_FAILED,
                      result.diagnostics.failed_check,

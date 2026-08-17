@@ -2,6 +2,8 @@
 
 #include <vector>
 
+#include "../util/omp_threads.h"
+
 namespace apa_post_processor {
 ESDFMap::ESDFMap(const GridMap& grid_map) {
     if (grid_map.getResolution() <= EPSILON) {
@@ -520,9 +522,10 @@ std::unique_ptr<SquaredDist[]> DistanceTransform::BuildSquaredDistField(
     // 大地图：把 X 扫描、转置、Y 扫描、转置回全部包进一个 OpenMP 并行域
     // 只在 BuildSquaredDistField 内部启动一次并行域，避免 4 次启动/同步开销
     // 同时预分配所有线程的局部 buffer，避免每个并行域内重复堆分配
-    const auto available_threads = omp_get_num_procs();
-    const auto max_threads = std::min(available_threads, 8);
-    const auto num_threads = std::max(1, max_threads);
+    // 线程数统一走共享策略（运行期 OMP_NUM_THREADS 上限 × 编译期
+    // 天花板）：此前按物理核数开线程、无视环境变量，车端与共居
+    // 任务抢核风险高（见 util/omp_threads.h）
+    const auto num_threads = EffectiveOmpThreads(1, 1);
 
     const auto parabola_buffer_size =
         static_cast<GridIndex>(num_threads) * static_cast<GridIndex>(max_dim);

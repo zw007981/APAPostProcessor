@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstddef>
+#include <optional>
 #include <vector>
 
 #include "pose.h"
@@ -50,9 +51,14 @@ struct RsSamplePoint {
 };
 
 // 求解连接 start 与 goal 的最短 RS 路径。
-// turning_radius 为允许的最小转弯半径 (m)，必须为正；非正值抛出
+// turning_radius 为允许的最小转弯半径 (m)，必须为正；非正值抛出。
+// start_forward 有值时约束首段有效基元的行驶方向（true = 必须前进，
+// false = 必须倒退）——换挡节点出车方向固定时使用；无约束传 nullopt
+// （缺省），行为与旧版逐位一致
 RsPath ComputeShortestReedsShepp(const Pose& start, const Pose& goal,
-                                 double turning_radius);
+                                 double turning_radius,
+                                 std::optional<bool> start_forward =
+                                     std::nullopt);
 
 // 按弧长步长 sample_dist (m) 离散 RS 路径为位姿序列（含首尾端点）。
 // path 无效或步长非正时抛出；返回的相邻点间距不超过 sample_dist

@@ -19,6 +19,13 @@ constexpr double FEASIBILITY_TOL = 1e-12;
 // 角度归一化到 [-π, π]
 double Mod2Pi(double angle) { return std::remainder(angle, 2.0 * PI); }
 
+// 角度非负判据：公式推导的规范分支要求转角非负，但 Mod2Pi 会把 +π
+// 折叠为 -π——同一转角的两种等价表示，边界处必须视为可行，否则
+// 「先倒一段再折返」这类含 ±π 转角的边界解会被误杀
+bool NonNegative(double angle) {
+    return angle >= -FEASIBILITY_TOL || angle <= -PI + FEASIBILITY_TOL;
+}
+
 // 直角坐标转极坐标，返回 (半径, 幅角)
 std::pair<double, double> Polar(double x, double y) {
     return {std::hypot(x, y), std::atan2(y, x)};
@@ -48,11 +55,11 @@ struct RsTriple {
 // L+S+L+ 型（CSC 同向，公式 8.1）
 RsTriple LpSpLp(double x, double y, double phi) {
     const auto [u, t] = Polar(x - std::sin(phi), y - 1.0 + std::cos(phi));
-    if (t < -FEASIBILITY_TOL) {
+    if (!NonNegative(t)) {
         return {};
     }
     const double v = Mod2Pi(phi - t);
-    if (v < -FEASIBILITY_TOL) {
+    if (!NonNegative(v)) {
         return {};
     }
     return {true, t, u, v};
@@ -68,7 +75,7 @@ RsTriple LpSpRp(double x, double y, double phi) {
     const double u = std::sqrt(u1_sq - 4.0);
     const double t = Mod2Pi(t1 + std::atan2(2.0, u));
     const double v = Mod2Pi(t - phi);
-    if (t < -FEASIBILITY_TOL || v < -FEASIBILITY_TOL) {
+    if (!NonNegative(t) || !NonNegative(v)) {
         return {};
     }
     return {true, t, u, v};
@@ -85,7 +92,7 @@ RsTriple LpRmL(double x, double y, double phi) {
     const double u = -2.0 * std::asin(0.25 * u1);
     const double t = Mod2Pi(theta + 0.5 * u + PI);
     const double v = Mod2Pi(phi - t + u);
-    if (t < -FEASIBILITY_TOL || u > FEASIBILITY_TOL) {
+    if (!NonNegative(t) || u > FEASIBILITY_TOL) {
         return {};
     }
     return {true, t, u, v};
@@ -101,7 +108,7 @@ RsTriple LpRupLumRm(double x, double y, double phi) {
     }
     const double u = std::acos(rho);
     const auto [t, v] = TauOmega(u, -u, xi, eta, phi);
-    if (t < -FEASIBILITY_TOL || v > FEASIBILITY_TOL) {
+    if (!NonNegative(t) || v > FEASIBILITY_TOL) {
         return {};
     }
     return {true, t, u, v};
@@ -120,7 +127,7 @@ RsTriple LpRumLumRp(double x, double y, double phi) {
         return {};
     }
     const auto [t, v] = TauOmega(u, u, xi, eta, phi);
-    if (t < -FEASIBILITY_TOL || v < -FEASIBILITY_TOL) {
+    if (!NonNegative(t) || !NonNegative(v)) {
         return {};
     }
     return {true, t, u, v};
@@ -138,7 +145,7 @@ RsTriple LpRmSmLm(double x, double y, double phi) {
     const double u = 2.0 - r;
     const double t = Mod2Pi(theta + std::atan2(r, -2.0));
     const double v = Mod2Pi(phi - HALF_PI - t);
-    if (t < -FEASIBILITY_TOL || u > FEASIBILITY_TOL || v > FEASIBILITY_TOL) {
+    if (!NonNegative(t) || u > FEASIBILITY_TOL || v > FEASIBILITY_TOL) {
         return {};
     }
     return {true, t, u, v};
@@ -155,7 +162,7 @@ RsTriple LpRmSmRm(double x, double y, double phi) {
     const double t = theta;
     const double u = 2.0 - rho;
     const double v = Mod2Pi(t + HALF_PI - phi);
-    if (t < -FEASIBILITY_TOL || u > FEASIBILITY_TOL || v > FEASIBILITY_TOL) {
+    if (!NonNegative(t) || u > FEASIBILITY_TOL || v > FEASIBILITY_TOL) {
         return {};
     }
     return {true, t, u, v};
@@ -176,16 +183,33 @@ RsTriple LpRmSLmRp(double x, double y, double phi) {
     const double t = Mod2Pi(std::atan2((4.0 - u) * xi - 2.0 * eta,
                                        -2.0 * xi + (u - 4.0) * eta));
     const double v = Mod2Pi(t - phi);
-    if (t < -FEASIBILITY_TOL || v < -FEASIBILITY_TOL) {
+    if (!NonNegative(t) || !NonNegative(v)) {
         return {};
     }
     return {true, t, u, v};
 }
 
-// 最短候选累积器：逐个吞入候选词，只保留归一化总长最小的一条
+// 最短候选累积器：逐个吞入候选词，只保留归一化总长最小的一条。
+// start_forward 有值时只接受首段有效基元方向一致的候选（换挡节点
+// 出车方向约束）；无约束时行为与旧版完全一致
 class RsBestKeeper {
    public:
+    explicit RsBestKeeper(std::optional<bool> start_forward)
+        : start_forward_(start_forward) {}
     void consider(std::initializer_list<RsSegment> segments) {
+        if (start_forward_.has_value()) {
+            bool direction_ok = true;
+            for (const auto& segment : segments) {
+                if (std::fabs(segment.length) <= FEASIBILITY_TOL) {
+                    continue;
+                }
+                direction_ok = (segment.length > 0.0) == *start_forward_;
+                break;
+            }
+            if (!direction_ok) {
+                return;
+            }
+        }
         double total = 0.0;
         for (const auto& segment : segments) {
             total += std::fabs(segment.length);
@@ -205,6 +229,7 @@ class RsBestKeeper {
     const RsPath& best() const { return best_; }
 
    protected:
+    std::optional<bool> start_forward_;
     RsPath best_{};
 };
 
@@ -416,7 +441,8 @@ int RsPath::numCusps() const {
 }
 
 RsPath ComputeShortestReedsShepp(const Pose& start, const Pose& goal,
-                                 double turning_radius) {
+                                 double turning_radius,
+                                 std::optional<bool> start_forward) {
     if (!(turning_radius > 0.0)) {
         throw std::invalid_argument(
             "ComputeShortestReedsShepp: 转弯半径必须为正");
@@ -429,7 +455,7 @@ RsPath ComputeShortestReedsShepp(const Pose& start, const Pose& goal,
     const double x = dx * cos_theta + dy * sin_theta;
     const double y = -dx * sin_theta + dy * cos_theta;
     const double phi = Mod2Pi(goal.theta - start.theta);
-    RsBestKeeper keeper;
+    RsBestKeeper keeper(start_forward);
     EnumerateCsc(x, y, phi, &keeper);
     EnumerateCcc(x, y, phi, &keeper);
     EnumerateCccc(x, y, phi, &keeper);

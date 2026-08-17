@@ -1,13 +1,17 @@
 #include "ms_ilqr.h"
 
+#include <Eigen/Cholesky>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
 
 namespace apa_post_processor {
-MsIlqrSolver::MsIlqrSolver(MsIlqrConfig config, const BicycleDynamics* dynamics,
-                           const DdpCostEvaluator* cost_evaluator)
+template <bool UseVirtualControl>
+MsIlqrSolverT<UseVirtualControl>::MsIlqrSolverT(
+    MsIlqrConfig config, const BicycleDynamics* dynamics,
+    const DdpCostEvaluator* cost_evaluator)
     : config_(config), dynamics_(dynamics), cost_evaluator_(cost_evaluator) {
     if (dynamics_ == nullptr || cost_evaluator_ == nullptr) {
         throw std::invalid_argument("MsIlqrSolver: 动力学与代价求值层必须非空");
@@ -59,11 +63,13 @@ MsIlqrSolver::MsIlqrSolver(MsIlqrConfig config, const BicycleDynamics* dynamics,
     merit_mu_ = config_.merit_mu0;
 }
 
-MsIlqrResult MsIlqrSolver::solve(
+template <bool UseVirtualControl>
+MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
     const DdpReference& reference, const DdpCostMultiplierState& multipliers,
     const DdpCostInput& cost_input,
     const DdpAlignedVec<DdpState>& initial_states,
-    const DdpAlignedVec<DdpControl>& initial_controls) {
+    const DdpAlignedVec<DdpControl>& initial_controls,
+    const DdpAlignedVec<DdpState>* initial_virtual_controls) {
     const std::size_t num_poses = reference.poses.size();
     if (num_poses < 2) {
         throw std::invalid_argument("MsIlqrSolver: 参考位姿数量必须 >= 2");
@@ -80,6 +86,21 @@ MsIlqrResult MsIlqrSolver::solve(
     }
     prepareWorkspace(num_steps);
     setShootingLookup(reference.shooting_nodes);
+    // 虚拟控制初始化：非空直接热启动，空则反解自初值轨迹（首轮 rollout
+    // 恰好复现初值、初始缺陷恒零——ALTRO 不可行初始化的 w⁰ 构造）
+    if constexpr (UseVirtualControl) {
+        if (initial_virtual_controls != nullptr) {
+            if (initial_virtual_controls->size() != num_steps) {
+                throw std::invalid_argument(
+                    "MsIlqrSolver: 虚拟控制初值数量必须为 N");
+            }
+            virtual_controls_ = *initial_virtual_controls;
+        } else {
+            virtual_controls_ =
+                computeVirtualControls(reference, initial_states,
+                                       initial_controls);
+        }
+    }
     setNominalTrajectory(reference, initial_states, initial_controls);
     evaluateNominal(reference, multipliers, cost_input);
     computeJacobians(reference);
@@ -167,7 +188,8 @@ MsIlqrResult MsIlqrSolver::solve(
     return result;
 }
 
-void MsIlqrSolver::prepareWorkspace(std::size_t num_steps) {
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::prepareWorkspace(std::size_t num_steps) {
     // 步数不变时跳过全部 resize/assign，仅清空历史（热启动主路径）
     if (num_steps_ == num_steps) {
         is_shooting_.assign(is_shooting_.size(), false);
@@ -182,6 +204,11 @@ void MsIlqrSolver::prepareWorkspace(std::size_t num_steps) {
     defects_.resize(nodes);
     controls_.resize(num_steps);
     cand_controls_.resize(num_steps);
+    virtual_controls_.resize(num_steps);
+    cand_virtual_controls_.resize(num_steps);
+    virtual_feedforward_.resize(num_steps);
+    virtual_gain_.resize(num_steps);
+    dw_lin_.resize(num_steps);
     jac_A_.resize(num_steps);
     jac_B_.resize(num_steps);
     q_x_.resize(num_steps);
@@ -202,7 +229,8 @@ void MsIlqrSolver::prepareWorkspace(std::size_t num_steps) {
     history_.reserve(static_cast<std::size_t>(config_.max_iterations));
 }
 
-void MsIlqrSolver::setShootingLookup(
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::setShootingLookup(
     const std::vector<std::size_t>& shooting_nodes) {
     is_shooting_.assign(num_steps_ + 1, false);
     for (const std::size_t node : shooting_nodes) {
@@ -213,14 +241,16 @@ void MsIlqrSolver::setShootingLookup(
     }
 }
 
-void MsIlqrSolver::syncStepDt(const DdpReference& reference) {
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::syncStepDt(const DdpReference& reference) {
     step_dt_.resize(num_steps_);
     for (std::size_t k = 0; k < num_steps_; ++k) {
         step_dt_[k] = reference.stepDt(k);
     }
 }
 
-void MsIlqrSolver::setNominalTrajectory(
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::setNominalTrajectory(
     const DdpReference& reference,
     const DdpAlignedVec<DdpState>& initial_states,
     const DdpAlignedVec<DdpControl>& initial_controls) {
@@ -231,8 +261,11 @@ void MsIlqrSolver::setNominalTrajectory(
     // 注入初值，缺陷仅在打靶节点非零
     for (std::size_t k = 0; k < num_steps_; ++k) {
         controls_[k] = initial_controls[k];
-        const DdpState integral =
+        DdpState integral =
             dynamics_->step(states_[k], controls_[k], step_dt_[k]);
+        if constexpr (UseVirtualControl) {
+            integral += virtual_controls_[k];
+        }
         if (is_shooting_[k + 1]) {
             defects_[k + 1] = integral - initial_states[k + 1];
             states_[k + 1] = initial_states[k + 1];
@@ -244,15 +277,27 @@ void MsIlqrSolver::setNominalTrajectory(
     defect_norm_ = DefectNorm(defects_);
 }
 
-void MsIlqrSolver::evaluateNominal(const DdpReference& reference,
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::evaluateNominal(const DdpReference& reference,
                                    const DdpCostMultiplierState& multipliers,
                                    const DdpCostInput& cost_input) {
     cost_eval_ = cost_evaluator_->evaluate(reference, states_, controls_,
                                            multipliers, cost_input);
     total_cost_ = cost_eval_.total_cost;
+    if constexpr (UseVirtualControl) {
+        // 增广代价并入 w 软代价 ½·R_inf·‖w‖²·dt：与 merit 链
+        // （q_w 梯度 / EC 一、二阶项）同源，保证线搜索自洽
+        double w_cost = 0.0;
+        for (std::size_t k = 0; k < num_steps_; ++k) {
+            w_cost += 0.5 * config_.virtual_control_weight * step_dt_[k] *
+                      virtual_controls_[k].squaredNorm();
+        }
+        total_cost_ += w_cost;
+    }
 }
 
-void MsIlqrSolver::computeJacobians(const DdpReference& reference) {
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::computeJacobians(const DdpReference& reference) {
     syncStepDt(reference);
     for (std::size_t k = 0; k < num_steps_; ++k) {
         dynamics_->jacobians(states_[k], controls_[k], step_dt_[k], &jac_A_[k],
@@ -260,7 +305,74 @@ void MsIlqrSolver::computeJacobians(const DdpReference& reference) {
     }
 }
 
-bool MsIlqrSolver::backwardPass() {
+template <bool UseVirtualControl>
+DdpStateHessian MsIlqrSolverT<UseVirtualControl>::UpdateValueHessian(
+    const DdpStateHessian& s, const DdpStateJacobian& a) {
+    // 阶段一：t = S·A——按 A 各列的非零元组合 S 的列。列 0/1 为纯单位列；
+    // 列 2~6 各含 3~5 个非零元（几何/积分项，非零集合与 jacobians() 一致）；
+    // 列组合是连续内存的标量乘加，编译器可展开为 FMA 链并向量化。
+    DdpStateHessian t;
+    t.col(DDP_IDX_X) = s.col(DDP_IDX_X);
+    t.col(DDP_IDX_Y) = s.col(DDP_IDX_Y);
+    t.col(DDP_IDX_THETA) = a(DDP_IDX_X, DDP_IDX_THETA) * s.col(DDP_IDX_X) +
+                           a(DDP_IDX_Y, DDP_IDX_THETA) * s.col(DDP_IDX_Y) +
+                           s.col(DDP_IDX_THETA);
+    t.col(DDP_IDX_V) = a(DDP_IDX_X, DDP_IDX_V) * s.col(DDP_IDX_X) +
+                       a(DDP_IDX_Y, DDP_IDX_V) * s.col(DDP_IDX_Y) +
+                       a(DDP_IDX_THETA, DDP_IDX_V) * s.col(DDP_IDX_THETA) +
+                       s.col(DDP_IDX_V);
+    t.col(DDP_IDX_A) = a(DDP_IDX_X, DDP_IDX_A) * s.col(DDP_IDX_X) +
+                       a(DDP_IDX_Y, DDP_IDX_A) * s.col(DDP_IDX_Y) +
+                       a(DDP_IDX_THETA, DDP_IDX_A) * s.col(DDP_IDX_THETA) +
+                       a(DDP_IDX_V, DDP_IDX_A) * s.col(DDP_IDX_V) +
+                       s.col(DDP_IDX_A);
+    t.col(DDP_IDX_DELTA) = a(DDP_IDX_X, DDP_IDX_DELTA) * s.col(DDP_IDX_X) +
+                           a(DDP_IDX_Y, DDP_IDX_DELTA) * s.col(DDP_IDX_Y) +
+                           a(DDP_IDX_THETA, DDP_IDX_DELTA) *
+                               s.col(DDP_IDX_THETA) +
+                           s.col(DDP_IDX_DELTA);
+    t.col(DDP_IDX_OMEGA) = a(DDP_IDX_X, DDP_IDX_OMEGA) * s.col(DDP_IDX_X) +
+                           a(DDP_IDX_Y, DDP_IDX_OMEGA) * s.col(DDP_IDX_Y) +
+                           a(DDP_IDX_THETA, DDP_IDX_OMEGA) *
+                               s.col(DDP_IDX_THETA) +
+                           a(DDP_IDX_DELTA, DDP_IDX_OMEGA) *
+                               s.col(DDP_IDX_DELTA) +
+                           s.col(DDP_IDX_OMEGA);
+    // 阶段二：out = Aᵀ·t——按 A 各行的非零元组合 t 的行（与列组合同形，
+    // 求值顺序与阶段一对偶）。下游 next_hessian 恒做对称化，本内核
+    // 无需保证输出逐位对称。
+    DdpStateHessian out;
+    out.row(DDP_IDX_X) = t.row(DDP_IDX_X);
+    out.row(DDP_IDX_Y) = t.row(DDP_IDX_Y);
+    out.row(DDP_IDX_THETA) = a(DDP_IDX_X, DDP_IDX_THETA) * t.row(DDP_IDX_X) +
+                             a(DDP_IDX_Y, DDP_IDX_THETA) * t.row(DDP_IDX_Y) +
+                             t.row(DDP_IDX_THETA);
+    out.row(DDP_IDX_V) = a(DDP_IDX_X, DDP_IDX_V) * t.row(DDP_IDX_X) +
+                         a(DDP_IDX_Y, DDP_IDX_V) * t.row(DDP_IDX_Y) +
+                         a(DDP_IDX_THETA, DDP_IDX_V) * t.row(DDP_IDX_THETA) +
+                         t.row(DDP_IDX_V);
+    out.row(DDP_IDX_A) = a(DDP_IDX_X, DDP_IDX_A) * t.row(DDP_IDX_X) +
+                         a(DDP_IDX_Y, DDP_IDX_A) * t.row(DDP_IDX_Y) +
+                         a(DDP_IDX_THETA, DDP_IDX_A) * t.row(DDP_IDX_THETA) +
+                         a(DDP_IDX_V, DDP_IDX_A) * t.row(DDP_IDX_V) +
+                         t.row(DDP_IDX_A);
+    out.row(DDP_IDX_DELTA) = a(DDP_IDX_X, DDP_IDX_DELTA) * t.row(DDP_IDX_X) +
+                             a(DDP_IDX_Y, DDP_IDX_DELTA) * t.row(DDP_IDX_Y) +
+                             a(DDP_IDX_THETA, DDP_IDX_DELTA) *
+                                 t.row(DDP_IDX_THETA) +
+                             t.row(DDP_IDX_DELTA);
+    out.row(DDP_IDX_OMEGA) = a(DDP_IDX_X, DDP_IDX_OMEGA) * t.row(DDP_IDX_X) +
+                             a(DDP_IDX_Y, DDP_IDX_OMEGA) * t.row(DDP_IDX_Y) +
+                             a(DDP_IDX_THETA, DDP_IDX_OMEGA) *
+                                 t.row(DDP_IDX_THETA) +
+                             a(DDP_IDX_DELTA, DDP_IDX_OMEGA) *
+                                 t.row(DDP_IDX_DELTA) +
+                             t.row(DDP_IDX_OMEGA);
+    return out;
+}
+
+template <bool UseVirtualControl>
+bool MsIlqrSolverT<UseVirtualControl>::backwardPass() {
     ++backward_pass_count_;
     const auto& stages = cost_eval_.stages;
     DdpStateHessian value_hessian = stages[num_steps_].lxx;
@@ -282,18 +394,61 @@ bool MsIlqrSolver::backwardPass() {
                 : value_gradient;
         const DdpState q_x = stage.lx + jac_a.transpose() * z;
         const DdpControl q_u = stage.lu + jac_b.transpose() * z;
-        DdpStateHessian q_xx =
-            stage.lxx + jac_a.transpose() * value_hessian * jac_a;
+        DdpStateHessian q_xx = stage.lxx + UpdateValueHessian(value_hessian,
+                                                               jac_a);
         DdpControlHessian q_uu =
             stage.luu + jac_b.transpose() * value_hessian * jac_b;
         DdpControlStateHessian q_ux =
             stage.lux + jac_b.transpose() * value_hessian * jac_a;
         q_uu += rho_reg_ * DdpControlHessian::Identity();
+        // 虚拟控制增广：x⁺=f(x,u)+w ⟹ ∂x⁺/∂w=I。w 为无约束输入，
+        // 对 W=Q_ww 做 Schur 消元（先解 7×7 自由子问题）后再走既有
+        // 2 维 box-QP——消元保留价值函数最优值，box-QP 与关闭路径
+        // 完全同构
+        DdpStateHessian q_xx_eff = q_xx;
+        DdpControlHessian q_uu_eff = q_uu;
+        DdpControlStateHessian q_ux_eff = q_ux;
+        DdpControl q_u_eff = q_u;
+        DdpState q_x_eff = q_x;
+        // w 消元的中间量（仅开关开启时赋值与消费）
+        Eigen::Matrix<double, DDP_STATE_DIM, DDP_CONTROL_DIM> t_u;
+        if constexpr (UseVirtualControl) {
+            const double w_weight_dt =
+                config_.virtual_control_weight * step_dt_[k];
+            const DdpState q_w =
+                w_weight_dt * virtual_controls_[k] + z;
+            DdpStateHessian w_hessian = value_hessian;
+            w_hessian.diagonal().array() += w_weight_dt;
+            Eigen::LLT<DdpStateHessian> w_llt(w_hessian);
+            if (w_llt.info() != Eigen::Success) {
+                return false;
+            }
+            const DdpControlStateHessian q_uw =
+                jac_b.transpose() * value_hessian;
+            const DdpStateHessian q_wx = value_hessian * jac_a;
+            t_u = w_llt.solve(q_uw.transpose());
+            const DdpState t_w = w_llt.solve(q_w);
+            const DdpStateHessian t_x = w_llt.solve(q_wx);
+            q_xx_eff = q_xx - q_wx.transpose() * t_x;
+            q_uu_eff = q_uu - q_uw * t_u;
+            q_ux_eff = q_ux - q_uw * t_x;
+            q_u_eff = q_u - q_uw * t_w;
+            q_x_eff = q_x - q_wx.transpose() * t_w;
+            // w 的闭环响应（前馈部分在 QP 求解后补 k 项）：δw =
+            // −W⁻¹(Q_w+Q_wu·δu+Q_wx·δx)，δu=k+K·δx
+            virtual_feedforward_[k] = -t_w;
+            virtual_gain_[k] = -t_x;
+        }
         // 盒约束 QP（H 已含正则化）：回推顺序上一步的钳制集热启动，
         // 分解每步必然重做
         BoxQpSolver<>::Problem problem;
-        problem.hessian = q_uu;
-        problem.gradient = q_u;
+        if constexpr (UseVirtualControl) {
+            problem.hessian = q_uu_eff;
+            problem.gradient = q_u_eff;
+        } else {
+            problem.hessian = q_uu;
+            problem.gradient = q_u;
+        }
         problem.lower =
             DdpControl(-config_.jerk_max, -config_.steer_accel_max) -
             controls_[k];
@@ -313,22 +468,56 @@ bool MsIlqrSolver::backwardPass() {
         }
         qp_factorization_count_ += qp_result.factorizations;
         feedforward_[k] = qp_result.x;
-        gain_K_[k] = -BoxQpSolver<>::SolveFreeExpanded(qp_result, q_ux);
+        if constexpr (UseVirtualControl) {
+            gain_K_[k] =
+                -BoxQpSolver<>::SolveFreeExpanded(qp_result, q_ux_eff);
+        } else {
+            gain_K_[k] =
+                -BoxQpSolver<>::SolveFreeExpanded(qp_result, q_ux);
+        }
         clamped_[k] = qp_result.clamped;
         q_x_[k] = q_x;
         q_u_[k] = q_u;
         q_uu_[k] = q_uu;
-        // 价值回传（K/δũ 形式：任意活动集下均良定义，Q_uu 取含正则化版本）
-        DdpStateHessian next_hessian =
-            q_xx + gain_K_[k].transpose() * q_uu * gain_K_[k] +
-            gain_K_[k].transpose() * q_ux + q_ux.transpose() * gain_K_[k];
-        next_hessian = 0.5 * (next_hessian + next_hessian.transpose());
-        const DdpState next_gradient =
-            q_x + gain_K_[k].transpose() * q_uu * feedforward_[k] +
-            gain_K_[k].transpose() * q_u + q_ux.transpose() * feedforward_[k];
-        dv1_ += feedforward_[k].dot(q_u);
-        dv2_ += (feedforward_[k].transpose() * q_uu * feedforward_[k]).value();
-        max_qu_norm_ = std::max(max_qu_norm_, q_u.cwiseAbs().maxCoeff());
+        if constexpr (UseVirtualControl) {
+            // w 前馈补 QP 项：w_ff = −W⁻¹(Q_w + Q_wu·k)
+            virtual_feedforward_[k].noalias() -= t_u * feedforward_[k];
+            // w 增益补 QP 项：K_w = −W⁻¹(Q_wu·K + Q_wx)
+            virtual_gain_[k].noalias() -= t_u * gain_K_[k];
+        }
+        // 价值回传（K/δũ 形式：任意活动集下均良定义，Q_uu 取含正则化版本；
+        // 增广路径消费 Schur 消元后的有效量，保证价值函数含 w 的影响）
+        DdpStateHessian next_hessian;
+        DdpState next_gradient;
+        if constexpr (UseVirtualControl) {
+            next_hessian =
+                q_xx_eff + gain_K_[k].transpose() * q_uu_eff * gain_K_[k] +
+                gain_K_[k].transpose() * q_ux_eff +
+                q_ux_eff.transpose() * gain_K_[k];
+            next_hessian = 0.5 * (next_hessian + next_hessian.transpose());
+            next_gradient =
+                q_x_eff + gain_K_[k].transpose() * q_uu_eff * feedforward_[k] +
+                gain_K_[k].transpose() * q_u_eff +
+                q_ux_eff.transpose() * feedforward_[k];
+            dv1_ += feedforward_[k].dot(q_u_eff);
+            dv2_ +=
+                (feedforward_[k].transpose() * q_uu_eff * feedforward_[k])
+                    .value();
+            max_qu_norm_ =
+                std::max(max_qu_norm_, q_u_eff.cwiseAbs().maxCoeff());
+        } else {
+            next_hessian =
+                q_xx + gain_K_[k].transpose() * q_uu * gain_K_[k] +
+                gain_K_[k].transpose() * q_ux + q_ux.transpose() * gain_K_[k];
+            next_hessian = 0.5 * (next_hessian + next_hessian.transpose());
+            next_gradient =
+                q_x + gain_K_[k].transpose() * q_uu * feedforward_[k] +
+                gain_K_[k].transpose() * q_u + q_ux.transpose() * feedforward_[k];
+            dv1_ += feedforward_[k].dot(q_u);
+            dv2_ +=
+                (feedforward_[k].transpose() * q_uu * feedforward_[k]).value();
+            max_qu_norm_ = std::max(max_qu_norm_, q_u.cwiseAbs().maxCoeff());
+        }
         value_S_[k] = next_hessian;
         value_s_[k] = next_gradient;
         value_hessian = next_hessian;
@@ -338,7 +527,8 @@ bool MsIlqrSolver::backwardPass() {
     return true;
 }
 
-void MsIlqrSolver::linearRollout() {
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::linearRollout() {
     ++linear_rollout_count_;
     const auto& stages = cost_eval_.stages;
     dx_lin_[0].setZero();
@@ -350,12 +540,24 @@ void MsIlqrSolver::linearRollout() {
         du_lin_[k] = feedforward_[k] + gain_K_[k] * dx_lin_[k];
         dx_lin_[k + 1] =
             jac_A_[k] * dx_lin_[k] + jac_B_[k] * du_lin_[k] + defects_[k + 1];
+        if constexpr (UseVirtualControl) {
+            DdpState dw = virtual_feedforward_[k] + virtual_gain_[k] * dx_lin_[k];
+            dw_lin_[k] = dw;
+            dx_lin_[k + 1] += dw;
+        }
         const auto& stage = stages[k];
         ec1_ += stage.lx.dot(dx_lin_[k]) + stage.lu.dot(du_lin_[k]);
         ec2_ +=
             (dx_lin_[k].transpose() * stage.lxx * dx_lin_[k]).value() +
             (2.0 * du_lin_[k].transpose() * stage.lux * dx_lin_[k]).value() +
             (du_lin_[k].transpose() * stage.luu * du_lin_[k]).value();
+        // 虚拟控制软代价对 EC 的闭式贡献（名义 w 的一阶/二阶项）
+        if constexpr (UseVirtualControl) {
+            const double w_weight_dt =
+                config_.virtual_control_weight * step_dt_[k];
+            ec1_ += w_weight_dt * virtual_controls_[k].dot(dw_lin_[k]);
+            ec2_ += w_weight_dt * dw_lin_[k].squaredNorm();
+        }
     }
     const auto& terminal = stages[num_steps_];
     ec1_ += terminal.lx.dot(dx_lin_[num_steps_]);
@@ -364,7 +566,8 @@ void MsIlqrSolver::linearRollout() {
             .value();
 }
 
-bool MsIlqrSolver::convergenceAllowed() const {
+template <bool UseVirtualControl>
+bool MsIlqrSolverT<UseVirtualControl>::convergenceAllowed() const {
     double defect_inf = 0.0;
     for (const auto& defect : defects_) {
         defect_inf = std::max(defect_inf, defect.cwiseAbs().maxCoeff());
@@ -372,10 +575,12 @@ bool MsIlqrSolver::convergenceAllowed() const {
     return defect_inf <= config_.convergence_defect_tol;
 }
 
-double MsIlqrSolver::nonlinearRollout(double alpha,
+template <bool UseVirtualControl>
+double MsIlqrSolverT<UseVirtualControl>::nonlinearRollout(double alpha,
                                       const DdpReference& reference,
                                       const DdpCostMultiplierState& multipliers,
-                                      const DdpCostInput& cost_input) {
+                                      const DdpCostInput& cost_input,
+                                      double merit_reject_threshold) {
     ++nonlinear_rollout_count_;
     cand_states_[0] = states_[0];
     // 控制闭环更新 + 段内真实积分；打靶节点带缺陷缩放项（非打靶节点
@@ -386,6 +591,13 @@ double MsIlqrSolver::nonlinearRollout(double alpha,
         cand_states_[k + 1] =
             dynamics_->step(cand_states_[k], cand_controls_[k], step_dt_[k]) +
             (alpha - 1.0) * defects_[k + 1];
+        if constexpr (UseVirtualControl) {
+            const DdpState cand_w =
+                virtual_controls_[k] + alpha * virtual_feedforward_[k] +
+                virtual_gain_[k] * (cand_states_[k] - states_[k]);
+            cand_virtual_controls_[k] = cand_w;
+            cand_states_[k + 1] += cand_w;
+        }
     }
     // 新缺陷 d' = (1-α)·d̄ 精确成立（与状态更新公式逐位一致）
     cand_defect_norm_ = (1.0 - alpha) * defect_norm_;
@@ -411,27 +623,58 @@ double MsIlqrSolver::nonlinearRollout(double alpha,
             }
         }
     }
+    // 线搜索早停：merit = cost + µ_m·‖d‖，把 merit 接受阈值折算为
+    // 代价阈值交给求值层——ESDF 代价恒非负 ⟹ 廉价小计是完整代价的
+    // 下界，小计超阈即整段跳过 ESDF（拒绝决策与全量求值逐位一致）
+    DdpCostInput screened_input = cost_input;
+    screened_input.screen_cost_threshold =
+        merit_reject_threshold - merit_mu_ * cand_defect_norm_;
     cand_eval_ = cost_evaluator_->evaluate(
-        reference, cand_states_, cand_controls_, multipliers, cost_input);
+        reference, cand_states_, cand_controls_, multipliers, screened_input);
     cand_cost_ = cand_eval_.total_cost;
+    if constexpr (UseVirtualControl) {
+        // 候选增广代价并入 w 软代价（与名义侧同源）
+        double w_cost = 0.0;
+        for (std::size_t k = 0; k < num_steps_; ++k) {
+            w_cost += 0.5 * config_.virtual_control_weight * step_dt_[k] *
+                      cand_virtual_controls_[k].squaredNorm();
+        }
+        cand_cost_ += w_cost;
+    }
     return cand_cost_;
 }
 
-bool MsIlqrSolver::lineSearch(const DdpReference& reference,
+template <bool UseVirtualControl>
+bool MsIlqrSolverT<UseVirtualControl>::lineSearch(const DdpReference& reference,
                               const DdpCostMultiplierState& multipliers,
                               const DdpCostInput& cost_input, double merit_prev,
                               double* accepted_alpha, double* accepted_cost) {
     double alpha = 1.0;
     for (int trial = 0; trial < config_.max_backtracks; ++trial) {
-        const double cand_cost =
-            nonlinearRollout(alpha, reference, multipliers, cost_input);
-        const double cand_merit = cand_cost + merit_mu_ * cand_defect_norm_;
+        // EC(α) 闭式量先算好，才能把 merit 接受阈值折算为代价早停
+        // 阈值传给 rollout（次序换位不改变数值：所用成员均不随试错变）
         const double expected =
             expectedChange(alpha) - alpha * merit_mu_ * defect_norm_;
-        if (std::isfinite(cand_merit) &&
-            cand_merit <= merit_prev + config_.armijo_gamma * expected) {
+        const double merit_threshold =
+            merit_prev + config_.armijo_gamma * expected;
+        const double cand_cost =
+            nonlinearRollout(alpha, reference, multipliers, cost_input,
+                             merit_threshold);
+        double cand_merit = cand_cost + merit_mu_ * cand_defect_norm_;
+        // 刀刃防御：筛选比较式（廉价小计 > 折算阈值）与原始 merit
+        // 比较式（代价 + µ_m·‖d‖ ≤ 阈值）在 1 ulp 边界可能分歧——
+        // 一旦出现「筛选拒绝而原始式会接受」的迹象，用全量求值重判，
+        // 保证接受/拒绝决策与未加筛选的原始实现逐位等价
+        if (cand_eval_.esdf_screened_out && cand_merit <= merit_threshold) {
+            cand_eval_ = cost_evaluator_->evaluate(
+                reference, cand_states_, cand_controls_, multipliers,
+                cost_input);
+            cand_cost_ = cand_eval_.total_cost;
+            cand_merit = cand_cost_ + merit_mu_ * cand_defect_norm_;
+        }
+        if (std::isfinite(cand_merit) && cand_merit <= merit_threshold) {
             *accepted_alpha = alpha;
-            *accepted_cost = cand_cost;
+            *accepted_cost = cand_cost_;
             return true;
         }
         alpha *= config_.backtrack_beta;
@@ -439,7 +682,8 @@ bool MsIlqrSolver::lineSearch(const DdpReference& reference,
     return false;
 }
 
-void MsIlqrSolver::acceptCandidate(double alpha) {
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::acceptCandidate(double alpha) {
     for (std::size_t i = 0; i <= num_steps_; ++i) {
         states_[i] = cand_states_[i];
         defects_[i] *= (1.0 - alpha);
@@ -447,13 +691,17 @@ void MsIlqrSolver::acceptCandidate(double alpha) {
     for (std::size_t k = 0; k < num_steps_; ++k) {
         controls_[k] = cand_controls_[k];
     }
+    if constexpr (UseVirtualControl) {
+        virtual_controls_ = cand_virtual_controls_;
+    }
     defect_norm_ = DefectNorm(defects_);
     // 候选代价求值结果直接移入名义缓存，本轮无需重复全轨迹求值
     cost_eval_ = std::move(cand_eval_);
     total_cost_ = cand_cost_;
 }
 
-bool MsIlqrSolver::increaseReg() {
+template <bool UseVirtualControl>
+bool MsIlqrSolverT<UseVirtualControl>::increaseReg() {
     if (rho_reg_ >= config_.reg_max) {
         return false;
     }
@@ -461,15 +709,37 @@ bool MsIlqrSolver::increaseReg() {
     return true;
 }
 
-void MsIlqrSolver::decreaseReg() {
+template <bool UseVirtualControl>
+void MsIlqrSolverT<UseVirtualControl>::decreaseReg() {
     rho_reg_ = std::max(rho_reg_ * config_.reg_decrease, config_.reg_min);
 }
 
-double MsIlqrSolver::DefectNorm(const DdpAlignedVec<DdpState>& defects) {
+template <bool UseVirtualControl>
+double MsIlqrSolverT<UseVirtualControl>::DefectNorm(const DdpAlignedVec<DdpState>& defects) {
     double squared = 0.0;
     for (const auto& defect : defects) {
         squared += defect.squaredNorm();
     }
     return std::sqrt(squared);
 }
+
+template <bool UseVirtualControl>
+DdpAlignedVec<DdpState> MsIlqrSolverT<UseVirtualControl>::computeVirtualControls(
+    const DdpReference& reference,
+    const DdpAlignedVec<DdpState>& initial_states,
+    const DdpAlignedVec<DdpControl>& initial_controls) const {
+    const std::size_t num_steps = initial_controls.size();
+    DdpAlignedVec<DdpState> w;
+    w.reserve(num_steps);
+    for (std::size_t k = 0; k < num_steps; ++k) {
+        const DdpState integral =
+            dynamics_->step(initial_states[k], initial_controls[k],
+                            reference.stepDt(k));
+        w.push_back(initial_states[k + 1] - integral);
+    }
+    return w;
+}
+
+template class MsIlqrSolverT<false>;
+template class MsIlqrSolverT<true>;
 }  // namespace apa_post_processor

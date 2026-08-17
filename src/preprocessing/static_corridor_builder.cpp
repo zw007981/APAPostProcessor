@@ -10,6 +10,7 @@
 
 #include "../core/NMPC/vehicle_circle_geometry.h"
 #include "../util/constants.h"
+#include "../util/omp_threads.h"
 
 namespace apa_post_processor {
 namespace {
@@ -122,8 +123,9 @@ StaticCorridorBuilderResult StaticCorridorBuilder::build(
     // 每个 (point, circle) 产生一条舒适 soft 约束
     const int total_constraints = n_points * circle_num;
     result.constraints.reserve(static_cast<std::size_t>(total_constraints));
-    // OpenMP 并行加速批量 ESDF 查询，按线程收集后合并
-    const int n_threads = omp_get_max_threads();
+    // OpenMP 并行加速批量 ESDF 查询，按线程收集后合并；线程数统一
+    // 走共享策略（运行期上限 × 编译期天花板，见 util/omp_threads.h）
+    const int n_threads = EffectiveOmpThreads(1, 1);
     std::vector<std::vector<StaticCorridorConstraint>> thread_constraints(
         static_cast<std::size_t>(n_threads));
     for (auto& tc : thread_constraints) {
@@ -132,7 +134,7 @@ StaticCorridorBuilderResult StaticCorridorBuilder::build(
     // 跨线程共享失败状态
     std::atomic<bool> has_failure{false};
     std::string failure_msg;
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) num_threads(n_threads)
     for (int k = 0; k < n_points; ++k) {
         if (has_failure) {
             continue;

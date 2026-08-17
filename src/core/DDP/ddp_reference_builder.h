@@ -4,6 +4,7 @@
 #include <Eigen/StdVector>
 #include <cmath>
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include "../../spatial/esdf_map.h"
@@ -94,7 +95,9 @@ struct DdpReference {
     }
 };
 // RS 换挡点短接配置：允许换挡位姿移动，用有界曲率曲线重连——
-// 唯一能突破「换挡点由前端钉死」的几何前处理
+// 唯一能突破「换挡点由前端钉死」的几何前处理。编排为以 maneuver
+// 边界为节点的动态规划全局择优（2026-08-13 起为唯一实现，贪心
+// 逐轮扫描编排已删除）
 struct DdpRsShortcutConfig {
     // 曲率上限比（0=关闭）
     double cap_ratio{0.0};
@@ -102,15 +105,23 @@ struct DdpRsShortcutConfig {
     double collision_margin{0.02};
     // 长度增长上限比（以原始输入长度为基准）
     double max_length_growth{0.05};
-    // 候选端点扫描步长
-    int index_stride{5};
-    // 离散采样间距
+    // RS 曲线离散采样间距 (m)：碰撞校验与输出重采样共用
     double sample_dist{0.05};
-    // 贪心轮数上限
-    int max_rounds{4};
+    // DP 代价：每个 maneuver 的固定段价（段数惩罚，越大越倾向少换挡）
+    double segment_fixed_cost{8.88};
+    // DP 代价：短段惩罚权重（沿用外部混合 A* 参考实现的定价口径）
+    double short_segment_weight{1.0};
+    // DP 代价：短段判定阈值 (m)，低于该长度按比例加惩罚
+    double short_segment_length{2.5};
+    // RS 求解逐次耗时记录文件（CSV）：非空时每次 RS 计算追加一行，
+    // 供实验对比取证；空 = 关闭（默认，零副作用）
+    std::string rs_timing_csv{};
+    // RS 耗时记录的分组标签（如数据集名）：随 CSV 行写入，便于回读
+    std::string rs_timing_tag{};
 };
-// RS 换挡点短接：贪心搜索「段数下降最多、其次总长最短」的替换，经
-// ESDF/地图/长度三道守卫
+// RS 换挡点短接：以 maneuver 边界为节点做动态规划全局择优，用有界
+// 曲率 RS 曲线直连节点对（出车方向受节点 maneuver 方向约束、逐点
+// 碰撞校验、长度守卫），起点与终点位姿必须保持（漂移即拒绝）
 Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
                          const VehicleFootprintModel& footprint_model,
                          double wheelbase, double delta_max,

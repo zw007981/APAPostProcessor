@@ -23,10 +23,10 @@ class VehicleCircleDecomposition:
         self.wheelbase = 3.0  # 轴距 (m)，仅用于标注后轴位置
         self.rear_overhang = 1.1  # 后轴到后保险杠距离 (m)
 
-        # ── 圆分解配置（与 C++ 运行时一致） ──
+        # ── 圆分解配置 ──
         # 见VehicleFootprintModel
         self.inner_row_num = 2
-        self.outer_row_num = 4
+        self.outer_row_num = 2
 
         # 存储计算结果
         self.inner_circles: list[tuple[float, float, float, str]] = []

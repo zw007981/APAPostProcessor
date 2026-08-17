@@ -466,6 +466,8 @@ TEST(AlOuterLoopTest, FirstUpdateCalibratesAdaptiveMu) {
 // 持续可行逐步回落到零）
 TEST(AlOuterLoopTest, MultiplierUpdatesFollowAltroRules) {
     AlOuterLoopConfig config;
+    // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
+    config.amplitude_mu_per_element = false;
     config.amplitude_mu_initial = 1000.0;
     AlOuterLoop loop(config, DdpCostConfig{});
     auto multipliers = loop.makeInitialMultipliers(1);
@@ -517,6 +519,8 @@ TEST(AlOuterLoopTest, MultiplierUpdatesFollowAltroRules) {
 // 不增长（计数器断言），避免盲目指数增长导致内层 Riccati 病态
 TEST(AlOuterLoopTest, MuGrowthIsGatedBySufficientDecrease) {
     AlOuterLoopConfig config;
+    // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
+    config.amplitude_mu_per_element = false;
     config.mu_gate_kappa = 0.9;
     config.amplitude_mu_initial = 1000.0;
     AlOuterLoop loop(config, DdpCostConfig{});
@@ -549,6 +553,8 @@ TEST(AlOuterLoopTest, MuGrowthIsGatedBySufficientDecrease) {
 // 推入病态，反之亦然
 TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
     AlOuterLoopConfig config;
+    // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
+    config.amplitude_mu_per_element = false;
     config.amplitude_mu_initial = 1000.0;
     AlOuterLoop loop(config, DdpCostConfig{});
     auto multipliers = loop.makeInitialMultipliers(1);
@@ -589,10 +595,40 @@ TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
     EXPECT_EQ(loop.mu_increase_count(), 1);
 }
 
+// 测试升级请求标志：update 后 wantedTerminalGrowth/wantedAmplitudeGrowth
+// 反映本轮门控是否要求该组升级（阶段二提前退出判据消费）；标定轮不
+// 请求、充分下降轮清零、reset 后清零
+TEST(AlOuterLoopTest, GrowthRequestFlagsMatchGateDecisions) {
+    AlOuterLoopConfig config;
+    // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
+    config.amplitude_mu_per_element = false;
+    config.amplitude_mu_initial = 1000.0;
+    AlOuterLoop loop(config, DdpCostConfig{});
+    auto multipliers = loop.makeInitialMultipliers(1);
+    // 首轮标定：只标定不增长，两组请求均为 false
+    loop.update(MakeTerminalOnlySnapshot(1.0), 200.0, &multipliers);
+    EXPECT_FALSE(loop.wantedTerminalGrowth());
+    EXPECT_FALSE(loop.wantedAmplitudeGrowth());
+    // 次轮终端违反停滞（0.95 > 0.9·1.0）→ 仅终端组请求升级
+    loop.update(MakeTerminalOnlySnapshot(0.95), 200.0, &multipliers);
+    EXPECT_TRUE(loop.wantedTerminalGrowth());
+    EXPECT_FALSE(loop.wantedAmplitudeGrowth());
+    // 三轮终端充分下降（0.5 ≤ 0.9·0.95）→ 请求清零
+    loop.update(MakeTerminalOnlySnapshot(0.5), 200.0, &multipliers);
+    EXPECT_FALSE(loop.wantedTerminalGrowth());
+    // reset 后清零
+    loop.reset();
+    EXPECT_FALSE(loop.wantedTerminalGrowth());
+    EXPECT_FALSE(loop.wantedAmplitudeGrowth());
+}
+
 // 测试 μ 增长的 μ_max 封顶：接近上界时 min(φμ, μ_max) 钉在边界，
 // 罚权重不越过病态阈值
 TEST(AlOuterLoopTest, MuGrowthClippedAtMuMax) {
-    AlOuterLoop loop(AlOuterLoopConfig{}, DdpCostConfig{});
+    AlOuterLoopConfig config;
+    // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
+    config.amplitude_mu_per_element = false;
+    AlOuterLoop loop(config, DdpCostConfig{});
     auto multipliers = loop.makeInitialMultipliers(1);
     // 标定 μ⁰ = clip(5e6/0.01, 1e2, 1e6) = 1e6（上界 clip），标定轮不增长
     loop.update(MakeTerminalOnlySnapshot(0.1), 5e6, &multipliers);

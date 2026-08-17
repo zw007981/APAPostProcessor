@@ -162,6 +162,40 @@ void DdpDiagnostics::LogPostStageReport(
         "domain_guard_rejections={}",
         esdf_map.outOfMapQueryCount(),
         stage_one.report.domain_guard_rejections);
+    // 阶段二逐轮诊断：降级输出（阶段一候选被采用）时同样需要取证——
+    // 阶段二不收敛即丢弃其解，但 μ 轨迹说明「旋钮是否已耗尽」
+    if (post.stage_two.has_value()) {
+        const auto& report = post.stage_two->report;
+        LOG_FMT_INFO(
+            "DDP stage two diagnostics: status={}, outer={}, "
+            "mu_final={:.1f}, mu_amp_final={:.1f}, mu_gating_final={:.1f}, "
+            "term_err={:.4f} m/{:.3f} deg, ineq={:.4f}, "
+            "defect={:.2e}, sign_viol={:.4f}, dwell_viol={:.4f}, "
+            "seam_speed={:.4f}, gating_ok={}",
+            static_cast<int>(report.status), report.outer_iterations,
+            report.mu_final, report.mu_amplitude_final,
+            report.mu_gating_final, report.terminal_position_error,
+            report.terminal_heading_error_deg, report.max_amplitude_violation,
+            report.defect_norm_inf, post.stage_two->max_sign_violation,
+            post.stage_two->max_dwell_violation, post.stage_two->max_seam_speed,
+            post.stage_two->gating_ok);
+        if (report.status != ApaDdpStatus::CONVERGED) {
+            for (const auto& round : report.history) {
+                LOG_FMT_WARN(
+                    "DDP stage two round {}: w_ref={:.3f}, mu={:.1f}, "
+                    "mu_amp={:.1f}, mu_gating={:.1f}, "
+                    "term_err={:.4f} m/{:.3f} deg, ineq={:.4f}, "
+                    "defect={:.2e}, inner_status={}, inner_iter={}",
+                    round.outer_index, round.tracking_weight, round.mu,
+                    round.mu_amplitude, round.mu_gating,
+                    round.terminal_position_error,
+                    round.terminal_heading_error_deg,
+                    round.max_amplitude_violation, round.defect_norm_inf,
+                    static_cast<int>(round.inner_status),
+                    round.inner_iterations);
+            }
+        }
+    }
 }
 
 void DdpDiagnostics::LogFailureDiagnostics(
@@ -188,9 +222,11 @@ void DdpDiagnostics::LogFailureDiagnostics(
             for (const auto& round : report.history) {
                 LOG_FMT_WARN(
                     "DDP stage two round {}: w_ref={:.3f}, mu={:.1f}, "
+                    "mu_amp={:.1f}, mu_gating={:.1f}, "
                     "term_err={:.4f} m/{:.3f} deg, ineq={:.4f}, "
                     "defect={:.2e}, inner_status={}, inner_iter={}",
                     round.outer_index, round.tracking_weight, round.mu,
+                    round.mu_amplitude, round.mu_gating,
                     round.terminal_position_error,
                     round.terminal_heading_error_deg,
                     round.max_amplitude_violation, round.defect_norm_inf,

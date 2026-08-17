@@ -36,8 +36,31 @@ struct ApaDdpSolverConfig {
 enum class ApaDdpStatus {
     CONVERGED,
     MAX_OUTER_ITERATIONS,
-    INNER_SOLVER_FAILED  // ρ_reg 溢出，保留最后可用轨迹
+    INNER_SOLVER_FAILED,  // ρ_reg 溢出，保留最后可用轨迹
+    // 升级机制耗尽（阶段二提前退出）：违反组 μ 全部钉在上限且 λ 漂移
+    // 未带来门控级下降，保留最后可用轨迹
+    ESCALATION_EXHAUSTED
 };
+// 升级机制耗尽判据（阶段二提前退出）的输入快照
+struct EscalationState {
+    bool terminal_ok{false};
+    bool terminal_wanted{false};
+    bool terminal_pinned{false};
+    bool inequality_ok{false};
+    bool amplitude_wanted{false};
+    bool amplitude_pinned{false};
+    bool gating_ok{false};
+    bool gating_wanted{false};
+    bool gating_pinned{false};
+    bool has_gating{false};
+    bool inner_stationary{false};
+};
+// 升级机制耗尽：AL 外层只有两种升级手段——μ 增长（门控式）与 λ 漂移
+// （每轮无条件 λ←λ+μg）。当内层已达当前 AL 不动点、所有仍违反组的 μ
+// 钉在上限、且本轮门控要求升级而无法升级时，本轮 λ 增量已注入；下一轮
+// 仍为该状态则说明 λ 漂移也未带来门控级下降，两种机制均耗尽。
+// 判据只消费算法既有状态与常量，不引用任何数据集/轮数经验。
+bool EscalationStuck(const EscalationState& s);
 struct ApaDdpOuterRecord {
     // 外层轮次
     int outer_index{0};
@@ -45,6 +68,10 @@ struct ApaDdpOuterRecord {
     double tracking_weight{0.0};
     // 罚权重 μ
     double mu{0.0};
+    // 幅值组罚权重最大值（本轮开始时）
+    double mu_amplitude{0.0};
+    // 门控组罚权重（本轮开始时，阶段二专属）
+    double mu_gating{0.0};
     // μ 是否提升
     bool mu_increased{false};
     // 基础代价 J_s′
@@ -59,6 +86,8 @@ struct ApaDdpOuterRecord {
     double max_amplitude_violation{0.0};
     // 打靶缺陷 ‖d‖∞
     double defect_norm_inf{0.0};
+    // 虚拟控制 ‖w‖∞（开关关闭时为 0）
+    double virtual_control_norm_inf{0.0};
     // 内层求解状态
     MsIlqrStatus inner_status{MsIlqrStatus::MAX_ITERATIONS};
     // 内层迭代数
@@ -82,6 +111,10 @@ struct ApaDdpReport {
     double mu_initial_calibrated{0.0};
     // 最终罚权重
     double mu_final{0.0};
+    // 最终幅值组罚权重最大值
+    double mu_amplitude_final{0.0};
+    // 最终门控组罚权重
+    double mu_gating_final{0.0};
     // 终点位置误差 (m)
     double terminal_position_error{0.0};
     // 终点朝向误差 (deg)
@@ -90,6 +123,8 @@ struct ApaDdpReport {
     double max_amplitude_violation{0.0};
     // 打靶缺陷 ‖d‖∞
     double defect_norm_inf{0.0};
+    // 虚拟控制 ‖w‖∞（开关关闭时为 0）
+    double virtual_control_norm_inf{0.0};
     // 终态基础代价
     double final_cost{0.0};
     // 终点达标
@@ -121,6 +156,8 @@ struct ApaDdpStageTwoResult {
     // 门控达标
     bool gating_ok{false};
 };
+// 内层实例类型在构造时按 config.inner.use_virtual_control 运行时选择
+// （编排层虚调用调度，不进入浮点密集函数，默认关闭实例机器码与基线一致）
 // APA-DDP 求解编排入口：阶段一全局软化 + 阶段二门控精化，δ 投影防 tanδ
 // 奇异区，内层溢出冷重启一次再判死
 class ApaDdpSolver {
@@ -144,16 +181,20 @@ class ApaDdpSolver {
         const DdpCostMultiplierState* dual_seed = nullptr);
     // 求解配置（只读）
     const ApaDdpSolverConfig& config() const { return config_; }
-    // 内层 MS-iLQR 求解器（只读引用，供诊断消费）
-    const MsIlqrSolver& innerSolver() const { return *inner_solver_; }
+    // 内层 MS-iLQR 求解器（只读引用，供诊断消费；实例类型随配置开关）
+    const MsIlqrSolverInterface& innerSolver() const { return *inner_solver_; }
 
    protected:
+    // 内层实例工厂：按 config.inner.use_virtual_control 重建对应实例
+    // （构造与溢出冷重启共用同一入口，保证实例类型与配置一致）
+    void resetInnerSolver();
     // 内层韧性封装：溢出后冷重启重试一次（陈旧 QP 活动集僵局），仍失败才判死
     MsIlqrResult solveInnerResilient(
         const DdpReference& reference, AlOuterLoop* outer,
         DdpCostMultiplierState* multipliers, const DdpCostInput& cost_input,
         const DdpAlignedVec<DdpState>& warm_states,
-        const DdpAlignedVec<DdpControl>& warm_controls, double mu_round,
+        const DdpAlignedVec<DdpControl>& warm_controls,
+        DdpAlignedVec<DdpState>* virtual_controls, double mu_round,
         ApaDdpReport* report);
     // merit 地板挂钩：取终端/幅值两组 AL 罚权重的较大者
     static double MeritAlHook(double mu_terminal, double mu_amplitude) {
@@ -180,10 +221,12 @@ class ApaDdpSolver {
     };
     GatingSnapshot measureGating(const DdpGatingPlan& plan,
                                  const DdpAlignedVec<DdpState>& states) const;
-    // Hestenes-Powell + 门控 μ 增长：首轮只记录不增长，返回本轮 μ 是否提升
+    // Hestenes-Powell + 门控 μ 增长：首轮只记录不增长，返回本轮 μ 是否
+    // 提升；out_wanted 非空时输出门控是否提出增长（提前退出判据消费）
     bool updateGating(const GatingSnapshot& snapshot,
                       DdpCostMultiplierState* multipliers, double* gating_mu,
-                      double* prev_violation) const;
+                      double* prev_violation,
+                      bool* out_wanted = nullptr) const;
     // 外层 AL 循环公共实现：阶段一与阶段二共享同一套迭代框架。
     // gating_plan 非空时启用阶段二专属的门控量测、收敛判据与乘子更新；
     // 门控输出参数在阶段一时传入 nullptr
@@ -191,6 +234,7 @@ class ApaDdpSolver {
                       DdpCostMultiplierState* multipliers,
                       const DdpAlignedVec<DdpState>& warm_start_states,
                       const DdpAlignedVec<DdpControl>& warm_start_controls,
+                      DdpAlignedVec<DdpState>* warm_virtual_controls,
                       int max_rounds, double tracking_weight,
                       const std::vector<bool>* anneal_exempt_mask,
                       const DdpGatingPlan* gating_plan, ApaDdpReport* report,
@@ -208,7 +252,7 @@ class ApaDdpSolver {
     const DdpCostEvaluator* cost_evaluator_;
     // 外层 AL 状态机（跨轮次保持 μ/退火状态）
     AlOuterLoop outer_loop_;
-    // RAII 持有以支持溢出冷重启
-    std::unique_ptr<MsIlqrSolver> inner_solver_;
+    // RAII 持有以支持溢出冷重启（接口指针，实例类型随配置开关）
+    std::unique_ptr<MsIlqrSolverInterface> inner_solver_;
 };
 }  // namespace apa_post_processor

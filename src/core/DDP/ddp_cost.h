@@ -2,6 +2,7 @@
 
 #include <Eigen/Core>
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "bicycle_dynamics.h"
@@ -88,6 +89,9 @@ struct DdpCostInput {
     const DdpGatingPlan* gating_plan{nullptr};
     // 与 AL 罚同步增长，保持避障/约束交换比恒定
     double esdf_scale{1.0};
+    // 线搜索早停阈值：不含 ESDF 的廉价小计（完整代价的下界）超过
+    // 该值即跳过 ESDF 求值提前返回；默认 +inf 不筛选，行为不变
+    double screen_cost_threshold{std::numeric_limits<double>::infinity()};
 };
 // dt 因子约定：平滑/跟踪项含 dt，AL/ESDF 为点态量不乘 dt（否则 AL 约束被 dt
 // 稀释）
@@ -118,6 +122,9 @@ struct DdpCostEvaluation {
     DdpAlignedVec<DdpStageCostDerivatives> stages;
     // 全轨迹总代价
     double total_cost{0.0};
+    // 廉价小计超阈、ESDF 求值被跳过时置真（此时 total_cost 仅为不含
+    // ESDF 的下界，调用方须按拒绝路径处理或全量重判）；默认 false
+    bool esdf_screened_out{false};
 };
 // 代价与约束统一求值层：平滑 + 跟踪 + 幅值 AL + ESDF + 终点 AL + 阶段二门控
 class DdpCostEvaluator {
@@ -125,8 +132,9 @@ class DdpCostEvaluator {
     // esdf_constraint 可为 nullptr（无地图场景）
     DdpCostEvaluator(DdpCostConfig config,
                      const DdpEsdfConstraint* esdf_constraint);
-    // 全轨迹求值
-    // 两者均不在场即阶段一模式，门控项恒为零
+    // 全轨迹求值；screen_cost_threshold 供线搜索早停：廉价小计
+    // （不含 ESDF，恒 ≤ 完整代价）超阈即跳过 ESDF 求值提前返回，
+    // 默认 +inf 时行为与全量求值一致
     DdpCostEvaluation evaluate(const DdpReference& reference,
                                const DdpAlignedVec<DdpState>& states,
                                const DdpAlignedVec<DdpControl>& controls,
@@ -146,19 +154,23 @@ class DdpCostEvaluator {
     const DdpEsdfConstraint* esdfConstraint() const { return esdf_constraint_; }
 
    protected:
-    // 运行阶段 k（0..N-1）：平滑 + 跟踪 + 幅值 AL + ESDF
+    // 运行阶段 k（0..N-1）：平滑 + 跟踪 + 幅值 AL + 阶段二门控
+    // （ESDF 项由 evaluate 阶段 B 单独补入，见线搜索早停设计）
     void evaluateRunningStage(std::size_t k, const DdpReference& reference,
                               const DdpAlignedVec<DdpState>& states,
                               const DdpAlignedVec<DdpControl>& controls,
                               const DdpCostMultiplierState& multipliers,
                               const DdpCostInput& input,
                               DdpStageCostDerivatives* out) const;
-    // 终端阶段 N：终点 AL 等式 + ESDF（恒评估，不做时间轴抽样）
+    // 终端阶段 N：终点 AL 等式（ESDF 由 evaluate 阶段 B 单独补入）
     void evaluateTerminalStage(const DdpReference& reference,
                                const DdpAlignedVec<DdpState>& states,
                                const DdpCostMultiplierState& multipliers,
-                               double esdf_scale,
                                DdpStageCostDerivatives* out) const;
+    // ESDF 双 margin 惩罚单阶段补入（运行/终端阶段共用）：与廉价项
+    // 累加顺序固定为「先廉价后 ESDF」，与全量求值路径逐位一致
+    void accumulateEsdfStage(const DdpState& x, double esdf_scale,
+                             DdpStageCostDerivatives* out) const;
     // 幅值 AL 五项累加（v/a/ω 平方形态 + δ 双侧线性形态）
     void accumulateAmplitudeConstraints(
         std::size_t k, const DdpState& x,

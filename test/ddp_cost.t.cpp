@@ -39,6 +39,15 @@ void ExpectMatrixClose(const Eigen::MatrixBase<TDerivedA>& expected,
     }
 }
 
+// 矩阵/向量逐元素位级相等断言（早停筛选路径与全量路径对拍用）
+template <typename TDerivedA, typename TDerivedB>
+void ExpectBitwiseEqual(const Eigen::MatrixBase<TDerivedA>& expected,
+                        const Eigen::MatrixBase<TDerivedB>& actual) {
+    ASSERT_EQ(expected.rows(), actual.rows());
+    ASSERT_EQ(expected.cols(), actual.cols());
+    EXPECT_TRUE((expected.array() == actual.array()).all());
+}
+
 // 五点中心差分 [-f(x+2h)+8f(x+h)-8f(x-h)+f(x-2h)]/(12h)，截断误差 O(h^4)
 template <typename TFunc>
 double FivePointCentral(TFunc&& func, double h) {
@@ -668,6 +677,107 @@ TEST_F(DdpCostEvaluatorTest, EsdfPenaltyAppliesOnSampledStagesOnly) {
     }
     EXPECT_DOUBLE_EQ(esdf_sum, sampled.total_cost);
     EXPECT_DOUBLE_EQ(unsampled.total_cost, 0.0);
+}
+
+// 测试线搜索早停筛选：阈值高于完整代价时筛选不触发，结果与无阈值
+// 全量求值逐位一致（总代价、各阶段 ESDF 分量与一/二阶导数）。
+TEST_F(DdpCostEvaluatorTest, EsdfScreenThresholdAboveTotalKeepsFullResult) {
+    // 第 0 列整列占据的墙场（64×64、分辨率 0.125）
+    std::vector<Position> cells;
+    cells.reserve(64);
+    for (int row = 0; row < 64; ++row) {
+        cells.emplace_back(Position{0.0, row * 0.125});
+    }
+    const GridMap grid_map(0.125, 64, 64, Position{0.0, 0.0}, cells);
+    const ESDFMap esdf_map(grid_map);
+    const VehicleParams veh_params(4.3, 1.8, 2.7, 0.6, 0.8);
+    const VehicleFootprintModel footprint_model(veh_params, 233, 2, 1);
+    const DdpEsdfConstraint esdf_constraint(esdf_map, footprint_model);
+    const DdpCostEvaluator evaluator(MakeZeroWeightConfig(), &esdf_constraint);
+    // 全部状态平行贴墙（ESDF 激活）
+    auto states = MakeStates();
+    for (auto& state : states) {
+        state(DDP_IDX_X) = 0.5;
+        state(DDP_IDX_Y) = 4.0;
+        state(DDP_IDX_THETA) = kHalfPi;
+    }
+    const auto controls = MakeControls();
+    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
+    const auto full = EvaluateAll(evaluator, reference_, states, controls,
+                                  multipliers, 0.0);
+    DdpCostInput input;
+    input.tracking_weight = 0.0;
+    input.screen_cost_threshold = full.total_cost + 1.0;
+    const auto screened = evaluator.evaluate(reference_, states, controls,
+                                             multipliers, input);
+    EXPECT_DOUBLE_EQ(screened.total_cost, full.total_cost);
+    EXPECT_FALSE(screened.esdf_screened_out);
+    for (std::size_t k = 0; k <= kNumSteps; ++k) {
+        EXPECT_DOUBLE_EQ(screened.stages[k].cost_esdf,
+                         full.stages[k].cost_esdf)
+            << "stage " << k;
+        ExpectBitwiseEqual(screened.stages[k].lx, full.stages[k].lx);
+        ExpectBitwiseEqual(screened.stages[k].lxx, full.stages[k].lxx);
+        EXPECT_DOUBLE_EQ(screened.stages[k].totalCost(),
+                         full.stages[k].totalCost())
+            << "stage " << k;
+    }
+}
+
+// 测试线搜索早停筛选：阈值低于廉价小计（不含 ESDF）时 ESDF 求值
+// 整段跳过——总代价等于无 ESDF 求值结果（逐位），各阶段 ESDF 分量
+// 恒零、导数与无 ESDF 求值一致；同时锚定筛选的数学基础
+// 「廉价小计 < 完整代价」（ESDF 代价恒非负）。
+TEST_F(DdpCostEvaluatorTest, EsdfScreenThresholdBelowCheapTotalSkipsEsdf) {
+    // 第 0 列整列占据的墙场（64×64、分辨率 0.125）
+    std::vector<Position> cells;
+    cells.reserve(64);
+    for (int row = 0; row < 64; ++row) {
+        cells.emplace_back(Position{0.0, row * 0.125});
+    }
+    const GridMap grid_map(0.125, 64, 64, Position{0.0, 0.0}, cells);
+    const ESDFMap esdf_map(grid_map);
+    const VehicleParams veh_params(4.3, 1.8, 2.7, 0.6, 0.8);
+    const VehicleFootprintModel footprint_model(veh_params, 233, 2, 1);
+    const DdpEsdfConstraint esdf_constraint(esdf_map, footprint_model);
+    // 非零权重配置：平滑/跟踪项给出正的廉价小计（全零权重时小计恒 0，
+    // 任何正阈值都无法触发筛选，没有判别力）
+    DdpCostConfig config;
+    config.weight_jerk = 1.0;
+    config.weight_steer_accel = 2.0;
+    config.weight_ref_base = 10.0;
+    config.weight_theta = 5.0;
+    const DdpCostEvaluator with_esdf(config, &esdf_constraint);
+    const DdpCostEvaluator without_esdf(config, nullptr);
+    // 全部状态平行贴墙（ESDF 激活）
+    auto states = MakeStates();
+    for (auto& state : states) {
+        state(DDP_IDX_X) = 0.5;
+        state(DDP_IDX_Y) = 4.0;
+        state(DDP_IDX_THETA) = kHalfPi;
+    }
+    const auto controls = MakeControls();
+    const auto multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
+    const auto full = EvaluateAll(with_esdf, reference_, states, controls,
+                                  multipliers, 4.0);
+    const auto cheap = EvaluateAll(without_esdf, reference_, states, controls,
+                                   multipliers, 4.0);
+    // 负对照：场景确实处于 ESDF 激活区，廉价/完整两档存在严格间隙
+    EXPECT_GT(full.total_cost, cheap.total_cost);
+    DdpCostInput input;
+    input.tracking_weight = 4.0;
+    // 阈值低于廉价小计 → 筛选必然触发（廉价小计 > 阈值）
+    input.screen_cost_threshold = cheap.total_cost - 1.0;
+    const auto screened = with_esdf.evaluate(reference_, states, controls,
+                                             multipliers, input);
+    // 早停返回：总代价与无 ESDF 求值逐位一致，ESDF 分量与导数均未计入
+    EXPECT_DOUBLE_EQ(screened.total_cost, cheap.total_cost);
+    EXPECT_TRUE(screened.esdf_screened_out);
+    for (std::size_t k = 0; k <= kNumSteps; ++k) {
+        EXPECT_DOUBLE_EQ(screened.stages[k].cost_esdf, 0.0) << "stage " << k;
+        ExpectBitwiseEqual(screened.stages[k].lx, cheap.stages[k].lx);
+        ExpectBitwiseEqual(screened.stages[k].lxx, cheap.stages[k].lxx);
+    }
 }
 
 // 测试 dt 因子约定（回归防火墙）：平滑/跟踪项（积分型代价）随 dt 线性

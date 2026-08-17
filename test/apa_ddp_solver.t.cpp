@@ -550,5 +550,46 @@ TEST(ApaDdpSolverTest, ProbeKappaRound0Iterations) {
     }
 }
 
+// 测试升级机制耗尽判据：只有「内层已达不动点 + 所有仍违反组的 μ 钉在
+// 上限且本轮提出升级」才判耗尽；任一组仍有升级空间或内层未收敛都不得
+// 提前退出（防止误杀正在靠 μ/λ 升级逼近的解）
+TEST(ApaDdpSolverTest, EscalationStuckRequiresAllKnobsExhausted) {
+    // 全部满足（含门控违反但已钉死）→ 耗尽
+    const EscalationState exhausted{
+        false, true, true,   // 终点：违反、请求、钉死
+        false, true, true,   // 幅值：违反、请求、钉死
+        false, true, true, true, true};
+    EXPECT_TRUE(EscalationStuck(exhausted));
+    // 门控未开启时门控字段不参与判定
+    const EscalationState no_gating{
+        false, true, true, false, true, true,
+        false, false, false, false, true};
+    EXPECT_TRUE(EscalationStuck(no_gating));
+    // 内层未收敛 → 不动点论证不成立，不判耗尽
+    EscalationState not_stationary = exhausted;
+    not_stationary.inner_stationary = false;
+    EXPECT_FALSE(EscalationStuck(not_stationary));
+    // 终点违反但未请求升级（仍在门控级下降中）→ 不判耗尽
+    EscalationState improving = exhausted;
+    improving.terminal_wanted = false;
+    EXPECT_FALSE(EscalationStuck(improving));
+    // 终点违反、请求升级但未钉上限（μ 仍有空间）→ 不判耗尽
+    EscalationState unpinned = exhausted;
+    unpinned.terminal_pinned = false;
+    EXPECT_FALSE(EscalationStuck(unpinned));
+    // 幅值组尚有升级空间 → 不判耗尽
+    EscalationState amp_unpinned = exhausted;
+    amp_unpinned.amplitude_pinned = false;
+    EXPECT_FALSE(EscalationStuck(amp_unpinned));
+    // 门控违反但未钉上限 → 不判耗尽
+    EscalationState gating_unpinned = exhausted;
+    gating_unpinned.gating_pinned = false;
+    EXPECT_FALSE(EscalationStuck(gating_unpinned));
+    // 全绿场景（各组均达标）→ 外层已收敛，判据不触发
+    const EscalationState all_ok{
+        true, false, false, true, false, false,
+        true, false, false, true, true};
+    EXPECT_TRUE(EscalationStuck(all_ok));
+}
 }  // namespace apa_post_processor
 

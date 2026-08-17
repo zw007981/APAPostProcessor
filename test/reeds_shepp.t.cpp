@@ -151,6 +151,76 @@ TEST(ReedsSheppTest, NonPositiveTurningRadiusThrows) {
                  std::invalid_argument);
 }
 
+// 测试出发方向约束（start_forward 参数）：有约束时必须只返回首段有效
+// 基元方向一致的解。触发原因是该参数供换挡节点固定出车方向，约束若
+// 失效会在节点处凭空多出一次换挡。预期行为：共线同向构型下约束前进
+// 返回纯直行解；约束倒退返回首段为倒退的解且不短于无约束最短解
+TEST(ReedsSheppTest, StartDirectionConstraintFiltersFirstSegment) {
+    constexpr double RADIUS = 2.0;
+    const Pose start{0.0, 0.0, 0.0};
+    const Pose goal{5.0, 0.0, 0.0};
+    const auto forward_path = ComputeShortestReedsShepp(
+        start, goal, RADIUS, std::optional<bool>(true));
+    ASSERT_TRUE(forward_path.valid);
+    EXPECT_NEAR(forward_path.arcLength(RADIUS), 5.0, 1e-9);
+    const auto backward_path = ComputeShortestReedsShepp(
+        start, goal, RADIUS, std::optional<bool>(false));
+    ASSERT_TRUE(backward_path.valid);
+    bool first_checked = false;
+    for (int i = 0; i < backward_path.num_segments; ++i) {
+        if (std::fabs(backward_path.segments[i].length) <= 1e-12) {
+            continue;
+        }
+        EXPECT_LT(backward_path.segments[i].length, 0.0);
+        first_checked = true;
+        break;
+    }
+    EXPECT_TRUE(first_checked);
+    const auto unconstrained = ComputeShortestReedsShepp(start, goal, RADIUS);
+    EXPECT_GE(backward_path.normalized_length,
+              unconstrained.normalized_length - 1e-12);
+}
+
+// 测试方向约束下解的有效性契约：词族是原典 48 词的充分子集，对
+// 方向约束问题不保证完备（部分构型没有符合首段方向的词，返回无解
+// 是合法结果，由调用方把无解视为「不可直连」）；但只要有解，解必须
+// 终点正确且首段方向与约束一致——终点正确是不可妥协的正确性判据
+// 预期行为：随机构型下所有有效约束解的终点与目标一致，首段有效
+// 基元方向与约束一致；无解构型跳过不计
+TEST(ReedsSheppTest, ConstrainedPathReachesGoalForRandomPoses) {
+    constexpr double RADIUS = 2.5;
+    std::mt19937 rng(27182818u);
+    std::uniform_real_distribution<double> pos_dist(-10.0, 10.0);
+    std::uniform_real_distribution<double> ang_dist(-PI, PI);
+    for (int trial = 0; trial < 200; ++trial) {
+        const Pose start{pos_dist(rng), pos_dist(rng), ang_dist(rng)};
+        const Pose goal{pos_dist(rng), pos_dist(rng), ang_dist(rng)};
+        for (const bool wants_forward : {true, false}) {
+            const auto path = ComputeShortestReedsShepp(
+                start, goal, RADIUS, std::optional<bool>(wants_forward));
+            if (!path.valid) {
+                continue;
+            }
+            bool first_checked = false;
+            for (int i = 0; i < path.num_segments; ++i) {
+                if (std::fabs(path.segments[i].length) <= 1e-12) {
+                    continue;
+                }
+                EXPECT_EQ(path.segments[i].length > 0.0, wants_forward)
+                    << "trial=" << trial;
+                first_checked = true;
+                break;
+            }
+            EXPECT_TRUE(first_checked) << "trial=" << trial;
+            const Pose reached = IntegrateEndPose(path, start, RADIUS);
+            EXPECT_NEAR(reached.x, goal.x, 1e-6) << "trial=" << trial;
+            EXPECT_NEAR(reached.y, goal.y, 1e-6) << "trial=" << trial;
+            EXPECT_NEAR(AngleDiff(reached.theta, goal.theta), 0.0, 1e-6)
+                << "trial=" << trial;
+        }
+    }
+}
+
 // 测试无效路径与非正采样步长在采样期被拒绝：无解路径的段数据全是默认值，
 // 若静默采样会产生一条「停在起点」的假路径并被上层当成可行解。
 // 预期行为：无效路径与非正步长均抛出

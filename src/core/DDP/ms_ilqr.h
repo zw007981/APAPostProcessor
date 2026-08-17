@@ -53,6 +53,12 @@ struct MsIlqrConfig {
     // 前向 rollout 定义域守卫：地图外扩 margin
     // 米，越界候选直接判失败回溯（0=关闭）
     double domain_guard_margin{2.0};
+    // true=ALTRO 式虚拟控制增广（不可行状态轨迹初始化）：动力学
+    // 改写为 x⁺=f(x,u)+w，初始 w 反解自初值轨迹使首轮 rollout 恰好
+    // 复现初值、初始缺陷恒零；默认 false 保持打靶缺陷注入路径
+    bool use_virtual_control{false};
+    // 虚拟控制二次软代价权重 R_inf：½·R_inf·‖w‖²·dt 驱动 w→0
+    double virtual_control_weight{1e4};
 };
 // 内层求解状态：失败语义（正则化溢出/迭代超限）经状态码上报外层，
 // 供回退逻辑消费；仅输入契约违例抛异常
@@ -103,44 +109,92 @@ struct MsIlqrResult {
     // 「出界已被拦住」与「出界不再发生」的区分证据）
     std::int64_t domain_guard_rejections{0};
 };
+// 内层求解器编排接口：关闭/开启两个编译期实例化的公共抽象。
+// 开关选择发生在编排层（纯调度、无浮点核心），虚调用不会改变任何
+// 浮点密集函数的机器码；若把开关分支放进求解器内部的浮点函数，
+// 分支会改变其编译布局与 FMA 收缩模式，导致默认关闭路径的输出
+// 相对基线 ulp 漂移（多次二分实测证据）
+class MsIlqrSolverInterface {
+   public:
+    virtual ~MsIlqrSolverInterface() = default;
+    // 内层求解（参数契约见 MsIlqrSolverT::solve）
+    virtual MsIlqrResult solve(
+        const DdpReference& reference,
+        const DdpCostMultiplierState& multipliers,
+        const DdpCostInput& cost_input,
+        const DdpAlignedVec<DdpState>& initial_states,
+        const DdpAlignedVec<DdpControl>& initial_controls,
+        const DdpAlignedVec<DdpState>* initial_virtual_controls = nullptr) = 0;
+    // 最后一次接受迭代的名义状态序列（N+1 个）
+    virtual const DdpAlignedVec<DdpState>& states() const = 0;
+    // 最后一次接受迭代的名义控制序列（N 个）
+    virtual const DdpAlignedVec<DdpControl>& controls() const = 0;
+    // 最后一次接受迭代的虚拟控制序列（N 个，关闭实例为空）
+    virtual const DdpAlignedVec<DdpState>& virtualControls() const = 0;
+    // 最后一次接受迭代的打靶缺陷序列（N+1 个）
+    virtual const DdpAlignedVec<DdpState>& defects() const = 0;
+    // 地板抬升：µ_m = min(max(µ_m, floor), merit_mu_max)，棘轮只升不降
+    virtual void raiseMeritMuFloor(double floor) = 0;
+    // 历次迭代审计记录（供编排层/测试诊断消费）
+    virtual const std::vector<MsIlqrIterationRecord>& history() const = 0;
+    // 正则化 ρ_reg 当前值（审计诊断消费）
+    virtual double rhoReg() const = 0;
+    // merit 罚 µ_m 当前值（审计诊断消费）
+    virtual double meritMu() const = 0;
+};
 // MS-iLQR 内层求解器（Gauss-Newton）：缺陷感知回推 + box-QP + 非线性 rollout +
-// L₂ merit 线搜索
-class MsIlqrSolver {
+// L₂ merit 线搜索。UseVirtualControl=true 为 ALTRO 式虚拟控制增广实例；
+// 全部开关分支用编译期 if constexpr，false 实例的机器码与基线逐字符
+// 一致（运行时分支会改变浮点密集函数的编译布局，见接口类注释）
+template <bool UseVirtualControl>
+class MsIlqrSolverT : public MsIlqrSolverInterface {
    public:
     // 构造时校验配置与控制盒/线搜索/正则化参数合法性
-    MsIlqrSolver(MsIlqrConfig config, const BicycleDynamics* dynamics,
-                 const DdpCostEvaluator* cost_evaluator);
+    MsIlqrSolverT(MsIlqrConfig config, const BicycleDynamics* dynamics,
+                  const DdpCostEvaluator* cost_evaluator);
     // µ_m 与 ρ_reg 跨 solve
     // 调用保持（外层轮次间自然热启动），计数器与历史每次清空
-    // 输入契约：states/controls 尺寸必须为 N+1/N，dt 为正有限
+    // 输入契约：states/controls 尺寸必须为 N+1/N，dt 为正有限；
+    // initial_virtual_controls 仅开关开启时消费：非空直接热启动，
+    // 空则反解自初值轨迹（ALTRO 不可行初始化，初始缺陷恒零）
+    // 内层求解调度器：按开关零分支转发到关闭/开启两个独立实现。
+    // 开关分支绝不允许出现在任何浮点密集函数内——真实分支会改变
+    // 该函数的编译布局（栈帧/寄存器分配）与 FMA 收缩模式，导致
+    // 默认关闭路径的输出相对基线 ulp 漂移（多次二分实测证据）
     MsIlqrResult solve(const DdpReference& reference,
                        const DdpCostMultiplierState& multipliers,
                        const DdpCostInput& cost_input,
                        const DdpAlignedVec<DdpState>& initial_states,
-                       const DdpAlignedVec<DdpControl>& initial_controls);
+                       const DdpAlignedVec<DdpControl>& initial_controls,
+                       const DdpAlignedVec<DdpState>*
+                           initial_virtual_controls = nullptr) override;
     // 最后一次接受迭代的名义状态序列（N+1 个）
-    const DdpAlignedVec<DdpState>& states() const { return states_; }
+    const DdpAlignedVec<DdpState>& states() const override { return states_; }
     // 最后一次接受迭代的名义控制序列（N 个）
-    const DdpAlignedVec<DdpControl>& controls() const { return controls_; }
+    const DdpAlignedVec<DdpControl>& controls() const override { return controls_; }
+    // 最后一次接受迭代的虚拟控制序列（N 个，关闭实例为空）
+    const DdpAlignedVec<DdpState>& virtualControls() const override {
+        return virtual_controls_;
+    }
     // 最后一次接受迭代的打靶缺陷序列（N+1 个）
-    const DdpAlignedVec<DdpState>& defects() const { return defects_; }
+    const DdpAlignedVec<DdpState>& defects() const override { return defects_; }
     // 当前缺陷 L2 范数
     double defectNorm() const { return defect_norm_; }
     // 当前全轨迹总代价（增广后）
     double totalCost() const { return total_cost_; }
     // 当前 merit 罚 µ_m
-    double meritMu() const { return merit_mu_; }
+    double meritMu() const override { return merit_mu_; }
     // 地板抬升：µ_m = min(max(µ_m, floor), merit_mu_max)，棘轮只升不降
-    void raiseMeritMuFloor(double floor) {
+    void raiseMeritMuFloor(double floor) override {
         if (!std::isfinite(floor)) {
             return;
         }
         merit_mu_ = std::min(std::max(merit_mu_, floor), config_.merit_mu_max);
     }
     // 当前 LM 正则化 ρ_reg
-    double rhoReg() const { return rho_reg_; }
+    double rhoReg() const override { return rho_reg_; }
     // 本轮 solve 的逐接受迭代诊断历史（不含被拒绝迭代）
-    const std::vector<MsIlqrIterationRecord>& history() const {
+    const std::vector<MsIlqrIterationRecord>& history() const override {
         return history_;
     }
 
@@ -157,7 +211,10 @@ class MsIlqrSolver {
     void computeJacobians(const DdpReference& reference);
     void syncStepDt(const DdpReference& reference);
     // 缺陷感知 Riccati 回推：每步 box-QP 求 δũ +
-    // K，钳制行恒为零。任一步失败返回 false
+    // K，钳制行恒为零。任一步失败返回 false。本函数即关闭虚拟控制
+    // 的生产默认实现（与基线逐字符一致）：增广相关分支若混入浮点
+    // 密集函数会改变其编译布局与 FMA 收缩模式，导致输出 ulp 漂移，
+    // 因此开启路径走独立的 backwardPassWithVirtualControl
     bool backwardPass();
     // 线性 rollout（每轮一次）：缓存 EC₁/EC₂ 为成员，此后 EC(α) 闭式求值
     void linearRollout();
@@ -168,10 +225,14 @@ class MsIlqrSolver {
     // 收敛出口的可行性守卫：打靶缺陷 ‖d‖∞ 是否已降到容差内——
     // CONVERGED_COST/CONVERGED_GRADIENT 两个出口仅在守卫通过时允许触发
     bool convergenceAllowed() const;
-    // 非线性 rollout（仅线搜索内逐候选 α 调用）：控制闭环更新
+    // 非线性 rollout（仅线搜索内逐候选 α 调用）：控制闭环更新 +
+    // 候选代价求值；merit_reject_threshold 为 Armijo 接受阈值
+    // （merit_prev + γ·EC(α)），求值层据此做 ESDF 早停筛选——
+    // 廉价小计超阈即跳过 ESDF，拒绝决策与全量求值逐位一致
     double nonlinearRollout(double alpha, const DdpReference& reference,
                             const DdpCostMultiplierState& multipliers,
-                            const DdpCostInput& cost_input);
+                            const DdpCostInput& cost_input,
+                            double merit_reject_threshold);
     // merit 线搜索：α 自 1 起回溯，接受判据
     // M' <= M + γ·(EC(α) - α·µ_m‖d‖)；接受时经输出参数带回 α 与候选代价
     bool lineSearch(const DdpReference& reference,
@@ -185,6 +246,20 @@ class MsIlqrSolver {
     bool increaseReg();
     void decreaseReg();
     static double DefectNorm(const DdpAlignedVec<DdpState>& defects);
+    // 结构化价值回传内核：out = Aᵀ·S·A。A 的非零结构由
+    // bicycle_dynamics.cpp 的 jacobians() 解析式决定（对角恒 1、
+    // 行 0~2 几何项、行 3 列 4 = dt、行 5 列 6 = dt、其余恒零），
+    // 内核按该结构编译期展开列/行组合（连续内存可向量化），跳过
+    // 全部零项贡献；与 Eigen 稠密乘积逐元素差在 1e-13 量级（求值
+    // 结合顺序不同，人工裁决重新基线后启用）
+    static DdpStateHessian UpdateValueHessian(const DdpStateHessian& s,
+                                              const DdpStateJacobian& a);
+    // 虚拟控制反解：w_k = x_{k+1} − f(x_k, u_k)，使首轮 rollout 恰好
+    // 复现初值轨迹（ALTRO 不可行初始化的 w⁰ 构造）
+    DdpAlignedVec<DdpState> computeVirtualControls(
+        const DdpReference& reference,
+        const DdpAlignedVec<DdpState>& initial_states,
+        const DdpAlignedVec<DdpControl>& initial_controls) const;
 
    protected:
     // 配置
@@ -203,6 +278,10 @@ class MsIlqrSolver {
     DdpAlignedVec<DdpState> states_;
     // 名义控制序列（N 个）
     DdpAlignedVec<DdpControl> controls_;
+    // 名义虚拟控制序列（N 个，开关关闭时为空）
+    DdpAlignedVec<DdpState> virtual_controls_;
+    // 候选虚拟控制序列（线搜索试探用）
+    DdpAlignedVec<DdpState> cand_virtual_controls_;
     // 打靶缺陷序列（N+1 个）
     DdpAlignedVec<DdpState> defects_;
     // 候选状态序列（线搜索试探用）
@@ -225,6 +304,12 @@ class MsIlqrSolver {
     DdpAlignedVec<DdpControl> feedforward_;
     // Riccati 回推产出：状态反馈增益 K（N 个）
     DdpAlignedVec<DdpControlStateHessian> gain_K_;
+    // Riccati 回推产出：虚拟控制前馈修正（N 个，开关关闭时为空）
+    DdpAlignedVec<DdpState> virtual_feedforward_;
+    // Riccati 回推产出：虚拟控制状态反馈增益 K_w（N 个）
+    DdpAlignedVec<DdpStateHessian> virtual_gain_;
+    // 线性 rollout 产出：虚拟控制摄动序列 dw（N 个）
+    DdpAlignedVec<DdpState> dw_lin_;
     // 回推中间量：代价对状态的梯度 Q_x（N 个）
     DdpAlignedVec<DdpState> q_x_;
     // 回推中间量：代价对控制的梯度 Q_u（N 个）
@@ -277,4 +362,8 @@ class MsIlqrSolver {
     // 逐轮诊断历史（仅接受迭代）
     std::vector<MsIlqrIterationRecord> history_;
 };
+// 生产默认实例：虚拟控制关闭（与基线机器码逐字符一致）
+using MsIlqrSolver = MsIlqrSolverT<false>;
+// ALTRO 式虚拟控制增广实例（实验/对照用）
+using MsIlqrSolverVirtualControl = MsIlqrSolverT<true>;
 }  // namespace apa_post_processor

@@ -91,14 +91,64 @@ class MsIlqrTestAccess : public MsIlqrSolver {
     using MsIlqrSolver::q_x_;
     using MsIlqrSolver::qp_factorization_count_;
     using MsIlqrSolver::rho_reg_;
+    using MsIlqrSolver::computeVirtualControls;
     using MsIlqrSolver::setNominalTrajectory;
     using MsIlqrSolver::setShootingLookup;
     using MsIlqrSolver::states_;
     using MsIlqrSolver::step_dt_;
     using MsIlqrSolver::total_cost_;
+    using MsIlqrSolver::UpdateValueHessian;
     using MsIlqrSolver::value_S_;
     using MsIlqrSolver::value_s_;
+    using MsIlqrSolver::virtual_controls_;
 };
+
+// 虚拟控制增广实例（UseVirtualControl=true）的白盒访问器：暴露
+// 消元相关的内部量供对拍/收缩测试直接断言
+class MsIlqrVcTestAccess : public MsIlqrSolverVirtualControl {
+   public:
+    using MsIlqrSolverVirtualControl::MsIlqrSolverVirtualControl;
+    using MsIlqrSolverVirtualControl::backwardPass;
+    using MsIlqrSolverVirtualControl::computeJacobians;
+    using MsIlqrSolverVirtualControl::computeVirtualControls;
+    using MsIlqrSolverVirtualControl::evaluateNominal;
+    using MsIlqrSolverVirtualControl::feedforward_;
+    using MsIlqrSolverVirtualControl::gain_K_;
+    using MsIlqrSolverVirtualControl::prepareWorkspace;
+    using MsIlqrSolverVirtualControl::setNominalTrajectory;
+    using MsIlqrSolverVirtualControl::setShootingLookup;
+    using MsIlqrSolverVirtualControl::value_S_;
+    using MsIlqrSolverVirtualControl::value_s_;
+    using MsIlqrSolverVirtualControl::virtual_controls_;
+};
+
+// 测试结构化价值回传内核：Aᵀ·S·A 按解析雅可比的非零结构编译期展开，
+// 与 Eigen 稠密乘积在代表性操作点上对拍（容差 1e-12 相对量级）。
+// 触发原因：内核是重新基线后的性能优化，正确性只能靠结构对拍保障——
+// 若未来 bicycle_dynamics 雅可比结构变更而内核未同步，本用例立即失败。
+TEST(MsIlqrTest, UpdateValueHessianMatchesDenseProduct) {
+    const BicycleDynamics dynamics(kWheelbase);
+    DdpStateJacobian a;
+    DdpControlJacobian b;
+    dynamics.jacobians(MakeState(0.0, 0.0, 0.4, 0.5, 0.2, 0.3, 0.05),
+                       MakeControl(0.1, -0.2), kDt, &a, &b);
+    DdpStateHessian s;
+    for (int i = 0; i < DDP_STATE_DIM; ++i) {
+        for (int j = 0; j < DDP_STATE_DIM; ++j) {
+            s(i, j) = 0.01 * static_cast<double>((i * 7 + j) % 13 - 6);
+        }
+    }
+    s = 0.5 * (s + s.transpose());
+    const DdpStateHessian dense = (a.transpose() * s * a).eval();
+    const DdpStateHessian fast = MsIlqrTestAccess::UpdateValueHessian(s, a);
+    for (int i = 0; i < DDP_STATE_DIM; ++i) {
+        for (int j = 0; j < DDP_STATE_DIM; ++j) {
+            EXPECT_NEAR(dense(i, j), fast(i, j),
+                        1e-12 * std::max(1.0, std::abs(dense(i, j))))
+                << "row=" << i << " col=" << j;
+        }
+    }
+}
 
 // 一致性滚动：从 x0 出发按给定控制全量积分（不注入任何打靶状态），
 // 用于构造零缺陷初值
@@ -553,8 +603,11 @@ TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
     const DdpAlignedVec<DdpState> old_defects = solver.defects_;
     const double old_defect_norm = solver.defectNorm();
     const double alpha = 0.5;
+    // 白盒 rollout 对拍：阈值取 +inf 关闭早停筛选（筛选只影响被拒
+    // trial 的 ESDF 求值路径，不影响 rollout 本身的数值对拍）
     solver.nonlinearRollout(alpha, problem.reference,
-                            MakeMultipliers(num_steps), MakeCostInput(10.0));
+                            MakeMultipliers(num_steps), MakeCostInput(10.0),
+                            std::numeric_limits<double>::infinity());
     DdpState expected_state = old_states[0];
     ExpectMatrixNear(old_states[0], solver.cand_states_[0], 1e-12);
     for (std::size_t k = 0; k < num_steps; ++k) {
@@ -622,6 +675,43 @@ TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
     EXPECT_GE(e2e_solver.qp_factorization_count_,
               static_cast<std::int64_t>(e2e_solver.backward_pass_count_) *
                   static_cast<std::int64_t>(num_steps));
+}
+
+// 部分步长接受：全牛顿步过冲被 Armijo 拒绝后，回溯到 0<α<1 的中间
+// 步长被接受——覆盖线搜索「全步接受」与「耗尽升 ρ」之间的中间态，
+// 也是本次早停筛选改动影响的核心路径（被拒 trial 的判定边界）。
+TEST(MsIlqrTest, PartialStepAcceptance) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const std::size_t num_steps = 8;
+    const DdpState x0 = DdpState::Zero();
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
+    // 目标拉远 + 高跟踪权重 + 严格 Armijo（γ=0.8）：首轮方向过冲、
+    // α=1 被拒，回溯后以 0<α<1 的部分步长接受（默认回溯上限充足）
+    for (std::size_t k = 0; k <= num_steps; ++k) {
+        problem.reference.poses[k] = Pose(1.5, 1.5, 1.57);
+    }
+    MsIlqrConfig config = MakeConfig();
+    config.armijo_gamma = 0.8;
+    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+    const MsIlqrResult result =
+        solver.solve(problem.reference, MakeMultipliers(num_steps),
+                     MakeCostInput(1e6), problem.states, problem.controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, result.status);
+    ASSERT_NE(MsIlqrStatus::MAX_ITERATIONS, result.status);
+    ASSERT_GE(solver.history().size(), 2U);
+    bool has_partial_step = false;
+    for (const auto& record : solver.history()) {
+        if (record.alpha > 0.0 && record.alpha < 1.0) {
+            has_partial_step = true;
+        }
+    }
+    EXPECT_TRUE(has_partial_step)
+        << "期望至少一轮以 0<α<1 的部分步长被接受";
+    // 注：不断言逐轮 merit 严格下降——盒约束下期望改进模型 EC(α) 可为
+    // 正，Armijo 判据（≤ M̄ + γ·EC）允许 merit 暂时上升；终态代价下降
+    // 与收敛状态才是本场景的有效判据
+    EXPECT_LT(result.final_cost, result.initial_cost);
 }
 
 // 输入契约校验：空指针/非法配置/维度不符/打靶节点越界一律抛
@@ -849,6 +939,104 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
         EXPECT_THROW(MsIlqrTestAccess(bad, &dynamics, &evaluator),
                      std::invalid_argument);
     }
+}
+
+// 虚拟控制增广的消元锚点：权重 R→∞ 时 w 被钉死在零、增广问题退化为
+// 原始问题——大权重（1e8）下开启/关闭两种配置的回推产物（S/s/k/K）
+// 必须趋于一致（差异 O(1/R)，容差 1e-4 区分公式错误与退化极限噪声：
+// 公式错误会产生 ≥1e-3 差异）。这是消元实现正确性的总校验
+TEST(MsIlqrTest, VirtualControlEliminationPreservesValue) {
+    const ArcProblem problem =
+        MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
+                       0.2, {0, 8});
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const auto multipliers = MakeMultipliers(8);
+    const auto cost_input = MakeCostInput(1.0);
+    // 关闭路径回推
+    MsIlqrConfig off_config = MakeConfig();
+    MsIlqrTestAccess off_solver(off_config, &dynamics, &evaluator);
+    off_solver.prepareWorkspace(8);
+    off_solver.setShootingLookup(problem.reference.shooting_nodes);
+    off_solver.setNominalTrajectory(problem.reference, problem.states,
+                                    problem.controls);
+    off_solver.evaluateNominal(problem.reference, multipliers, cost_input);
+    off_solver.computeJacobians(problem.reference);
+    ASSERT_TRUE(off_solver.backwardPass());
+    // 开启路径回推（w 显式零、大权重钉死 w）：退化极限下与关闭一致
+    MsIlqrConfig on_config = MakeConfig();
+    on_config.virtual_control_weight = 1e8;
+    MsIlqrVcTestAccess on_solver(on_config, &dynamics, &evaluator);
+    on_solver.prepareWorkspace(8);
+    on_solver.virtual_controls_.assign(8, DdpState::Zero());
+    on_solver.setShootingLookup(problem.reference.shooting_nodes);
+    on_solver.setNominalTrajectory(problem.reference, problem.states,
+                                   problem.controls);
+    on_solver.evaluateNominal(problem.reference, multipliers, cost_input);
+    on_solver.computeJacobians(problem.reference);
+    ASSERT_TRUE(on_solver.backwardPass());
+    for (std::size_t k = 0; k <= 8; ++k) {
+        ExpectMatrixNear(off_solver.value_S_[k], on_solver.value_S_[k], 1e-4);
+        ExpectMatrixNear(off_solver.value_s_[k], on_solver.value_s_[k], 1e-4);
+    }
+    for (std::size_t k = 0; k < 8; ++k) {
+        ExpectMatrixNear(off_solver.feedforward_[k],
+                         on_solver.feedforward_[k], 1e-4);
+        ExpectMatrixNear(off_solver.gain_K_[k], on_solver.gain_K_[k], 1e-4);
+    }
+}
+
+// ALTRO 不可行初始化：w 反解自参考轨迹使首轮 rollout 恰好复现参考，
+// 初始缺陷恒零——与 MS 打靶注入的初始非零缺陷形成对照
+TEST(MsIlqrTest, VirtualControlInitReproducesReference) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const ArcProblem problem =
+        MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
+                       0.2, {0, 8});
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    MsIlqrConfig config = MakeConfig();
+    MsIlqrVcTestAccess solver(config, &dynamics, &evaluator);
+    const auto w = solver.computeVirtualControls(
+        problem.reference, problem.states, problem.controls);
+    ASSERT_EQ(w.size(), 8u);
+    for (std::size_t k = 0; k < 8; ++k) {
+        const DdpState integral =
+            dynamics.step(problem.states[k], problem.controls[k], kDt);
+        ExpectMatrixNear(problem.states[k + 1], integral + w[k], 1e-12);
+    }
+}
+
+// 注入非零 w（模拟初值偏差）后求解：大权重软代价把 w 压向零、
+// 解仍正常迭代——增广机制端到端可工作
+TEST(MsIlqrTest, VirtualControlShrinksToZero) {
+    const ArcProblem problem =
+        MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
+                       0.2, {0, 8});
+    const BicycleDynamics dynamics(kWheelbase);
+    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const auto multipliers = MakeMultipliers(8);
+    const auto cost_input = MakeCostInput(1.0);
+    MsIlqrConfig config = MakeConfig();
+    config.virtual_control_weight = 1e4;
+    MsIlqrVcTestAccess solver(config, &dynamics, &evaluator);
+    DdpAlignedVec<DdpState> w_init;
+    w_init.reserve(8);
+    for (std::size_t k = 0; k < 8; ++k) {
+        DdpState w = DdpState::Zero();
+        w(DDP_IDX_V) = 0.05;
+        w(DDP_IDX_DELTA) = 0.03;
+        w_init.push_back(w);
+    }
+    const MsIlqrResult result =
+        solver.solve(problem.reference, multipliers, cost_input,
+                     problem.states, problem.controls, &w_init);
+    EXPECT_GT(result.iterations, 0);
+    const auto& w_final = solver.virtualControls();
+    double w_inf = 0.0;
+    for (const auto& w : w_final) {
+        w_inf = std::max(w_inf, w.cwiseAbs().maxCoeff());
+    }
+    EXPECT_LT(w_inf, 0.01);
 }
 
 }  // namespace

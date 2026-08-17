@@ -1,11 +1,16 @@
 #include "ddp_reference_builder.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <fstream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
+#include "../../util/logger.h"
 #include "../NMPC/vehicle_circle_geometry.h"
 
 namespace apa_post_processor {
@@ -47,24 +52,185 @@ Path RebuildPath(const std::vector<Pose>& points) {
     return result;
 }
 
-// 取 RS 路径首段与末段的行驶方向（true = 前进）：零长基元不表达方向，
-// 必须跳过，否则接缝处的换挡计数会凭空多算一次
-std::pair<bool, bool> FirstAndLastDirection(const RsPath& rs) {
-    bool first = true;
-    bool last = true;
-    bool found_first = false;
-    for (int i = 0; i < rs.num_segments; ++i) {
-        const double length = rs.segments[i].length;
-        if (std::abs(length) <= 1e-12) {
+// 短接配置的合法性校验：非法值显式抛出（静默降级会让上层误以为
+// 短接已生效）
+void ValidateRsShortcutConfig(const DdpRsShortcutConfig& config,
+                              double wheelbase, double delta_max) {
+    if (!std::isfinite(config.cap_ratio) || config.cap_ratio < 0.0 ||
+        config.cap_ratio > 1.0) {
+        throw std::invalid_argument(
+            "ShortcutShiftPoints: 曲率上限比例必须落在 [0,1]");
+    }
+    if (!std::isfinite(config.collision_margin) ||
+        config.collision_margin < 0.0) {
+        throw std::invalid_argument(
+            "ShortcutShiftPoints: 碰撞裕度必须为非负有限值");
+    }
+    if (!std::isfinite(config.max_length_growth) ||
+        config.max_length_growth < 0.0) {
+        throw std::invalid_argument(
+            "ShortcutShiftPoints: 长度增长上限必须为非负有限值");
+    }
+    if (!(config.sample_dist > 0.0)) {
+        throw std::invalid_argument(
+            "ShortcutShiftPoints: 采样间距必须为正");
+    }
+    if (!(wheelbase > 0.0) || !(delta_max > 0.0)) {
+        throw std::invalid_argument(
+            "ShortcutShiftPoints: 轴距与 δ_max 必须为正");
+    }
+}
+// 构造「采样序列是否安全」的判据闭包：任一覆盖圆越出地图或侵入超过
+// 裕度即拒绝——图外是未知区域，恢复场只是数值延拓，据此接受等于
+// 凭空捏造可行空间
+auto MakeSamplesSafeChecker(const ESDFMap& esdf_map,
+                            const std::vector<Eigen::Vector2d>& outer_circles,
+                            double outer_radius, double collision_margin) {
+    return [&esdf_map, &outer_circles, outer_radius, collision_margin](
+               const std::vector<RsSamplePoint>& samples) {
+        for (const auto& sample : samples) {
+            const double cos_theta = std::cos(sample.pose.theta);
+            const double sin_theta = std::sin(sample.pose.theta);
+            for (const auto& local : outer_circles) {
+                const double wx = sample.pose.x + local.x() * cos_theta -
+                                  local.y() * sin_theta;
+                const double wy = sample.pose.y + local.x() * sin_theta +
+                                  local.y() * cos_theta;
+                if (!esdf_map.inMap(wx, wy)) {
+                    return false;
+                }
+                if (outer_radius - esdf_map.getDist(wx, wy) >
+                    collision_margin) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+}
+// RS 求解逐次耗时记录器：累计每一次 RS 计算的耗时（调用数/总耗时/
+// 单次最大耗时），析构时经日志输出汇总行；rs_timing_csv 非空时把
+// 逐次耗时追加写入 CSV（供实验取证，一次调用一段，# 开头行为段落
+// 头）。路径为空时纯汇总模式——不产生文件、不影响任何数值
+class RsTimingSink {
+   public:
+    RsTimingSink(std::string csv_path, std::string tag,
+                 const char* method_name)
+        : method_name_(method_name), tag_(std::move(tag)) {
+        if (csv_path.empty()) {
+            return;
+        }
+        stream_.open(csv_path, std::ios::app);
+        active_ = stream_.is_open();
+        if (active_) {
+            stream_ << "# invoke seq=" << NextInvocationSeq()
+                    << " method=" << method_name_ << " tag=" << tag_ << "\n";
+        }
+    }
+    ~RsTimingSink() {
+        if (active_) {
+            stream_ << "# summary calls=" << call_count_
+                    << " total_us=" << total_us_ << " max_us=" << max_us_
+                    << "\n";
+            stream_.close();
+        }
+        LOG_FMT_INFO(
+            "RS timing [{} tag={}]: calls={} total_us={:.1f} "
+            "avg_us={:.2f} max_us={:.1f}",
+            method_name_, tag_, call_count_, total_us_,
+            call_count_ > 0 ? total_us_ / call_count_ : 0.0, max_us_);
+    }
+    // 记录一次 RS 求解的耗时（微秒）与是否有效
+    void record(double time_us, bool valid) {
+        if (active_) {
+            stream_ << call_index_ << "," << time_us << ","
+                    << (valid ? 1 : 0) << "\n";
+            ++call_index_;
+        }
+        ++call_count_;
+        total_us_ += time_us;
+        max_us_ = std::max(max_us_, time_us);
+    }
+
+   protected:
+    // 进程内调用序号：同一次运行中不同输入/数据集的段落以此区分
+    static int NextInvocationSeq() {
+        static int seq = 0;
+        ++seq;
+        return seq;
+    }
+    // 输出流（仅 rs_timing_csv 非空且可打开时有效）
+    std::ofstream stream_;
+    // 是否激活（文件打开成功才激活，失败静默降级为纯汇总日志）
+    bool active_{false};
+    // 编排方法名（rs）
+    const char* method_name_;
+    // 分组标签（如数据集名），供日志与 CSV 段落头引用
+    std::string tag_;
+    // 已记录调用数（CSV 行号与汇总口径共用）
+    int call_index_{0};
+    // 汇总调用数
+    int call_count_{0};
+    // 累计耗时 (us)
+    double total_us_{0.0};
+    // 单次最大耗时 (us)
+    double max_us_{0.0};
+};
+// 把 RS 采样序列按行驶方向旗标切分为 maneuver 序列：相邻 maneuver
+// 共享边界点（与本仓库 Path 的 maneuver 边界约定一致），方向由旗标
+// 显式给定，不依赖下游再推断
+std::vector<Maneuver> SamplesToManeuvers(
+    const std::vector<RsSamplePoint>& samples) {
+    std::vector<Maneuver> maneuvers;
+    if (samples.size() < 2) {
+        return maneuvers;
+    }
+    const auto push_group = [&maneuvers](const std::vector<RsSamplePoint>& src,
+                                         std::size_t begin,
+                                         std::size_t end) {
+        std::vector<TrajectoryPoint> points;
+        points.reserve(end - begin);
+        for (std::size_t k = begin; k < end; ++k) {
+            points.emplace_back(src[k].pose.x, src[k].pose.y,
+                                src[k].pose.theta);
+        }
+        maneuvers.emplace_back(std::move(points),
+                               src[begin].forward ? Direction::FORWARD
+                                                  : Direction::BACKWARD);
+    };
+    std::size_t begin = 0;
+    for (std::size_t i = 1; i < samples.size(); ++i) {
+        if (samples[i].forward == samples[begin].forward) {
             continue;
         }
-        if (!found_first) {
-            first = length > 0.0;
-            found_first = true;
-        }
-        last = length > 0.0;
+        push_group(samples, begin, i + 1);
+        begin = i;
     }
-    return {first, last};
+    push_group(samples, begin, samples.size());
+    return maneuvers;
+}
+// 单段 maneuver 的短接代价：弧长 + 短段惩罚（低于阈值时按比例加权），
+// 沿用外部混合 A* 参考实现的定价口径
+double ManeuverShortcutCost(const Maneuver& maneuver,
+                            const DdpRsShortcutConfig& config) {
+    const double length = maneuver.length();
+    double cost = length;
+    if (length <= config.short_segment_length) {
+        cost += 0.5 * config.short_segment_weight *
+                (1.0 + (config.short_segment_length - length) /
+                           config.short_segment_length);
+    }
+    return cost;
+}
+// 整条路径的短接代价：固定段价 × 段数 + 各段代价之和
+double ShortcutPathCost(const std::vector<Maneuver>& maneuvers,
+                        const DdpRsShortcutConfig& config) {
+    double total = config.segment_fixed_cost *
+                   static_cast<double>(maneuvers.size());
+    for (const auto& maneuver : maneuvers) {
+        total += ManeuverShortcutCost(maneuver, config);
+    }
+    return total;
 }
 }  // namespace
 
@@ -85,223 +251,180 @@ DdpReferenceBuilder::DdpReferenceBuilder(DdpReferenceBuilderConfig config,
     }
 }
 
+// RS 换挡点短接：以 maneuver 边界为节点做动态规划全局择优。
+// 状态转移 dp[j] = min(dp[i] + cost(i,j))：cost(i,j) 在「沿用原路径
+// i..j-1 段」与「RS 曲线直连（出车方向受节点 maneuver 方向约束、逐点
+// 碰撞校验）」之间取更优者；代价口径为「固定段价 × 段数 + 各段弧长
+// 与短段惩罚之和」。RS 求解次数为 O(M²)（M 为 maneuver 数，每次为
+// 常数开销的闭式解）；拼接点只能落在 maneuver 边界
 Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
                          const VehicleFootprintModel& footprint_model,
                          double wheelbase, double delta_max,
                          const DdpRsShortcutConfig& config) {
-    if (!std::isfinite(config.cap_ratio) || config.cap_ratio < 0.0 ||
-        config.cap_ratio > 1.0) {
-        throw std::invalid_argument(
-            "ShortcutShiftPoints: 曲率上限比例必须落在 [0,1]");
-    }
-    if (!std::isfinite(config.collision_margin) ||
-        config.collision_margin < 0.0) {
-        throw std::invalid_argument(
-            "ShortcutShiftPoints: 碰撞裕度必须为非负有限值");
-    }
-    if (!std::isfinite(config.max_length_growth) ||
-        config.max_length_growth < 0.0) {
-        throw std::invalid_argument(
-            "ShortcutShiftPoints: 长度增长上限必须为非负有限值");
-    }
-    if (config.index_stride < 1 || config.max_rounds < 0 ||
-        !(config.sample_dist > 0.0)) {
-        throw std::invalid_argument(
-            "ShortcutShiftPoints: 扫描步长/轮数上限/采样间距非法");
-    }
-    if (!(wheelbase > 0.0) || !(delta_max > 0.0)) {
-        throw std::invalid_argument(
-            "ShortcutShiftPoints: 轴距与 δ_max 必须为正");
-    }
-    if (config.cap_ratio == 0.0 || config.max_rounds == 0 || path.empty()) {
+    ValidateRsShortcutConfig(config, wheelbase, delta_max);
+    if (config.cap_ratio == 0.0 || path.empty()) {
         return path;
     }
     const double turning_radius =
         wheelbase / (config.cap_ratio * std::tan(delta_max));
-    // 展平为「位姿 + 行驶方向」序列：换挡段数即方向翻转次数加一，全部
-    // 判据都建立在这个序列上
-    std::vector<Pose> poses;
-    std::vector<char> forward;
-    poses.reserve(path.size());
-    forward.reserve(path.size());
+    RsTimingSink timing(config.rs_timing_csv, config.rs_timing_tag, "rs");
     const auto& src_maneuvers = path.getManeuvers();
-    for (std::size_t m = 0; m < src_maneuvers.size(); ++m) {
-        const char dir =
-            (src_maneuvers[m].direction == Direction::BACKWARD) ? 0 : 1;
-        const auto& points = src_maneuvers[m].points;
-        for (std::size_t i = 0; i < points.size(); ++i) {
-            if (m > 0 && i == 0) {
-                continue;
-            }
-            poses.emplace_back(points[i].x, points[i].y, points[i].theta);
-            forward.push_back(dir);
-        }
+    const int num_maneuvers = static_cast<int>(src_maneuvers.size());
+    // 短接节点：第 k 段 maneuver 的起点位姿与方向（k = 0..M-1），
+    // 节点 M 为全局终点。RS 直连只允许发生在这些节点之间
+    struct ShortcutNode {
+        // 节点位姿
+        Pose pose{};
+        // 节点出车方向符号（+1 前进 / -1 倒退 / 0 未知）
+        int sign{0};
+    };
+    std::vector<ShortcutNode> nodes;
+    nodes.reserve(static_cast<std::size_t>(num_maneuvers) + 1);
+    for (const auto& maneuver : src_maneuvers) {
+        const auto& front_point = maneuver.points.front();
+        nodes.push_back(ShortcutNode{Pose{front_point.x, front_point.y,
+                                          front_point.theta},
+                                     DirectionSign(maneuver.direction)});
     }
-    if (poses.size() < 3) {
-        return path;
-    }
+    const auto& back_point = src_maneuvers.back().points.back();
+    nodes.push_back(
+        ShortcutNode{Pose{back_point.x, back_point.y, back_point.theta}, 0});
     const auto outer_circles =
         vehicle_circle_geometry::ExtractLocalCircleCenters(footprint_model,
                                                            CircleType::OUTER);
     const double outer_radius = footprint_model.getOuterRadius();
-    // 单条 RS 采样序列的安全判据：任一覆盖圆越界或侵入超裕度即拒绝
-    const auto samples_safe = [&](const std::vector<RsSamplePoint>& samples) {
-        for (const auto& sample : samples) {
-            const double cos_theta = std::cos(sample.pose.theta);
-            const double sin_theta = std::sin(sample.pose.theta);
-            for (const auto& local : outer_circles) {
-                const double wx = sample.pose.x + local.x() * cos_theta -
-                                  local.y() * sin_theta;
-                const double wy = sample.pose.y + local.x() * sin_theta +
-                                  local.y() * cos_theta;
-                if (!esdf_map.inMap(wx, wy)) {
-                    return false;
-                }
-                if (outer_radius - esdf_map.getDist(wx, wy) >
-                    config.collision_margin) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-    // 原始总长是长度守卫的固定基准（不随贪心轮次放宽，避免逐轮累积膨胀）
-    double original_length = 0.0;
-    for (std::size_t i = 1; i < poses.size(); ++i) {
-        original_length += std::hypot(poses[i].x - poses[i - 1].x,
-                                      poses[i].y - poses[i - 1].y);
-    }
+    const auto samples_safe = MakeSamplesSafeChecker(
+        esdf_map, outer_circles, outer_radius, config.collision_margin);
+    // 原始总代价是「改进是否值得采纳」的唯一判据，原始总长是长度守卫
+    // 的固定基准（改进后不得超预算）
+    const double original_cost = ShortcutPathCost(src_maneuvers, config);
     const double length_budget =
-        original_length * (1.0 + config.max_length_growth);
-    bool modified = false;
-    for (int round = 0; round < config.max_rounds; ++round) {
-        const int num_points = static_cast<int>(poses.size());
-        // 前缀翻转数与前缀折线长：把候选评估中的段数与长度判据降到 O(1)，
-        // 这样昂贵的逐点碰撞校验只需对少数通过廉价判据的候选执行
-        std::vector<int> flip_prefix(poses.size(), 0);
-        std::vector<double> length_prefix(poses.size(), 0.0);
-        for (int i = 1; i < num_points; ++i) {
-            flip_prefix[i] =
-                flip_prefix[i - 1] + (forward[i] != forward[i - 1] ? 1 : 0);
-            length_prefix[i] =
-                length_prefix[i - 1] + std::hypot(poses[i].x - poses[i - 1].x,
-                                                  poses[i].y - poses[i - 1].y);
+        path.length() * (1.0 + config.max_length_growth);
+    // dp[i]：从全局起点到节点 i 的最优路径；seg 为空表示该连接段沿用
+    // 原路径 maneuvers[parent..current)
+    struct ShortcutState {
+        // 到达节点 i 的最小总代价
+        double cost{std::numeric_limits<double>::infinity()};
+        // 父节点索引（-1 表示不可达）
+        int parent{-1};
+        // 父节点到当前节点的最优连接段（空 = 沿用原路径）
+        std::vector<Maneuver> seg;
+    };
+    std::vector<ShortcutState> dp(
+        static_cast<std::size_t>(num_maneuvers) + 1);
+    dp[0].cost = 0.0;
+    for (int i = 0; i < num_maneuvers; ++i) {
+        if (std::isinf(dp[i].cost)) {
+            continue;
         }
-        const int current_flips = flip_prefix[num_points - 1];
-        // 候选端点集：全部换挡点（本级存在的目标就是移动它们）并上
-        // 每 stride 个采样点
-        std::vector<int> candidates;
-        candidates.reserve(static_cast<std::size_t>(num_points) /
-                               static_cast<std::size_t>(config.index_stride) +
-                           static_cast<std::size_t>(current_flips) + 2);
-        for (int i = 0; i < num_points; ++i) {
-            const bool is_shift = (i > 0 && forward[i] != forward[i - 1]);
-            if (i % config.index_stride == 0 || is_shift ||
-                i == num_points - 1) {
-                candidates.push_back(i);
+        const ShortcutNode& start_node = nodes[i];
+        double accumulated_original_cost = 0.0;
+        for (int j = i + 1; j <= num_maneuvers; ++j) {
+            // 对称记账：原始子路径与 RS 直连都计「固定段价 + 各段代价」，
+            // 使转移比较成为完整路径代价的公平对照（外部参考实现的
+            // 记账只给 RS 段计固定段价、原始段免计，等价于给 RS 加税，
+            // 在段数少、路径已近最优的数据上会让 DP 永远找不到改进）
+            accumulated_original_cost +=
+                config.segment_fixed_cost +
+                ManeuverShortcutCost(src_maneuvers[j - 1], config);
+            double best_segment_cost = accumulated_original_cost;
+            std::vector<Maneuver> best_segment;
+            // 出车方向约束：节点方向明确时 RS 首段必须同向（换挡节点
+            // 不得凭空变向，与外部参考实现 set_current_dir 语义一致）；
+            // 方向未知（0）时不约束
+            std::optional<bool> start_forward;
+            if (start_node.sign != 0) {
+                start_forward = start_node.sign > 0;
             }
-        }
-        int best_i = -1;
-        int best_j = -1;
-        int best_flips = current_flips;
-        double best_length = 0.0;
-        std::vector<RsSamplePoint> best_samples;
-        for (const int i : candidates) {
-            for (const int j : candidates) {
-                if (j <= i + 1) {
-                    continue;
-                }
-                // 欧氏下界预检：任何 i→j 曲线的弧长不小于端点直线距离，
-                // 拼接总长下界已超预算的候选必被下方长度门拒绝，
-                // RS 词（数十次三角函数）不必计算——精确剪枝不改变选取
-                const double length_lower =
-                    length_prefix[i] +
-                    std::hypot(poses[j].x - poses[i].x,
-                               poses[j].y - poses[i].y) +
-                    (length_prefix[num_points - 1] - length_prefix[j]);
-                if (length_lower > length_budget) {
-                    continue;
-                }
-                const auto rs = ComputeShortestReedsShepp(poses[i], poses[j],
-                                                          turning_radius);
-                if (!rs.valid) {
-                    continue;
-                }
-                // 拼接后的总长：前缀（含进入 i 的那条边）+ RS 弧长 + 后缀
-                const double length =
-                    length_prefix[i] + rs.arcLength(turning_radius) +
-                    (length_prefix[num_points - 1] - length_prefix[j]);
-                if (length > length_budget) {
-                    continue;
-                }
-                // 拼接后的翻转数：前后缀内部翻转 + 两处接缝翻转 + RS 自身尖点
-                const auto rs_dir = FirstAndLastDirection(rs);
-                const int head_seam =
-                    (i > 0 && (forward[i - 1] != 0) != rs_dir.first) ? 1 : 0;
-                const int tail_seam = (j + 1 < num_points &&
-                                       rs_dir.second != (forward[j + 1] != 0))
-                                          ? 1
-                                          : 0;
-                const int flips =
-                    (i > 0 ? flip_prefix[i - 1] : 0) + head_seam +
-                    rs.numCusps() + tail_seam +
-                    (j + 1 < num_points
-                         ? flip_prefix[num_points - 1] - flip_prefix[j + 1]
-                         : 0);
-                if (flips > best_flips) {
-                    continue;
-                }
-                if (flips == best_flips && best_i >= 0 &&
-                    length >= best_length) {
-                    continue;
-                }
-                // 段数未下降且长度也未改善时不值得更换同伦类
-                if (flips == best_flips && best_i < 0 &&
-                    length >= length_prefix[num_points - 1]) {
-                    continue;
-                }
+            const auto rs_t0 = std::chrono::steady_clock::now();
+            const auto rs = ComputeShortestReedsShepp(
+                start_node.pose, nodes[j].pose, turning_radius,
+                start_forward);
+            timing.record(std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - rs_t0)
+                              .count(),
+                          rs.valid);
+            if (rs.valid) {
                 const auto samples = SampleReedsShepp(
-                    rs, poses[i], turning_radius, config.sample_dist);
-                if (!samples_safe(samples)) {
-                    continue;
+                    rs, start_node.pose, turning_radius, config.sample_dist);
+                // 退化守卫：起终点重合的零长解只有单个采样点，构不成
+                // maneuver，不可作为零代价连接
+                if (samples.size() >= 2 && samples_safe(samples)) {
+                    auto segment_maneuvers = SamplesToManeuvers(samples);
+                    const double segment_cost =
+                        ShortcutPathCost(segment_maneuvers, config);
+                    if (segment_cost < best_segment_cost - 0.01) {
+                        best_segment_cost = segment_cost;
+                        best_segment = std::move(segment_maneuvers);
+                    }
                 }
-                best_i = i;
-                best_j = j;
-                best_flips = flips;
-                best_length = length;
-                best_samples = samples;
+            }
+            const double new_cost = dp[i].cost + best_segment_cost;
+            if (new_cost < dp[j].cost - 0.01) {
+                dp[j] = ShortcutState{new_cost, i, std::move(best_segment)};
             }
         }
-        if (best_i < 0) {
-            break;
-        }
-        std::vector<Pose> spliced_poses;
-        std::vector<char> spliced_forward;
-        const std::size_t spliced_size =
-            static_cast<std::size_t>(best_i) + best_samples.size() +
-            static_cast<std::size_t>(num_points - best_j - 1);
-        spliced_poses.reserve(spliced_size);
-        spliced_forward.reserve(spliced_size);
-        for (int k = 0; k < best_i; ++k) {
-            spliced_poses.push_back(poses[k]);
-            spliced_forward.push_back(forward[k]);
-        }
-        for (const auto& sample : best_samples) {
-            spliced_poses.push_back(sample.pose);
-            spliced_forward.push_back(sample.forward ? 1 : 0);
-        }
-        for (int k = best_j + 1; k < num_points; ++k) {
-            spliced_poses.push_back(poses[k]);
-            spliced_forward.push_back(forward[k]);
-        }
-        poses = std::move(spliced_poses);
-        forward = std::move(spliced_forward);
-        modified = true;
     }
-    if (!modified) {
+    // 代价未改善则不换：DP 结果必须严格优于原路径才被采纳（-0.01 是
+    // 参考实现的采纳判据，吸收浮点噪声）
+    if (std::isinf(dp[num_maneuvers].cost) ||
+        dp[num_maneuvers].cost >= original_cost - 0.01) {
         return path;
     }
-    return RebuildPath(poses);
+    // 回溯重构：沿父链从终点向起点收集各连接段。插入统一用头部插入
+    // （先处理的终链在前、后处理的首链插到最前），连接段内部的
+    // maneuver 顺序保持不变——严禁整表 reverse：它会把多段（含尖点）
+    // RS 连接段内部的 maneuver 也反转，导致终点漂移到中间尖点处
+    std::vector<Maneuver> improved;
+    improved.reserve(static_cast<std::size_t>(num_maneuvers) + 1);
+    for (int current = num_maneuvers; current > 0;
+         current = dp[current].parent) {
+        const int parent = dp[current].parent;
+        if (parent < 0) {
+            return path;
+        }
+        const auto& seg = dp[current].seg;
+        if (seg.empty()) {
+            improved.insert(improved.begin(), src_maneuvers.begin() + parent,
+                            src_maneuvers.begin() + current);
+        } else {
+            improved.insert(improved.begin(), seg.begin(), seg.end());
+        }
+    }
+    // 展平重建：首个 maneuver 全部点、后续跳过与上一段共享的首点
+    // （与输入 Path 的 maneuver 边界约定一致），方向由重建过程再推断
+    std::vector<Pose> flattened;
+    flattened.reserve(path.size() + 1);
+    for (std::size_t m = 0; m < improved.size(); ++m) {
+        const auto& points = improved[m].points;
+        for (std::size_t k = 0; k < points.size(); ++k) {
+            if (m > 0 && k == 0) {
+                continue;
+            }
+            flattened.emplace_back(points[k].x, points[k].y, points[k].theta);
+        }
+    }
+    Path result = RebuildPath(flattened);
+    if (result.empty() || result.length() > length_budget) {
+        return path;
+    }
+    // 终点位姿保持契约：短接只允许移动换挡点，终点位姿必须保持——
+    // 下游把短接路径的终点作为目标位姿（goal 取 shared_input.back()），
+    // 终点一旦漂移，整条链路的终点收敛检查都会对着错误的目标收敛。
+    // 该守卫是「终点收敛检查有效」的前提，不是终点检查本身
+    const double pos_delta =
+        std::hypot(result.back().x - path.back().x,
+                   result.back().y - path.back().y);
+    const double head_delta =
+        std::abs(WrapAngle(result.back().theta - path.back().theta));
+    if (pos_delta > 1e-6 || head_delta > 1e-6) {
+        LOG_FMT_WARN(
+            "RS shortcut terminal pose drifted by {:.3f} m / {:.3f} rad, "
+            "reject shortcut and keep original path",
+            pos_delta, head_delta);
+        return path;
+    }
+    return result;
 }
 
 DdpReference DdpReferenceBuilder::build(const Path& path) const {
