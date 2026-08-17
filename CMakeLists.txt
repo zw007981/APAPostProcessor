@@ -63,6 +63,10 @@ message(STATUS "Found nlohmann_json: ${nlohmann_json_VERSION}")
 find_package(OpenMP REQUIRED)
 message(STATUS "Found OpenMP: ${OpenMP_CXX_VERSION}")
 
+# OMP 线程数天花板（编译期硬上限）：短并行区过度 fork 会因同步开销严重劣化
+# （22 线程实测使 B 样条 ~100ms→~10s），运行期用 OMP_NUM_THREADS 不超过上限
+set(APA_OMP_MAX_THREADS "8" CACHE STRING "OMP 线程数硬上限（编译期）")
+
 set(QUILL_LOCAL_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/quill)
 
 if(NOT EXISTS ${QUILL_LOCAL_DIR}/CMakeLists.txt)
@@ -109,7 +113,7 @@ endif()
 add_subdirectory(${LBFGSPP_LOCAL_DIR})
 message(STATUS "Included local LBFGSpp optimization library (header-only).")
 
-# 1.2 可选的库 (google test / benchmark)
+# 1.6 可选的库 (google test / benchmark)
 find_package(GTest)
 find_package(benchmark QUIET)
 
@@ -146,13 +150,9 @@ target_include_directories(apa_proto_lib PUBLIC
 # ==========================================
 # 2.1 链接时优化（LTO/IPO，作用于本仓库自有目标）
 # ==========================================
-# 跨编译单元内联消除热点调用链开销（如 ESDF 双线性查询在 esdf_map.cpp
-# 与 DDP/ALM/NMPC 各约束求值单元之间的调用边界）；声明位置在第三方
-# add_subdirectory 之后，第三方库目标不受影响；工具链不支持时打印
-# WARNING 优雅跳过，不阻断构建
-# 注意必须连带校验 C 语言：stc_SQP_core_lib（OBJECT 库）含 C 源文件，
-# 链接它的可执行目标会把 C 带入语言闭包，只校验 CXX 会在生成期报
-# "doesn't support IPO for current compiler"
+# 跨 TU 内联消除热点调用链开销（如 ESDF 双线性查询跨 TU 调用边界）；
+# 声明在第三方 add_subdirectory 之后（第三方目标不受影响），工具链不支持时优雅跳过
+# 需连带校验 C 语言：stc_SQP_core_lib 含 C 源文件，只校验 CXX 会报 "doesn't support IPO"
 enable_language(C)
 include(CheckIPOSupported)
 check_ipo_supported(LANGUAGES C CXX RESULT ipo_supported OUTPUT ipo_check_output)
@@ -191,8 +191,10 @@ target_link_libraries(apa_core_lib PUBLIC
 )
 
 # 项目根目录宏：供代码中定位 fig/、log/ 等资源目录
+# OMP 线程天花板：由上方缓存变量注入，代码统一消费（util/omp_threads.h）
 target_compile_definitions(apa_core_lib PUBLIC
     PROJECT_ROOT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    APA_OMP_MAX_THREADS=${APA_OMP_MAX_THREADS}
 )
 
 # x86 平台启用 -march=native 以使用 AVX2/FMA 等指令，释放 SIMD 潜能
@@ -200,6 +202,18 @@ target_compile_definitions(apa_core_lib PUBLIC
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
     target_compile_options(apa_core_lib PUBLIC -march=native)
     message(STATUS "Enabling -march=native for x86_64 SIMD optimizations.")
+endif()
+# 抑制 GCC 对 quill safe_strnlen 的 -Wstringop-overread 误报：quill 以
+# memchr(s,0,SIZE_MAX) 实现有限长度 strnlen，GCC 静态分析在 LTO 内联
+# 到字符串字面量调用点后报「bound 超源大小」；属第三方库误报、不应
+# 改动第三方代码，等上游修复（Clang 不识别该选项、静默忽略）
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(apa_core_lib PUBLIC -Wno-stringop-overread)
+    # LTO 链接期补充抑制：编译选项只在编译阶段生效；开启 IPO 后 GCC 在
+    # 链接阶段（WPA/LTRANS）重新内联 post_processor/ddp_solver 的 LOG
+    # 调用链并再次触发同一 quill 误报，而编译选项不会传递到链接驱动。
+    # 以链接选项携带同一 -Wno 旗标，压制所有后续可执行目标的 LTO 链接期诊断
+    add_link_options(-Wno-stringop-overread)
 endif()
 
 # ==========================================
@@ -215,12 +229,9 @@ target_link_libraries(apa_post_processor PRIVATE apa_core_lib stc_SQP_core_lib)
 if(GTest_FOUND)
     # 打包 test 文件夹下所有的测试代码 (包含 main.t.cpp)
     file(GLOB_RECURSE TEST_SRCS CONFIGURE_DEPENDS "test/*.cpp" "test/*.t.cpp")
-
     add_executable(test_apa_post_processor ${TEST_SRCS})
-
     # 链接核心库与测试框架；stc_SQP_core_lib 需显式再次链接，理由同主程序
     target_link_libraries(test_apa_post_processor PRIVATE apa_core_lib stc_SQP_core_lib)
-
     if(TARGET GTest::gmock)
         target_link_libraries(test_apa_post_processor PRIVATE GTest::gmock)
     elseif(TARGET GTest::gtest)
@@ -228,7 +239,6 @@ if(GTest_FOUND)
     else()
         target_link_libraries(test_apa_post_processor PRIVATE gmock gtest pthread)
     endif()
-
     gtest_discover_tests(test_apa_post_processor XML_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/Testing)
 endif()
 
@@ -239,7 +249,6 @@ if(benchmark_FOUND)
         "bench/main.bench.cpp"
         "bench/bench_*.cpp"
     )
-
     if(BENCH_SRCS)
         add_executable(bench_apa_post_processor ${BENCH_SRCS})
         target_include_directories(bench_apa_post_processor PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -249,47 +258,14 @@ if(benchmark_FOUND)
 endif()
 
 # ==========================================
-# 4.5 调参工具（开发期手动运行，不参与测试/压测）
+# 5. 开发期工具
 # ==========================================
-# DDP 四数据集调参驱动：逐变体 × 逐数据集执行 PostProcessor::optimizeDdp 并
-# 输出机器可读评价行，供调参标定与回归判断；stc_SQP_core_lib 需显式再次
-# 链接，理由同主程序
-add_executable(apa_tune_ddp ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_ddp.cpp)
-target_link_libraries(apa_tune_ddp PRIVATE apa_core_lib stc_SQP_core_lib)
-
-# ALM 四数据集调参驱动：逐变体 × 逐数据集执行 PostProcessor::optimizeAlm 并
-# 输出机器可读评价行；L8 ESDF 边界语义修复跨 ALM/DDP 双路径生效，ALM 回归
-# 依赖本目标（此前缺失，补齐）
-add_executable(apa_tune_alm ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_alm.cpp)
-target_link_libraries(apa_tune_alm PRIVATE apa_core_lib stc_SQP_core_lib)
-
-# DDP 四数据集可视化报告工具：运行 DDP 求解器并输出对比图 + 回归指标表
-add_executable(apa_ddp_report ${CMAKE_CURRENT_SOURCE_DIR}/tool/ddp_report.cpp)
-target_link_libraries(apa_ddp_report PRIVATE apa_core_lib stc_SQP_core_lib)
-
-# DDP 四数据集 profiling 驱动：与生产入口同款的场景链路（不做可视化），
-# 单进程内重复跑四个数据集供 perf 采样，配合 tool/profile_ddp.sh 生成火焰图
-add_executable(apa_profile_ddp ${CMAKE_CURRENT_SOURCE_DIR}/tool/profile_ddp.cpp)
-target_link_libraries(apa_profile_ddp PRIVATE apa_core_lib stc_SQP_core_lib)
-
-# NMPC 四数据集调参驱动：逐数据集执行 PostProcessor::optimize 并输出
-# 机器可读评价行，供三种算法跨数据集回归基线统一记录
-add_executable(apa_tune_nmpc ${CMAKE_CURRENT_SOURCE_DIR}/tool/tune_nmpc.cpp)
-target_link_libraries(apa_tune_nmpc PRIVATE apa_core_lib stc_SQP_core_lib)
-
-# DDP 后处理链路四断点审计驱动：复刻 optimizeDdp 装配并逐步手动编排，对
-# 阶段一解/修剪环节/阶段二解/驻留与最终输出四个断点转储全量结构化量测
-# （12 项校验判据不短路），供口径审计取证；stc_SQP_core_lib 需显式再次
-# 链接，理由同主程序
-add_executable(apa_audit_ddp_post ${CMAKE_CURRENT_SOURCE_DIR}/tool/audit_ddp_post.cpp)
-target_link_libraries(apa_audit_ddp_post PRIVATE apa_core_lib stc_SQP_core_lib)
-
-# 几何换挡点优化器先导实验：用 Reeds-Shepp 曲线对原始参考路径做跨换挡点
-# 短接，在严格无碰撞前提下考察换挡段数的可压缩空间。一次性诊断工具，
-# 结论落盘后连同本目标一并删除
+# 通用profiling方法
+add_executable(apa_profile ${CMAKE_CURRENT_SOURCE_DIR}/tool/profile.cpp)
+target_link_libraries(apa_profile PRIVATE apa_core_lib stc_SQP_core_lib)
 
 # ==========================================
-# 5. Ninja 动态并发池优化 (Ninja Pool Hack)
+# 6. Ninja 动态并发池优化 (Ninja Pool Hack)
 # ==========================================
 include(ProcessorCount)
 ProcessorCount(NPROC)
