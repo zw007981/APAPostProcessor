@@ -33,18 +33,18 @@ std::vector<Maneuver> SampleMincoTrajectory(
                              int global_segment, double local_time,
                              double global_time) {
         ThetaSSample sample;
-        sample.theta =
-            trajectory.evaluateSegment(global_segment, local_time, 0).x();
-        sample.theta_dot =
-            trajectory.evaluateSegment(global_segment, local_time, 1).x();
-        sample.theta_ddot =
-            trajectory.evaluateSegment(global_segment, local_time, 2).x();
-        sample.s =
-            trajectory.evaluateSegment(global_segment, local_time, 0).y();
-        sample.s_dot =
-            trajectory.evaluateSegment(global_segment, local_time, 1).y();
-        sample.s_ddot =
-            trajectory.evaluateSegment(global_segment, local_time, 2).y();
+        const Eigen::Vector2d eval0 =
+            trajectory.evaluateSegment(global_segment, local_time, 0);
+        const Eigen::Vector2d eval1 =
+            trajectory.evaluateSegment(global_segment, local_time, 1);
+        const Eigen::Vector2d eval2 =
+            trajectory.evaluateSegment(global_segment, local_time, 2);
+        sample.theta = eval0.x();
+        sample.theta_dot = eval1.x();
+        sample.theta_ddot = eval2.x();
+        sample.s = eval0.y();
+        sample.s_dot = eval1.y();
+        sample.s_ddot = eval2.y();
         const Eigen::Vector2d direction(std::cos(sample.theta),
                                         std::sin(sample.theta));
         if (has_prev_sample) {

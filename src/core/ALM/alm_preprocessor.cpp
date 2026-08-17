@@ -235,13 +235,18 @@ double AlmPreprocessor::evaluateCostAndGradient(
             // 积分权重 ∝ T（dt = T·dτ）
             const double weight = duration_i * trapezoid / (num_physics - 1);
             ThetaSSample sample;
-            sample.theta = trajectory.evaluateSegment(i, local_time, 0).x();
-            sample.theta_dot = trajectory.evaluateSegment(i, local_time, 1).x();
-            sample.theta_ddot =
-                trajectory.evaluateSegment(i, local_time, 2).x();
-            sample.s = trajectory.evaluateSegment(i, local_time, 0).y();
-            sample.s_dot = trajectory.evaluateSegment(i, local_time, 1).y();
-            sample.s_ddot = trajectory.evaluateSegment(i, local_time, 2).y();
+            const Eigen::Vector2d eval0 =
+                trajectory.evaluateSegment(i, local_time, 0);
+            const Eigen::Vector2d eval1 =
+                trajectory.evaluateSegment(i, local_time, 1);
+            const Eigen::Vector2d eval2 =
+                trajectory.evaluateSegment(i, local_time, 2);
+            sample.theta = eval0.x();
+            sample.theta_dot = eval1.x();
+            sample.theta_ddot = eval2.x();
+            sample.s = eval0.y();
+            sample.s_dot = eval1.y();
+            sample.s_ddot = eval2.y();
             const PhysicalConstraintPenalties penalties =
                 kinematics_.evaluatePenalties(sample);
             const double penalty_value =
@@ -442,10 +447,10 @@ double AlmPreprocessor::evaluateCostAndGradient(
         auto accumulate_k_term = [&](int row, int order, double tau,
                                      double sign, int block_row) {
             const double local_time = tau * duration_i;
-            const double value_theta =
-                sign * trajectory.evaluateSegment(i, local_time, order).x();
-            const double value_s =
-                sign * trajectory.evaluateSegment(i, local_time, order).y();
+            const Eigen::Vector2d eval =
+                trajectory.evaluateSegment(i, local_time, order);
+            const double value_theta = sign * eval.x();
+            const double value_s = sign * eval.y();
             dT += (static_cast<double>(order) / duration_i) *
                   (adjoint_theta(row, block_row) * value_theta +
                    adjoint_s(row, block_row) * value_s);
