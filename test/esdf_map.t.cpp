@@ -82,7 +82,7 @@ TEST(ESDFMapTest, QueryUsesBilinearInterpolationForDistanceAndGradient) {
 
 // 测试底层存储与插值计算为双精度：非栅格点查询与双精度手推双线性公式在
 // 1e-13 内一致（float 存储的量化噪声 ~1e-7 会立即暴露）。
-// 因为下游 ALM 数值梯度对拍需要 1e-6 量级精度，float 量化噪声是唯一瓶颈。
+// 因为下游 MINCO 数值梯度对拍需要 1e-6 量级精度，float 量化噪声是唯一瓶颈。
 TEST(ESDFMapTest, BilinearQueryMaintainsDoublePrecision) {
     const GridMap grid_map(1.0, 3, 3, Position{0.0, 0.0}, {Position{0.0, 0.0}});
     const ESDFMap esdf_map(grid_map);

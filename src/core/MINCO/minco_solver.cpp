@@ -1,4 +1,4 @@
-#include "alm_solver.h"
+#include "minco_solver.h"
 
 #include <LBFGS.h>
 
@@ -8,7 +8,7 @@
 #include <stdexcept>
 
 namespace apa_post_processor {
-Eigen::VectorXd AlmSolverProblem::initialGuess() const {
+Eigen::VectorXd MincoSolverProblem::initialGuess() const {
     const int num_segments = numSegments();
     Eigen::VectorXd guess(variableCount());
     for (int m = 0; m + 1 < num_segments; ++m) {
@@ -23,19 +23,15 @@ Eigen::VectorXd AlmSolverProblem::initialGuess() const {
     return guess;
 }
 
-AlmSolver::AlmSolver(AlmSolverConfig config,
-                     BicycleKinematicsConfig kinematics_config,
-                     AlmEsdfPenaltyConfig esdf_config)
-    : config_(config),
-      kinematics_(kinematics_config),
-      esdf_config_(esdf_config) {
+MincoSolver::MincoSolver(const MincoConfig& config)
+    : config_(config), kinematics_(config) {
     // 收敛判据与外层预算：正有限值
     if (!(config_.terminal_position_tolerance > 0.0) ||
         !std::isfinite(config_.terminal_position_tolerance) ||
         !(config_.terminal_heading_tolerance_deg > 0.0) ||
         !std::isfinite(config_.terminal_heading_tolerance_deg) ||
         config_.max_outer_iterations < 1) {
-        throw std::invalid_argument("AlmSolverConfig 收敛判据/外层预算非法");
+        throw std::invalid_argument("MincoConfig 收敛判据/外层预算非法");
     }
     // ρ 标定与更新参数：0 < ρ_min <= ρ_max，安全阀/首轮权重为正，γ 非负
     if (!(config_.rho_min > 0.0) || !(config_.rho_max >= config_.rho_min) ||
@@ -45,88 +41,88 @@ AlmSolver::AlmSolver(AlmSolverConfig config,
         !std::isfinite(config_.first_round_rho) ||
         config_.rho_increase_factor < 0.0 ||
         !std::isfinite(config_.rho_increase_factor)) {
-        throw std::invalid_argument("AlmSolverConfig ρ 标定/更新参数非法");
+        throw std::invalid_argument("MincoConfig ρ 标定/更新参数非法");
     }
     // 门控阈值仅在门控启用时校验（κ∈(0,1)）
     if (config_.use_rho_increase_gate &&
         !(config_.rho_gate_kappa > 0.0 && config_.rho_gate_kappa < 1.0)) {
-        throw std::invalid_argument("AlmSolverConfig 门控阈值必须落在 (0,1)");
+        throw std::invalid_argument("MincoConfig 门控阈值必须落在 (0,1)");
     }
     // 权重类字段：非负且有限
     if (config_.weight_jerk_s < 0.0 || !std::isfinite(config_.weight_jerk_s) ||
         config_.weight_jerk_theta < 0.0 ||
         !std::isfinite(config_.weight_jerk_theta) ||
-        config_.epsilon_time < 0.0 || !std::isfinite(config_.epsilon_time) ||
-        config_.weight_velocity < 0.0 ||
-        !std::isfinite(config_.weight_velocity) ||
-        config_.weight_acceleration < 0.0 ||
-        !std::isfinite(config_.weight_acceleration) ||
-        config_.weight_steer_angle < 0.0 ||
-        !std::isfinite(config_.weight_steer_angle) ||
-        config_.weight_steer_rate < 0.0 ||
-        !std::isfinite(config_.weight_steer_rate) ||
-        config_.weight_gear_cusp < 0.0 ||
-        !std::isfinite(config_.weight_gear_cusp) ||
-        config_.weight_gear_cusp_theta < 0.0 ||
-        !std::isfinite(config_.weight_gear_cusp_theta) ||
-        config_.weight_duration_balance < 0.0 ||
-        !std::isfinite(config_.weight_duration_balance)) {
-        throw std::invalid_argument("AlmSolverConfig 权重必须非负有限");
+        config_.solver_epsilon_time < 0.0 || !std::isfinite(config_.solver_epsilon_time) ||
+        config_.solver_weight_velocity < 0.0 ||
+        !std::isfinite(config_.solver_weight_velocity) ||
+        config_.solver_weight_acceleration < 0.0 ||
+        !std::isfinite(config_.solver_weight_acceleration) ||
+        config_.solver_weight_steer_angle < 0.0 ||
+        !std::isfinite(config_.solver_weight_steer_angle) ||
+        config_.solver_weight_steer_rate < 0.0 ||
+        !std::isfinite(config_.solver_weight_steer_rate) ||
+        config_.solver_weight_gear_cusp < 0.0 ||
+        !std::isfinite(config_.solver_weight_gear_cusp) ||
+        config_.solver_weight_gear_cusp_theta < 0.0 ||
+        !std::isfinite(config_.solver_weight_gear_cusp_theta) ||
+        config_.solver_weight_duration_balance < 0.0 ||
+        !std::isfinite(config_.solver_weight_duration_balance)) {
+        throw std::invalid_argument("MincoConfig 权重必须非负有限");
     }
     // 段时长平衡系数：0 < ε_low < ε_upp 才有非空可行带
-    if (!(config_.duration_balance_lower > 0.0) ||
-        !(config_.duration_balance_upper > config_.duration_balance_lower)) {
+    if (!(config_.solver_duration_balance_lower > 0.0) ||
+        !(config_.solver_duration_balance_upper > config_.solver_duration_balance_lower)) {
         throw std::invalid_argument("段时长平衡系数必须满足 0 < ε_low < ε_upp");
     }
     // 采样配置：梯形至少 2 点；辛普森子区间必须为偶数且至少 2
-    if (config_.physics_samples_per_segment < 2 ||
-        config_.simpson_subintervals < 2 ||
-        config_.simpson_subintervals % 2 != 0) {
+    if (config_.solver_physics_samples_per_segment < 2 ||
+        config_.solver_simpson_subintervals < 2 ||
+        config_.solver_simpson_subintervals % 2 != 0) {
         throw std::invalid_argument(
             "物理采样数须 >= 2，辛普森子区间须为 >= 2 的偶数");
     }
     // L-BFGS 参数（与预处理器同一套校验约定）
-    if (config_.lbfgs_max_iterations <= 0 || config_.lbfgs_epsilon <= 0.0 ||
-        config_.lbfgs_epsilon_rel < 0.0 || config_.lbfgs_m <= 0 ||
-        config_.lbfgs_max_linesearch <= 0 ||
-        config_.lbfgs_linesearch_algo < 1 ||
-        config_.lbfgs_linesearch_algo > 3 || config_.lbfgs_ftol <= 0.0 ||
-        config_.lbfgs_ftol >= 0.5 ||
-        config_.lbfgs_wolfe <= config_.lbfgs_ftol ||
-        config_.lbfgs_wolfe >= 1.0) {
-        throw std::invalid_argument("AlmSolverConfig L-BFGS 参数非法");
+    if (config_.solver_lbfgs_max_iterations <= 0 || config_.solver_lbfgs_epsilon <= 0.0 ||
+        config_.solver_lbfgs_epsilon_rel < 0.0 || config_.solver_lbfgs_m <= 0 ||
+        config_.solver_lbfgs_max_linesearch <= 0 ||
+        config_.solver_lbfgs_linesearch_algo < 1 ||
+        config_.solver_lbfgs_linesearch_algo > 3 || config_.solver_lbfgs_ftol <= 0.0 ||
+        config_.solver_lbfgs_ftol >= 0.5 ||
+        config_.solver_lbfgs_wolfe <= config_.solver_lbfgs_ftol ||
+        config_.solver_lbfgs_wolfe >= 1.0) {
+        throw std::invalid_argument("MincoConfig L-BFGS 参数非法");
     }
 }
 
-AlmSolverResult AlmSolver::solve(
-    const std::vector<AlmManeuverEstimate>& estimates,
-    const AlmPreprocessorResult& preprocessor_result,
+MincoSolverResult MincoSolver::solve(
+    const std::vector<MincoManeuverEstimate>& estimates,
+    const MincoPreprocessorResult& preprocessor_result,
     const Eigen::Vector2d& start_position, const ESDFMap& esdf_map,
     const VehicleFootprintModel& footprint_model) const {
-    const AlmSolverProblem problem =
+    const MincoSolverProblem problem =
         buildProblem(estimates, preprocessor_result, start_position);
-    const AlmEsdfPenalty esdf_penalty(esdf_map, footprint_model, esdf_config_);
-    AlmSolverResult result;
+    const MincoEsdfPenalty esdf_penalty(esdf_map, footprint_model, config_);
+    MincoSolverResult result;
     result.history.reserve(config_.max_outer_iterations);
     Eigen::VectorXd x = problem.initialGuess();
     // λ^0 = 0（纯软惩罚启动，不预设先验乘子）；首轮 ρ 取临时权重，首轮收敛
-    // 后即被 2.5 节公式标定的 ρ^0 替换
-    AlmMultiplierState multipliers;
+    // 后即被按 J_s'/max(‖C_f‖², ε_ρ) 标定的 ρ^0 替换
+    MincoMultiplierState multipliers;
     multipliers.rho = config_.first_round_rho;
     LBFGSpp::LBFGSParam<double> param;
-    param.epsilon = config_.lbfgs_epsilon;
-    param.epsilon_rel = config_.lbfgs_epsilon_rel;
-    param.max_iterations = config_.lbfgs_max_iterations;
-    param.m = config_.lbfgs_m;
-    param.max_linesearch = config_.lbfgs_max_linesearch;
-    param.linesearch = config_.lbfgs_linesearch_algo;
-    param.ftol = config_.lbfgs_ftol;
-    param.wolfe = config_.lbfgs_wolfe;
+    param.epsilon = config_.solver_lbfgs_epsilon;
+    param.epsilon_rel = config_.solver_lbfgs_epsilon_rel;
+    param.max_iterations = config_.solver_lbfgs_max_iterations;
+    param.m = config_.solver_lbfgs_m;
+    param.max_linesearch = config_.solver_lbfgs_max_linesearch;
+    param.linesearch = config_.solver_lbfgs_linesearch_algo;
+    param.ftol = config_.solver_lbfgs_ftol;
+    param.wolfe = config_.solver_lbfgs_wolfe;
     double prev_violation_norm = std::numeric_limits<double>::infinity();
     MincoTrajectory final_trajectory;
     for (int outer = 0; outer < config_.max_outer_iterations; ++outer) {
         // 本轮实际使用的乘子快照（记录进 history，供更新公式单步验证）
-        const AlmMultiplierState round_multipliers = multipliers;
+        const MincoMultiplierState round_multipliers = multipliers;
         const Eigen::VectorXd x_before = x;
         auto objective = [&](const Eigen::VectorXd& vars,
                              Eigen::VectorXd& grad) -> double {
@@ -144,7 +140,7 @@ AlmSolverResult AlmSolver::solve(
             // 内层失败：恢复到上一轮解（首轮恢复到预处理初值），显式标记
             // 失败并返回最后一次成功迭代的轨迹，不继续外层更新
             x = x_before;
-            result.status = AlmSolverStatus::INNER_LBFGS_FAILED;
+            result.status = MincoSolverStatus::INNER_LBFGS_FAILED;
             try {
                 final_trajectory = buildTrajectory(problem, x);
                 const TerminalMetrics metrics =
@@ -162,20 +158,20 @@ AlmSolverResult AlmSolver::solve(
             final_trajectory = buildTrajectory(problem, x);
         } catch (const std::exception&) {
             // K(T) 奇异等极端数值情况：显式失败，不返回半成品轨迹
-            result.status = AlmSolverStatus::TRAJECTORY_BUILD_FAILED;
+            result.status = MincoSolverStatus::TRAJECTORY_BUILD_FAILED;
             result.trajectory = MincoTrajectory{};
             result.outer_iterations = static_cast<int>(result.history.size());
             return result;
         }
         // 外层指标：复用与代价函数同一组辛普森节点，保证先离散后求导一致
-        AlmCostBreakdown breakdown;
+        MincoCostBreakdown breakdown;
         Eigen::VectorXd grad_scratch(x.size());
         evaluateCostAndGradient(problem, esdf_penalty, round_multipliers, x,
                                 &grad_scratch, &breakdown);
         const TerminalMetrics metrics =
             computeTerminalMetrics(problem, final_trajectory);
-        // 首轮收敛后按 2.5 节公式标定 ρ^0 并替换临时权重（首轮求解本身
-        // 仍使用 first_round_rho，标定值从首轮更新起生效）
+        // 首轮收敛后按 J_s'/max(‖C_f‖², ε_ρ) 标定 ρ^0 并替换临时权重
+        // （首轮求解本身仍使用 first_round_rho，标定值从首轮更新起生效）
         if (outer == 0) {
             result.rho_initial_calibrated = Clip(
                 breakdown.j_s_prime / std::max(metrics.violation.squaredNorm(),
@@ -183,7 +179,7 @@ AlmSolverResult AlmSolver::solve(
                 config_.rho_min, config_.rho_max);
             multipliers.rho = result.rho_initial_calibrated;
         }
-        AlmOuterIterationRecord record;
+        MincoOuterIterationRecord record;
         record.outer_index = outer;
         record.lambda_x = round_multipliers.lambda_x;
         record.lambda_y = round_multipliers.lambda_y;
@@ -192,7 +188,7 @@ AlmSolverResult AlmSolver::solve(
         record.position_error = metrics.position_error;
         record.heading_error_deg = metrics.heading_error_deg;
         record.j_s_prime = breakdown.j_s_prime;
-        record.alm_terminal = breakdown.alm_terminal;
+        record.minco_terminal = breakdown.minco_terminal;
         record.esdf_penalty = breakdown.esdf_penalty;
         record.total_cost = breakdown.total;
         record.lbfgs_iterations = result.total_lbfgs_iterations;
@@ -206,12 +202,12 @@ AlmSolverResult AlmSolver::solve(
         result.final_cost = breakdown.total;
         result.final_j_s_prime = breakdown.j_s_prime;
         result.trajectory = final_trajectory;
-        // 双指标收敛判据：位置与朝向同时满足才宣告 ALM 收敛
+        // 双指标收敛判据：位置与朝向同时满足才宣告 MINCO 收敛
         if (metrics.position_error <= config_.terminal_position_tolerance &&
             metrics.heading_error_deg <=
                 config_.terminal_heading_tolerance_deg) {
             result.success = true;
-            result.status = AlmSolverStatus::CONVERGED;
+            result.status = MincoSolverStatus::CONVERGED;
             break;
         }
         if (outer + 1 >= config_.max_outer_iterations) {
@@ -247,9 +243,9 @@ AlmSolverResult AlmSolver::solve(
     return result;
 }
 
-AlmSolverProblem AlmSolver::buildProblem(
-    const std::vector<AlmManeuverEstimate>& estimates,
-    const AlmPreprocessorResult& preprocessor_result,
+MincoSolverProblem MincoSolver::buildProblem(
+    const std::vector<MincoManeuverEstimate>& estimates,
+    const MincoPreprocessorResult& preprocessor_result,
     const Eigen::Vector2d& start_position) const {
     if (estimates.empty()) {
         throw std::invalid_argument("初值估计不能为空");
@@ -257,7 +253,7 @@ AlmSolverProblem AlmSolver::buildProblem(
     if (!start_position.allFinite()) {
         throw std::invalid_argument("起点世界坐标必须为有限值");
     }
-    AlmSolverProblem problem;
+    MincoSolverProblem problem;
     problem.start_position = start_position;
     int total_segments = 0;
     for (const auto& estimate : estimates) {
@@ -296,7 +292,7 @@ AlmSolverProblem AlmSolver::buildProblem(
     problem.start.s = {estimates.front().start_arc_length, 0.0, 0.0};
     // 终点边界与目标位姿：θ 取目标朝向（硬边界精确满足），s 的位置分量
     // 仅占位（s_f 是独立决策变量）；终点停车（速度/加速度为 0）
-    const AlmSegmentEstimate& last_segment = estimates.back().segments.back();
+    const MincoSegmentEstimate& last_segment = estimates.back().segments.back();
     if (!last_segment.desired_position.allFinite() ||
         !std::isfinite(last_segment.theta)) {
         throw std::invalid_argument("目标位姿必须为有限值");
@@ -328,12 +324,12 @@ AlmSolverProblem AlmSolver::buildProblem(
     return problem;
 }
 
-double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
-                                          const AlmEsdfPenalty& esdf_penalty,
-                                          const AlmMultiplierState& multipliers,
+double MincoSolver::evaluateCostAndGradient(const MincoSolverProblem& problem,
+                                          const MincoEsdfPenalty& esdf_penalty,
+                                          const MincoMultiplierState& multipliers,
                                           const Eigen::VectorXd& x,
                                           Eigen::VectorXd* gradient,
-                                          AlmCostBreakdown* breakdown) const {
+                                          MincoCostBreakdown* breakdown) const {
     const int num_segments = problem.numSegments();
     const MincoTrajectory trajectory = buildTrajectory(problem, x);
     // ∂J/∂c（θ/s 两个维度，6xM）与 ∂J/∂T（M 维，仅显式部分）的累加器
@@ -344,11 +340,11 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
         MincoTrajectory::COEFFS_PER_SEG, num_segments);
     Eigen::VectorXd dJ_dT = Eigen::VectorXd::Zero(num_segments);
     double j_s_prime = 0.0;
-    double alm_terminal = 0.0;
+    double minco_terminal = 0.0;
     double esdf_penalty_cost = 0.0;
     // ---- 基础平滑目标 J_0：跃度积分闭式解 ----
-    // 每段 ∫σ⃛²dt = Q(c)/T⁵，Q 为归一化系数的解析二次型（设计文档 1.3 节
-    // 注明该积分存在闭式解，无需数值求积）：Q = 36c₃² + 192c₄² + 720c₅² +
+    // 每段 ∫σ⃛²dt = Q(c)/T⁵，Q 为归一化系数的解析二次型（该积分存在
+    // 闭式解，无需数值求积）：Q = 36c₃² + 192c₄² + 720c₅² +
     // 144c₃c₄ + 240c₃c₅ + 720c₄c₅；显式时长梯度 ∂/∂T = -5·J_i/T
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
@@ -378,11 +374,11 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
     }
     // ---- 时间正则：ε_T·ΣT_i（J_0 的组成部分）----
     for (int i = 0; i < num_segments; ++i) {
-        j_s_prime += config_.epsilon_time * trajectory.duration(i);
-        dJ_dT(i) += config_.epsilon_time;
+        j_s_prime += config_.solver_epsilon_time * trajectory.duration(i);
+        dJ_dT(i) += config_.solver_epsilon_time;
     }
     // ---- 物理约束惩罚：每段梯形积分，梯度经基函数行回传到多项式系数 ----
-    const int num_physics = config_.physics_samples_per_segment;
+    const int num_physics = config_.solver_physics_samples_per_segment;
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
         for (int j = 0; j < num_physics; ++j) {
@@ -408,44 +404,44 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
             const PhysicalConstraintPenalties penalties =
                 kinematics_.evaluatePenalties(sample);
             const double penalty_value =
-                config_.weight_velocity * penalties.velocity.penalty +
-                config_.weight_acceleration * penalties.acceleration.penalty +
-                config_.weight_steer_angle * penalties.steer_angle.penalty +
-                config_.weight_steer_rate * penalties.steer_rate.penalty;
+                config_.solver_weight_velocity * penalties.velocity.penalty +
+                config_.solver_weight_acceleration * penalties.acceleration.penalty +
+                config_.solver_weight_steer_angle * penalties.steer_angle.penalty +
+                config_.solver_weight_steer_rate * penalties.steer_rate.penalty;
             j_s_prime += weight * penalty_value;
             const double g_theta_dot =
-                config_.weight_velocity *
+                config_.solver_weight_velocity *
                     penalties.velocity.gradient.d_theta_dot +
-                config_.weight_acceleration *
+                config_.solver_weight_acceleration *
                     penalties.acceleration.gradient.d_theta_dot +
-                config_.weight_steer_angle *
+                config_.solver_weight_steer_angle *
                     penalties.steer_angle.gradient.d_theta_dot +
-                config_.weight_steer_rate *
+                config_.solver_weight_steer_rate *
                     penalties.steer_rate.gradient.d_theta_dot;
             const double g_theta_ddot =
-                config_.weight_velocity *
+                config_.solver_weight_velocity *
                     penalties.velocity.gradient.d_theta_ddot +
-                config_.weight_acceleration *
+                config_.solver_weight_acceleration *
                     penalties.acceleration.gradient.d_theta_ddot +
-                config_.weight_steer_angle *
+                config_.solver_weight_steer_angle *
                     penalties.steer_angle.gradient.d_theta_ddot +
-                config_.weight_steer_rate *
+                config_.solver_weight_steer_rate *
                     penalties.steer_rate.gradient.d_theta_ddot;
             const double g_s_dot =
-                config_.weight_velocity * penalties.velocity.gradient.d_s_dot +
-                config_.weight_acceleration *
+                config_.solver_weight_velocity * penalties.velocity.gradient.d_s_dot +
+                config_.solver_weight_acceleration *
                     penalties.acceleration.gradient.d_s_dot +
-                config_.weight_steer_angle *
+                config_.solver_weight_steer_angle *
                     penalties.steer_angle.gradient.d_s_dot +
-                config_.weight_steer_rate *
+                config_.solver_weight_steer_rate *
                     penalties.steer_rate.gradient.d_s_dot;
             const double g_s_ddot =
-                config_.weight_velocity * penalties.velocity.gradient.d_s_ddot +
-                config_.weight_acceleration *
+                config_.solver_weight_velocity * penalties.velocity.gradient.d_s_ddot +
+                config_.solver_weight_acceleration *
                     penalties.acceleration.gradient.d_s_ddot +
-                config_.weight_steer_angle *
+                config_.solver_weight_steer_angle *
                     penalties.steer_angle.gradient.d_s_ddot +
-                config_.weight_steer_rate *
+                config_.solver_weight_steer_rate *
                     penalties.steer_rate.gradient.d_s_ddot;
             // ∂D^k/∂c_i = 实时间导数基函数行
             const auto basis_d1 =
@@ -474,32 +470,32 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
     }
     mean_duration /= num_segments;
     for (int i = 0; i < num_segments; ++i) {
-        const double c_low = config_.duration_balance_lower * mean_duration -
+        const double c_low = config_.solver_duration_balance_lower * mean_duration -
                              trajectory.duration(i);
         if (c_low > 0.0) {
             j_s_prime +=
-                config_.weight_duration_balance * c_low * c_low * c_low;
+                config_.solver_weight_duration_balance * c_low * c_low * c_low;
             // ∂C_low/∂T_j = ε_low/M - δ_ij
             const double grad_factor =
-                3.0 * config_.weight_duration_balance * c_low * c_low;
+                3.0 * config_.solver_weight_duration_balance * c_low * c_low;
             dJ_dT(i) -= grad_factor;
             for (int j = 0; j < num_segments; ++j) {
                 dJ_dT(j) +=
-                    grad_factor * config_.duration_balance_lower / num_segments;
+                    grad_factor * config_.solver_duration_balance_lower / num_segments;
             }
         }
         const double c_upp = trajectory.duration(i) -
-                             config_.duration_balance_upper * mean_duration;
+                             config_.solver_duration_balance_upper * mean_duration;
         if (c_upp > 0.0) {
             j_s_prime +=
-                config_.weight_duration_balance * c_upp * c_upp * c_upp;
+                config_.solver_weight_duration_balance * c_upp * c_upp * c_upp;
             // ∂C_upp/∂T_j = δ_ij - ε_upp/M
             const double grad_factor =
-                3.0 * config_.weight_duration_balance * c_upp * c_upp;
+                3.0 * config_.solver_weight_duration_balance * c_upp * c_upp;
             dJ_dT(i) += grad_factor;
             for (int j = 0; j < num_segments; ++j) {
                 dJ_dT(j) -=
-                    grad_factor * config_.duration_balance_upper / num_segments;
+                    grad_factor * config_.solver_duration_balance_upper / num_segments;
             }
         }
     }
@@ -508,8 +504,8 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
         const double duration_g = trajectory.duration(cusp_index);
         const double s_dot_end =
             trajectory.evaluateSegment(cusp_index, duration_g, 1).y();
-        j_s_prime += config_.weight_gear_cusp * s_dot_end * s_dot_end;
-        const double g_s_dot = 2.0 * config_.weight_gear_cusp * s_dot_end;
+        j_s_prime += config_.solver_weight_gear_cusp * s_dot_end * s_dot_end;
+        const double g_s_dot = 2.0 * config_.solver_weight_gear_cusp * s_dot_end;
         dJ_dc_s.col(cusp_index) +=
             g_s_dot *
             MincoTrajectory::DerivativeBasisRow(1.0, 1, duration_g).transpose();
@@ -522,9 +518,9 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
         const double theta_dot_end =
             trajectory.evaluateSegment(cusp_index, duration_g, 1).x();
         j_s_prime +=
-            config_.weight_gear_cusp_theta * theta_dot_end * theta_dot_end;
+            config_.solver_weight_gear_cusp_theta * theta_dot_end * theta_dot_end;
         const double g_theta_dot =
-            2.0 * config_.weight_gear_cusp_theta * theta_dot_end;
+            2.0 * config_.solver_weight_gear_cusp_theta * theta_dot_end;
         dJ_dc_theta.col(cusp_index) +=
             g_theta_dot *
             MincoTrajectory::DerivativeBasisRow(1.0, 1, duration_g).transpose();
@@ -534,7 +530,7 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
     // ---- 空间项：PHR-ALM 终端 + ESDF 双重惩罚（共享同一组辛普森节点）----
     // 先离散后求导：代价与梯度共用同一组固定求积节点（由
     // computeSimpsonNodeData 统一产出，与终点指标计算共享），保证严格一致
-    const int num_simpson = config_.simpson_subintervals;
+    const int num_simpson = config_.solver_simpson_subintervals;
     const std::vector<double> simpson_unit_weights =
         SimpsonUnitWeights(num_simpson);
     const SimpsonNodeData simpson_data =
@@ -549,9 +545,9 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
         violation.x() + multipliers.lambda_x / multipliers.rho;
     const double augmented_y =
         violation.y() + multipliers.lambda_y / multipliers.rho;
-    alm_terminal = 0.5 * multipliers.rho *
+    minco_terminal = 0.5 * multipliers.rho *
                    (augmented_x * augmented_x + augmented_y * augmented_y);
-    // 位置相关项的后缀梯度：末端位置依赖全部节点，故以 ALM 终端梯度初始化
+    // 位置相关项的后缀梯度：末端位置依赖全部节点，故以 MINCO 终端梯度初始化
     // 后缀，再按节点逆序累加各节点的 ESDF 梯度（节点 (i,j) 的位置只依赖
     // 全局序不晚于它的节点）
     Eigen::Vector2d suffix_gradient(
@@ -562,14 +558,14 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
         double segment_esdf_cost = 0.0;
         for (int j = num_simpson; j >= 0; --j) {
             const double tau = static_cast<double>(j) / num_simpson;
-            // ESDF 惩罚按设计文档 2.4 节在时间轴上梯形离散积分（权重 ∝T）
+            // ESDF 惩罚在时间轴上梯形离散积分（权重 ∝T）
             const double weight_trapezoid =
                 duration_i / num_simpson *
                 ((j == 0 || j == num_simpson) ? 0.5 : 1.0);
             const Eigen::Vector2d& position = simpson_data.node_positions[i][j];
             const double theta = simpson_data.node_theta[i][j];
             const double s_dot = simpson_data.node_s_dot[i][j];
-            const AlmEsdfPoseCost pose_cost =
+            const MincoEsdfPoseCost pose_cost =
                 esdf_penalty.evaluate(position.x(), position.y(), theta);
             segment_esdf_cost += weight_trapezoid * pose_cost.cost;
             suffix_gradient += weight_trapezoid * pose_cost.gradient.head<2>();
@@ -658,17 +654,17 @@ double AlmSolver::evaluateCostAndGradient(const AlmSolverProblem& problem,
             dT * MincoTrajectory::TauToDurationDerivative(
                      x[2 * (num_segments - 1) + i]);
     }
-    const double total = j_s_prime + alm_terminal;
+    const double total = j_s_prime + minco_terminal;
     if (breakdown != nullptr) {
         breakdown->total = total;
         breakdown->j_s_prime = j_s_prime;
-        breakdown->alm_terminal = alm_terminal;
+        breakdown->minco_terminal = minco_terminal;
         breakdown->esdf_penalty = esdf_penalty_cost;
     }
     return total;
 }
 
-MincoTrajectory AlmSolver::buildTrajectory(const AlmSolverProblem& problem,
+MincoTrajectory MincoSolver::buildTrajectory(const MincoSolverProblem& problem,
                                            const Eigen::VectorXd& x) const {
     const int num_segments = problem.numSegments();
     if (x.size() != problem.variableCount()) {
@@ -691,11 +687,11 @@ MincoTrajectory AlmSolver::buildTrajectory(const AlmSolverProblem& problem,
     return trajectory;
 }
 
-AlmSolver::SimpsonNodeData AlmSolver::computeSimpsonNodeData(
+MincoSolver::SimpsonNodeData MincoSolver::computeSimpsonNodeData(
     const MincoTrajectory& trajectory,
     const Eigen::Vector2d& start_position) const {
     const int num_segments = trajectory.numSegments();
-    const int num_simpson = config_.simpson_subintervals;
+    const int num_simpson = config_.solver_simpson_subintervals;
     const std::vector<double> simpson_unit_weights =
         SimpsonUnitWeights(num_simpson);
     SimpsonNodeData data;
@@ -737,8 +733,8 @@ AlmSolver::SimpsonNodeData AlmSolver::computeSimpsonNodeData(
     return data;
 }
 
-AlmSolver::TerminalMetrics AlmSolver::computeTerminalMetrics(
-    const AlmSolverProblem& problem, const MincoTrajectory& trajectory) const {
+MincoSolver::TerminalMetrics MincoSolver::computeTerminalMetrics(
+    const MincoSolverProblem& problem, const MincoTrajectory& trajectory) const {
     const SimpsonNodeData simpson_data =
         computeSimpsonNodeData(trajectory, problem.start_position);
     TerminalMetrics metrics;
@@ -757,7 +753,7 @@ AlmSolver::TerminalMetrics AlmSolver::computeTerminalMetrics(
     return metrics;
 }
 
-std::vector<double> AlmSolver::SimpsonUnitWeights(int num_subintervals) {
+std::vector<double> MincoSolver::SimpsonUnitWeights(int num_subintervals) {
     std::vector<double> weights(num_subintervals + 1, 2.0);
     weights.front() = 1.0;
     weights.back() = 1.0;
@@ -767,7 +763,7 @@ std::vector<double> AlmSolver::SimpsonUnitWeights(int num_subintervals) {
     return weights;
 }
 
-double AlmSolver::NormalizeAngle(double angle) {
+double MincoSolver::NormalizeAngle(double angle) {
     const double pi = std::acos(-1.0);
     angle = std::fmod(angle + pi, 2.0 * pi);
     if (angle < 0.0) {
@@ -776,7 +772,7 @@ double AlmSolver::NormalizeAngle(double angle) {
     return angle - pi;
 }
 
-double AlmSolver::Clip(double value, double lower, double upper) {
+double MincoSolver::Clip(double value, double lower, double upper) {
     return std::min(std::max(value, lower), upper);
 }
 }  // namespace apa_post_processor

@@ -1,12 +1,12 @@
-#include "alm_steer_padding.h"
+#include "minco_steer_padding.h"
 
 #include <algorithm>
 #include <cmath>
 
 namespace apa_post_processor {
-AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
-                                       const AlmSteerPaddingConfig& config) {
-    AlmSteerPaddingStats stats;
+MincoSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
+                                       const MincoConfig& config) {
+    MincoSteerPaddingStats stats;
     for (auto& maneuver : maneuvers) {
         std::size_t index = 0;
         while (index < maneuver.points.size()) {
@@ -22,7 +22,10 @@ AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
                 ++index;
             }
             const std::size_t end = index;
-            if (end - begin < 2) {
+            // 单点停驻窗口（如方向反转重切分后共享边界点的副本）同样需要
+            // 合法化：其 δ 是 ṡ≈0 处 θ̇ 残留打轮的伪影，跳过会让 |δ| 超限
+            // 泄漏到输出。仅跳过空窗口
+            if (end - begin < 1) {
                 continue;
             }
             // 窗口净朝向变化：只改写"伪影摆动"（净旋转≈0）窗口；真实
@@ -42,19 +45,19 @@ AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
             const double delta_start =
                 std::clamp(begin > 0 ? points[begin - 1].getDelta()
                                      : points[begin].getDelta(),
-                           -config.max_steer_angle, config.max_steer_angle);
+                           -config.pad_steer_angle, config.pad_steer_angle);
             const double delta_end =
                 std::clamp(end < points.size() ? points[end].getDelta()
                                                : points[end - 1].getDelta(),
-                           -config.max_steer_angle, config.max_steer_angle);
+                           -config.pad_steer_angle, config.pad_steer_angle);
             const double t_begin = points[begin].getT();
             const double span = points[end - 1].getT() - t_begin;
             double slope = 0.0;
             if (span > 0.0) {
                 slope = (delta_end - delta_start) / span;
             }
-            slope = std::clamp(slope, -config.max_steer_rate,
-                               config.max_steer_rate);
+            slope = std::clamp(slope, -config.pad_steer_rate,
+                               config.pad_steer_rate);
             // 斜率继承：若窗口前一点已处于同向过渡带（通常来自上一个窗口
             // 的延伸），沿用其斜率保持 δ̇ 连续，避免两段过渡带衔接处产生
             // 新的转向残差
@@ -62,8 +65,8 @@ AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
                 const double prev_slope = points[begin - 1].getDeltaDot();
                 if (std::abs(prev_slope) > 1e-9 &&
                     (prev_slope > 0.0) == (slope > 0.0)) {
-                    slope = std::clamp(prev_slope, -config.max_steer_rate,
-                                       config.max_steer_rate);
+                    slope = std::clamp(prev_slope, -config.pad_steer_rate,
+                                       config.pad_steer_rate);
                 }
             }
             stats.max_steer_rate_used =
@@ -86,8 +89,8 @@ AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
                 } else {
                     point.theta = theta_frozen;
                 }
-                point.setDelta(std::clamp(ramp_delta, -config.max_steer_angle,
-                                          config.max_steer_angle));
+                point.setDelta(std::clamp(ramp_delta, -config.pad_steer_angle,
+                                          config.pad_steer_angle));
                 point.setDeltaDot(slope);
             }
             // 交界平滑：过渡带与原剖面衔接处（窗口首末两端）的斜率折角在

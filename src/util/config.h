@@ -4,9 +4,9 @@
 
 namespace apa_post_processor {
 // 后处理算法通用配置基类（纯数据容器）。
-// 派生类（NMPCConfig / AlmConfig 等）在此基础上追加各自专有参数。
+// 派生类（NMPCConfig / MincoConfig 等）在此基础上追加各自专有参数。
 // 基类自身的拷贝/移动构造与赋值收缩为 protected：派生类的隐式拷贝/移动
-// 不受影响（可正常按值传递 NMPCConfig / AlmConfig），但从外部直接拷贝或
+// 不受影响（可正常按值传递 NMPCConfig / MincoConfig），但从外部直接拷贝或
 // 移动基类对象在编译期即被禁止，杜绝按值切片。
 struct Config {
     virtual ~Config() = default;

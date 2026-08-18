@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/ALM/alm_maneuver_segmenter.h"
+#include "core/MINCO/minco_maneuver_segmenter.h"
 #include "util/constants.h"
 
 namespace apa_post_processor {
@@ -13,16 +13,17 @@ namespace {
 // 测试配置：d_seg=0.6、标称速度 0.5 m/s、标称转向角速度 0.3 rad/s、时长下限
 // 0.5 s；结构性用例显式关闭微段融合（fuse_arc_threshold=0），避免默认融合
 // 阈值干扰方向切分/弧长累积等结构断言（融合行为由专门用例覆盖）
-AlmManeuverSegmenterConfig MakeConfig() {
-    AlmManeuverSegmenterConfig config;
+MincoConfig MakeConfig() {
+    MincoConfig config;
     config.fuse_arc_threshold = 0.0;
     return config;
 }
 
 // 测试用派生类：暴露受保护的单 Maneuver 解析入口，供防御分支白盒测试
-class AlmManeuverSegmenterTestAccessor : public AlmManeuverSegmenter {
+class MincoManeuverSegmenterTestAccessor : public MincoManeuverSegmenter {
    public:
-    using AlmManeuverSegmenter::segmentManeuver;
+    using MincoManeuverSegmenter::MincoManeuverSegmenter;
+    using MincoManeuverSegmenter::segmentManeuver;
 };
 
 // 从当前路径末端沿 x 轴追加直线路径点（步长 0.05 m，与 A* 点距一致）
@@ -49,13 +50,13 @@ Path BuildTwoShiftPath() {
 // 测试两次换挡路径的宏观切分与带符号累积弧长。
 // 因为换挡点即 Maneuver 交界，所以方向序列必须为 前进/后退/前进，且弧长
 // 在换挡点处连续、后退段沿负方向累积。
-TEST(AlmManeuverSegmenterTest,
+TEST(MincoManeuverSegmenterTest,
      ShiftSplitProducesCorrectDirectionsAndSignedArcLengths) {
-    const AlmManeuverSegmenter segmenter(MakeConfig());
+    const MincoManeuverSegmenter segmenter(MakeConfig());
     const Path path = BuildTwoShiftPath();
     ASSERT_EQ(path.numManeuvers(), 3);
 
-    const std::vector<AlmManeuverEstimate> estimates = segmenter.segment(path);
+    const std::vector<MincoManeuverEstimate> estimates = segmenter.segment(path);
 
     ASSERT_EQ(estimates.size(), 3);
     EXPECT_EQ(estimates[0].direction, Direction::FORWARD);
@@ -84,7 +85,7 @@ TEST(AlmManeuverSegmenterTest,
 // 测试给定弧长/标称段长下分段数 M 与 K_step 锚点抽取的手工对拍。
 // 因为 M=ceil(L/d_seg)、K_step=floor((N-1)/M) 是设计文档给出的确定公式，
 // 所以锚点位置必须与手工构造的预期逐点一致。
-TEST(AlmManeuverSegmenterTest,
+TEST(MincoManeuverSegmenterTest,
      SegmentCountAndAnchorExtractionMatchHandComputation) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
@@ -93,10 +94,10 @@ TEST(AlmManeuverSegmenterTest,
     ASSERT_EQ(path.numManeuvers(), 1);
 
     // d_seg=0.3：M=ceil(1/0.3)=4，K=floor(20/4)=5，锚点 {0,5,10,15,20}
-    AlmManeuverSegmenterConfig config = MakeConfig();
+    MincoConfig config = MakeConfig();
     config.nominal_segment_length = 0.3;
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter(config).segment(path);
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(config).segment(path);
     ASSERT_EQ(estimates.size(), 1);
     ASSERT_EQ(estimates[0].segments.size(), 4);
     const double expected_positions[] = {0.25, 0.5, 0.75, 1.0};
@@ -111,8 +112,8 @@ TEST(AlmManeuverSegmenterTest,
     }
     // d_seg=0.4：M=3，K=6，锚点 {0,6,12,20}，末段强制对齐路径终点（更长）
     config.nominal_segment_length = 0.4;
-    const std::vector<AlmManeuverEstimate> tail_estimates =
-        AlmManeuverSegmenter(config).segment(path);
+    const std::vector<MincoManeuverEstimate> tail_estimates =
+        MincoManeuverSegmenter(config).segment(path);
     ASSERT_EQ(tail_estimates[0].segments.size(), 3);
     EXPECT_NEAR(tail_estimates[0].segments[0].desired_position.x(), 0.3, 1e-9);
     EXPECT_NEAR(tail_estimates[0].segments[1].desired_position.x(), 0.6, 1e-9);
@@ -123,7 +124,7 @@ TEST(AlmManeuverSegmenterTest,
 // 测试原地转向（PIVOT）机动的处理。
 // 因为 PIVOT 不产生位移，所以弧长必须保持不变，时长初值由朝向变化量与
 // 标称转向角速度决定。
-TEST(AlmManeuverSegmenterTest,
+TEST(MincoManeuverSegmenterTest,
      PivotManeuverKeepsArcLengthAndEstimatesTurnDuration) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
@@ -139,8 +140,8 @@ TEST(AlmManeuverSegmenterTest,
     path.finalize();
     ASSERT_EQ(path.numManeuvers(), 3);
 
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter(MakeConfig()).segment(path);
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(MakeConfig()).segment(path);
 
     ASSERT_EQ(estimates.size(), 3);
     EXPECT_EQ(estimates[1].direction, Direction::PIVOT);
@@ -157,14 +158,14 @@ TEST(AlmManeuverSegmenterTest,
 // 测试弧长小于标称段长的短 Maneuver 退化为单段。
 // 因为 M=ceil(L/d_seg) 在 L<d_seg 时等于 1，所以必须产出恰好 1 段而非
 // M=0。
-TEST(AlmManeuverSegmenterTest, ShortManeuverDegeneratesToSingleSegment) {
+TEST(MincoManeuverSegmenterTest, ShortManeuverDegeneratesToSingleSegment) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
     AppendXLine(&path, 0.0, 0.2, 0.0);
     path.finalize();
 
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter(MakeConfig()).segment(path);
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(MakeConfig()).segment(path);
 
     ASSERT_EQ(estimates.size(), 1);
     ASSERT_EQ(estimates[0].segments.size(), 1);
@@ -175,13 +176,13 @@ TEST(AlmManeuverSegmenterTest, ShortManeuverDegeneratesToSingleSegment) {
 // 测试单点与两点路径的退化行为。
 // 因为退化输入不得产生 M=0 或崩溃，所以单点 Maneuver 也必须有定义良好的
 // 单段输出。
-TEST(AlmManeuverSegmenterTest, SinglePointAndTwoPointPathsHaveDefinedBehavior) {
-    const AlmManeuverSegmenter segmenter(MakeConfig());
+TEST(MincoManeuverSegmenterTest, SinglePointAndTwoPointPathsHaveDefinedBehavior) {
+    const MincoManeuverSegmenter segmenter(MakeConfig());
     // 单点路径：1 个 UNKNOWN 方向 Maneuver，1 段，弧长 0，时长取下限
     Path single_point_path;
     single_point_path.addPoint({1.0, 2.0, 0.5});
     single_point_path.finalize();
-    const std::vector<AlmManeuverEstimate> single_estimates =
+    const std::vector<MincoManeuverEstimate> single_estimates =
         segmenter.segment(single_point_path);
     ASSERT_EQ(single_estimates.size(), 1);
     EXPECT_EQ(single_estimates[0].direction, Direction::UNKNOWN);
@@ -196,7 +197,7 @@ TEST(AlmManeuverSegmenterTest, SinglePointAndTwoPointPathsHaveDefinedBehavior) {
     two_point_path.addPoint({0.0, 0.0, 0.0});
     two_point_path.addPoint({0.1, 0.0, 0.0});
     two_point_path.finalize();
-    const std::vector<AlmManeuverEstimate> two_estimates =
+    const std::vector<MincoManeuverEstimate> two_estimates =
         segmenter.segment(two_point_path);
     ASSERT_EQ(two_estimates.size(), 1);
     ASSERT_EQ(two_estimates[0].segments.size(), 1);
@@ -205,8 +206,8 @@ TEST(AlmManeuverSegmenterTest, SinglePointAndTwoPointPathsHaveDefinedBehavior) {
 
 // 测试空 Path 的拒绝行为。
 // 因为空输入没有可解析的几何内容，所以必须显式抛出标准异常。
-TEST(AlmManeuverSegmenterTest, EmptyPathThrows) {
-    const AlmManeuverSegmenter segmenter(MakeConfig());
+TEST(MincoManeuverSegmenterTest, EmptyPathThrows) {
+    const MincoManeuverSegmenter segmenter(MakeConfig());
     const Path empty_path;
     EXPECT_THROW(segmenter.segment(empty_path), std::invalid_argument);
 }
@@ -215,8 +216,8 @@ TEST(AlmManeuverSegmenterTest, EmptyPathThrows) {
 // 因为 Path 层不产生空 Maneuver（该分支为防御性代码），所以通过白盒入口
 // 直接构造空 Maneuver 验证显式拒绝，防止未来手动构造场景下静默产生
 // M=0 的未定义输出。
-TEST(AlmManeuverSegmenterTest, EmptyManeuverThrows) {
-    const AlmManeuverSegmenterTestAccessor segmenter;
+TEST(MincoManeuverSegmenterTest, EmptyManeuverThrows) {
+    const MincoManeuverSegmenterTestAccessor segmenter(MincoConfig{});
     const Maneuver empty_maneuver;
     double cumulative_arc = 0.0;
     double prev_theta = 0.0;
@@ -227,7 +228,7 @@ TEST(AlmManeuverSegmenterTest, EmptyManeuverThrows) {
 
 // 测试朝向角跨越 ±π 边界时的解缠绕。
 // 因为 MINCO 多项式拟合的是连续 θ(t)，所以段初值 θ_m 不允许出现 2π 跳变。
-TEST(AlmManeuverSegmenterTest, ThetaIsUnwrappedAcrossWrapBoundary) {
+TEST(MincoManeuverSegmenterTest, ThetaIsUnwrappedAcrossWrapBoundary) {
     // 单位圆上 φ∈[80°,100°] 的圆弧（步长 1°），朝向 = φ+90°，跨越 ±π
     Path path;
     for (int deg = 80; deg <= 100; ++deg) {
@@ -238,10 +239,10 @@ TEST(AlmManeuverSegmenterTest, ThetaIsUnwrappedAcrossWrapBoundary) {
     path.finalize();
     ASSERT_EQ(path.numManeuvers(), 1);
 
-    AlmManeuverSegmenterConfig config = MakeConfig();
+    MincoConfig config = MakeConfig();
     config.nominal_segment_length = 0.1;
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter(config).segment(path);
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(config).segment(path);
 
     // L = 20° 弧长 ≈ 0.349，M=4，段终点朝向 175°/180°/185°/190°（解缠绕）
     ASSERT_EQ(estimates.size(), 1);
@@ -260,9 +261,9 @@ TEST(AlmManeuverSegmenterTest, ThetaIsUnwrappedAcrossWrapBoundary) {
 
 // 测试非法配置的拒绝行为。
 // 因为错误配置会静默污染全部段初值，所以必须在构造期显式失败。
-TEST(AlmManeuverSegmenterTest, InvalidConfigThrows) {
-    const auto expect_throw = [](AlmManeuverSegmenterConfig config) {
-        EXPECT_THROW(AlmManeuverSegmenter{config}, std::invalid_argument);
+TEST(MincoManeuverSegmenterTest, InvalidConfigThrows) {
+    const auto expect_throw = [](MincoConfig config) {
+        EXPECT_THROW(MincoManeuverSegmenter{config}, std::invalid_argument);
     };
     expect_throw([] {
         auto config = MakeConfig();
@@ -300,7 +301,7 @@ TEST(AlmManeuverSegmenterTest, InvalidConfigThrows) {
         config.fuse_heading_threshold = 0.0;
         return config;
     }());
-    EXPECT_NO_THROW(AlmManeuverSegmenter{});
+    EXPECT_NO_THROW(MincoManeuverSegmenter(MincoConfig{}));
 }
 
 // ===== 微段融合（fuse_arc_threshold > 0） =====
@@ -319,7 +320,7 @@ Path BuildWigglePath() {
 
 // 测试辅助：校验估计序列的弧长连续性——首段 start_arc_length 为 0、
 // 每个后续段的 start_arc_length 等于前一段的末段 arc_length
-void ExpectArcContinuity(const std::vector<AlmManeuverEstimate>& estimates) {
+void ExpectArcContinuity(const std::vector<MincoManeuverEstimate>& estimates) {
     ASSERT_FALSE(estimates.empty());
     EXPECT_NEAR(estimates.front().start_arc_length, 0.0, 1e-9);
     for (std::size_t i = 1; i < estimates.size(); ++i) {
@@ -331,10 +332,10 @@ void ExpectArcContinuity(const std::vector<AlmManeuverEstimate>& estimates) {
 
 // 测试场景：融合关闭（fuse_arc_threshold=0）时的摆动路径分段。
 // 预期行为：3 个估计原样保留，无任何融合。
-TEST(AlmManeuverSegmenterTest, FusionOffSwitchKeepsAllRuns) {
+TEST(MincoManeuverSegmenterTest, FusionOffSwitchKeepsAllRuns) {
     const Path path = BuildWigglePath();
     ASSERT_EQ(path.numManeuvers(), 3);
-    const auto estimates = AlmManeuverSegmenter(MakeConfig()).segment(path);
+    const auto estimates = MincoManeuverSegmenter(MakeConfig()).segment(path);
     ASSERT_EQ(estimates.size(), 3);
     EXPECT_EQ(estimates[1].direction, Direction::BACKWARD);
     ExpectArcContinuity(estimates);
@@ -343,13 +344,13 @@ TEST(AlmManeuverSegmenterTest, FusionOffSwitchKeepsAllRuns) {
 // 测试场景：开启融合（弧长阈值 0.5m、朝向阈值 0.2 rad）处理 F-B-F 摆动。
 // 预期行为：中间 0.3m 后退摆动被移除，两个前进段同向合并为 1 段；
 // 合并后总带符号弧长为 4.0m（摆动移除后车辆不再往返），弧长连续。
-TEST(AlmManeuverSegmenterTest,
+TEST(MincoManeuverSegmenterTest,
      FusionRemovesInteriorWiggleAndMergesSameDirection) {
     auto config = MakeConfig();
     config.fuse_arc_threshold = 0.5;
     config.fuse_heading_threshold = 0.2;
     const auto estimates =
-        AlmManeuverSegmenter(config).segment(BuildWigglePath());
+        MincoManeuverSegmenter(config).segment(BuildWigglePath());
     ASSERT_EQ(estimates.size(), 1);
     EXPECT_EQ(estimates[0].direction, Direction::FORWARD);
     EXPECT_NEAR(estimates[0].start_arc_length, 0.0, 1e-9);
@@ -361,7 +362,7 @@ TEST(AlmManeuverSegmenterTest,
 
 // 测试场景：首/末段为微小段的摆动路径。
 // 预期行为：首末段绝对保护，即使满足融合判据量也不被移除。
-TEST(AlmManeuverSegmenterTest, FusionProtectsFirstAndLastRuns) {
+TEST(MincoManeuverSegmenterTest, FusionProtectsFirstAndLastRuns) {
     // 末段微小：前进2.0m → 后退0.3m
     Path last_tiny;
     last_tiny.addPoint({0.0, 0.0, 0.0});
@@ -377,14 +378,14 @@ TEST(AlmManeuverSegmenterTest, FusionProtectsFirstAndLastRuns) {
     auto config = MakeConfig();
     config.fuse_arc_threshold = 0.5;
     config.fuse_heading_threshold = 0.2;
-    const AlmManeuverSegmenter segmenter(config);
+    const MincoManeuverSegmenter segmenter(config);
     EXPECT_EQ(segmenter.segment(last_tiny).size(), 2);
     EXPECT_EQ(segmenter.segment(first_tiny).size(), 2);
 }
 
 // 测试场景：内部微段带大朝向变化（|Δθ|=1.0 rad 的真实转向调整）。
 // 预期行为：朝向阈值保护其不被融合，3 段保留。
-TEST(AlmManeuverSegmenterTest, FusionSkipsLargeHeadingChangeRuns) {
+TEST(MincoManeuverSegmenterTest, FusionSkipsLargeHeadingChangeRuns) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
     AppendXLine(&path, 0.0, 1.0, 0.0);
@@ -396,7 +397,7 @@ TEST(AlmManeuverSegmenterTest, FusionSkipsLargeHeadingChangeRuns) {
     auto config = MakeConfig();
     config.fuse_arc_threshold = 0.5;
     config.fuse_heading_threshold = 0.2;
-    const auto estimates = AlmManeuverSegmenter(config).segment(path);
+    const auto estimates = MincoManeuverSegmenter(config).segment(path);
     EXPECT_EQ(estimates.size(), 3);
     ExpectArcContinuity(estimates);
 }
@@ -404,7 +405,7 @@ TEST(AlmManeuverSegmenterTest, FusionSkipsLargeHeadingChangeRuns) {
 // 测试场景：前进段夹两处微小后退摆动的链式路径（F-B-F-B-F）。
 // 预期行为：两处摆动全部移除，三个前进段合并为 1 段；总带符号弧长
 // 3.0m，弧长连续。
-TEST(AlmManeuverSegmenterTest, FusionChainsAcrossMultipleWiggles) {
+TEST(MincoManeuverSegmenterTest, FusionChainsAcrossMultipleWiggles) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
     AppendXLine(&path, 0.0, 1.0, 0.0);
@@ -417,7 +418,7 @@ TEST(AlmManeuverSegmenterTest, FusionChainsAcrossMultipleWiggles) {
     auto config = MakeConfig();
     config.fuse_arc_threshold = 0.5;
     config.fuse_heading_threshold = 0.2;
-    const auto estimates = AlmManeuverSegmenter(config).segment(path);
+    const auto estimates = MincoManeuverSegmenter(config).segment(path);
     ASSERT_EQ(estimates.size(), 1);
     EXPECT_NEAR(estimates[0].segments.back().arc_length, 3.0, 1e-9);
     EXPECT_NEAR(estimates[0].segments.back().desired_position.x(), 2.6, 1e-9);
@@ -426,7 +427,7 @@ TEST(AlmManeuverSegmenterTest, FusionChainsAcrossMultipleWiggles) {
 
 // 测试场景：内部 PIVOT 微段（原地旋转，|Δs|≈0 但方向为 PIVOT）。
 // 预期行为：PIVOT 不是 FORWARD/BACKWARD，永不融合，3 段保留。
-TEST(AlmManeuverSegmenterTest, PivotRunIsNeverFused) {
+TEST(MincoManeuverSegmenterTest, PivotRunIsNeverFused) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
     AppendXLine(&path, 0.0, 1.0, 0.0);
@@ -439,7 +440,7 @@ TEST(AlmManeuverSegmenterTest, PivotRunIsNeverFused) {
     auto config = MakeConfig();
     config.fuse_arc_threshold = 0.5;
     config.fuse_heading_threshold = 0.2;
-    const auto estimates = AlmManeuverSegmenter(config).segment(path);
+    const auto estimates = MincoManeuverSegmenter(config).segment(path);
     EXPECT_EQ(estimates.size(), 3);
     EXPECT_EQ(estimates[1].direction, Direction::PIVOT);
     ExpectArcContinuity(estimates);

@@ -5,8 +5,8 @@
 #include <random>
 #include <vector>
 
-#include "core/ALM/block_tridiagonal_solver.h"
-#include "core/ALM/minco_trajectory.h"
+#include "core/MINCO/block_tridiagonal_solver.h"
+#include "core/MINCO/minco_trajectory.h"
 
 namespace apa_post_processor {
 namespace {

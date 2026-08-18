@@ -5,7 +5,7 @@
 
 #include "../util/data_loader.hpp"
 #include "../util/logger.h"
-#include "alm_planning_scene.h"
+#include "minco_planning_scene.h"
 #include "ilqr_planning_scene.h"
 #include "nmpc_planning_scene.h"
 
@@ -71,8 +71,8 @@ std::unique_ptr<PlanningScene> PlanningScene::LoadFromFile(
         return nullptr;
     }
     const auto algorithm = details_json["algorithm"].get<std::string>();
-    if (algorithm == "alm") {
-        return ALMPlanningScene::LoadFromFile(config_file_path);
+    if (algorithm == "minco") {
+        return MINCOPlanningScene::LoadFromFile(config_file_path);
     }
     if (algorithm == "nmpc") {
         return NMPCPlanningScene::LoadFromFile(config_file_path);
@@ -118,7 +118,7 @@ bool PlanningScene::init(const std::string& config_file_path) {
         // 初始路径
         init_path_ = Path::FromProto(optimize_request.initial_path());
         // 车辆圆形分解模型：外圆行数取自算法配置（碰撞模型参数，影响
-        // ALM/NMPC 两条链路的 ESDF 惩罚与合法性校验）
+        // MINCO/NMPC 两条链路的 ESDF 惩罚与合法性校验）
         footprint_model_ = std::make_unique<VehicleFootprintModel>(
             vehicle_params_, /*heading_sample_num=*/233, /*inner_row_num=*/2,
             config_->outer_row_num);

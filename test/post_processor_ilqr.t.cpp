@@ -15,7 +15,7 @@
 namespace apa_post_processor {
 namespace {
 
-// 公共车辆参数（与 post_processor_alm.t.cpp 的合成场景一致）
+// 公共车辆参数（与 post_processor_minco.t.cpp 的合成场景一致）
 VehicleParams MakeVehicleParams() {
     return VehicleParams(/*length=*/4.3, /*width=*/1.8, /*wheelbase=*/2.7,
                          /*max_steer_angle=*/0.6, /*rear_overhang=*/0.8,
@@ -144,7 +144,7 @@ TEST(PostProcessoriLQRTest, DegeneratePathReturnsFailure) {
 }
 
 // ============================================================
-// 测试：iLQR 路径不污染配置、不与 ALM 路径互相干扰
+// 测试：iLQR 路径不污染配置、不与 MINCO 路径互相干扰
 // ============================================================
 
 // 调用方传入的 iLQRConfig 对象在 optimizeiLQR 后必须保持原值（幅值边界同步
@@ -171,20 +171,20 @@ TEST(PostProcessoriLQRTest, DoesNotMutateiLQRConfig) {
     EXPECT_DOUBLE_EQ(ilqr_config.post_stage.kappa_pad, 1.1);
 }
 
-// 先跑一次 ALM 路径，再跑 iLQR 路径，最后再跑 ALM 路径：两次 ALM 结果必须
-// 完全一致，且 ALM 配置对象未被触碰。
-TEST(PostProcessoriLQRTest, iLQRPathDoesNotInterfereWithAlmPath) {
+// 先跑一次 MINCO 路径，再跑 iLQR 路径，最后再跑 MINCO 路径：两次 MINCO 结果必须
+// 完全一致，且 MINCO 配置对象未被触碰。
+TEST(PostProcessoriLQRTest, iLQRPathDoesNotInterfereWithMincoPath) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto before = processor.optimizeAlm(path, AlmConfig{});
+    const auto before = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(before.success) << before.message;
     const auto ilqr_result =
         processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
     ASSERT_TRUE(ilqr_result.success) << ilqr_result.message;
-    const auto after = processor.optimizeAlm(path, AlmConfig{});
+    const auto after = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(after.success) << after.message;
     EXPECT_EQ(before.message, after.message);
     EXPECT_EQ(before.final_maneuvers, after.final_maneuvers);

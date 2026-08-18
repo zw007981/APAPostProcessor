@@ -6,18 +6,18 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/ALM/alm_maneuver_segmenter.h"
-#include "core/ALM/alm_preprocessor.h"
+#include "core/MINCO/minco_maneuver_segmenter.h"
+#include "core/MINCO/minco_preprocessor.h"
 
 namespace apa_post_processor {
 namespace {
 
 // 测试用派生类：暴露受保护的问题装配与代价求值入口，供白盒梯度对拍
-class AlmPreprocessorTestAccessor : public AlmPreprocessor {
+class MincoPreprocessorTestAccessor : public MincoPreprocessor {
    public:
-    using AlmPreprocessor::AlmPreprocessor;
-    using AlmPreprocessor::buildProblem;
-    using AlmPreprocessor::evaluateCostAndGradient;
+    using MincoPreprocessor::MincoPreprocessor;
+    using MincoPreprocessor::buildProblem;
+    using MincoPreprocessor::evaluateCostAndGradient;
 };
 
 // 从当前路径末端沿 x 轴追加直线路径点（步长 0.05 m，与 A* 点距一致）
@@ -50,8 +50,8 @@ Path BuildGearShiftPath() {
 }
 
 // 单 Maneuver 单段的最小合法初值估计（直行 1m）
-std::vector<AlmManeuverEstimate> MakeSimpleEstimates() {
-    std::vector<AlmManeuverEstimate> estimates(1);
+std::vector<MincoManeuverEstimate> MakeSimpleEstimates() {
+    std::vector<MincoManeuverEstimate> estimates(1);
     estimates[0].direction = Direction::FORWARD;
     estimates[0].start_theta = 0.0;
     estimates[0].start_arc_length = 0.0;
@@ -60,15 +60,15 @@ std::vector<AlmManeuverEstimate> MakeSimpleEstimates() {
 }
 
 // 测试直线单机动场景下的收敛性。
-// 因为初值来自 AlmManeuverSegmenter 的真实解析结果且场景无障碍无转弯，
+// 因为初值来自 MincoManeuverSegmenter 的真实解析结果且场景无障碍无转弯，
 // 所以松收敛阈值下 L-BFGS 必须收敛，各段末端世界坐标必须贴近前端锚点，
 // 终点硬边界（零速）必须精确满足。
-TEST(AlmPreprocessorTest, StraightSingleManeuverConverges) {
-    const AlmPreprocessor preprocessor;
+TEST(MincoPreprocessorTest, StraightSingleManeuverConverges) {
+    const MincoPreprocessor preprocessor(MincoConfig{});
     const Path path = BuildStraightPath(2.0);
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter().segment(path);
-    const AlmPreprocessorResult result =
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(MincoConfig{}).segment(path);
+    const MincoPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
     EXPECT_TRUE(result.optimizer_converged);
     EXPECT_TRUE(result.success);
@@ -93,14 +93,14 @@ TEST(AlmPreprocessorTest, StraightSingleManeuverConverges) {
 // 测试单次换挡两机动场景下的收敛性与换挡点残余速度。
 // 因为换挡点 ṡ=0 在 MINCO 框架内只能以软惩罚近似，所以收敛后换挡点残余
 // 速度必须被压到接近 0 的工程容差内，且两段末端位置都要贴近各自锚点。
-TEST(AlmPreprocessorTest, GearShiftTwoManeuverConverges) {
-    const AlmPreprocessor preprocessor;
+TEST(MincoPreprocessorTest, GearShiftTwoManeuverConverges) {
+    const MincoPreprocessor preprocessor(MincoConfig{});
     const Path path = BuildGearShiftPath();
     ASSERT_EQ(path.numManeuvers(), 2);
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter().segment(path);
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(MincoConfig{}).segment(path);
     ASSERT_EQ(estimates.size(), 2U);
-    const AlmPreprocessorResult result =
+    const MincoPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
     EXPECT_TRUE(result.optimizer_converged);
     EXPECT_TRUE(result.success);
@@ -119,8 +119,8 @@ TEST(AlmPreprocessorTest, GearShiftTwoManeuverConverges) {
 // 放大，所以用独立于手推公式的有限差分做第三方验证；手工构造含换挡与
 // 曲率的场景并压低物理上限，使四项物理惩罚处于激活区（可行区分支梯度
 // 恒零，没有验证价值）。
-TEST(AlmPreprocessorTest, AnalyticGradientMatchesFiniteDifference) {
-    std::vector<AlmManeuverEstimate> estimates(2);
+TEST(MincoPreprocessorTest, AnalyticGradientMatchesFiniteDifference) {
+    std::vector<MincoManeuverEstimate> estimates(2);
     estimates[0].direction = Direction::FORWARD;
     estimates[0].start_theta = 0.0;
     estimates[0].start_arc_length = 0.0;
@@ -136,21 +136,20 @@ TEST(AlmPreprocessorTest, AnalyticGradientMatchesFiniteDifference) {
     };
     // 压低物理上限使惩罚激活；权重取适中量级，控制代价在 O(10)~O(100)，
     // 抑制有限差分的舍入误差
-    BicycleKinematicsConfig kinematics_config;
-    kinematics_config.max_velocity = 0.5;
-    kinematics_config.max_acceleration = 0.5;
-    kinematics_config.max_steer_rate = 0.3;
-    AlmPreprocessorConfig config;
+    MincoConfig config;
+    config.max_velocity = 0.5;
+    config.max_acceleration = 0.5;
+    config.max_steer_rate = 0.3;
     config.weight_endpoint_track = 5.0;
-    config.weight_velocity = 10.0;
-    config.weight_acceleration = 10.0;
-    config.weight_steer_angle = 10.0;
-    config.weight_steer_rate = 10.0;
-    config.weight_duration_balance = 2.0;
-    config.weight_gear_cusp = 10.0;
-    config.epsilon_time = 0.05;
-    const AlmPreprocessorTestAccessor preprocessor(config, kinematics_config);
-    const AlmPreprocessorProblem problem =
+    config.pre_weight_velocity = 10.0;
+    config.pre_weight_acceleration = 10.0;
+    config.pre_weight_steer_angle = 10.0;
+    config.pre_weight_steer_rate = 10.0;
+    config.pre_weight_duration_balance = 2.0;
+    config.pre_weight_gear_cusp = 10.0;
+    config.pre_epsilon_time = 0.05;
+    const MincoPreprocessorTestAccessor preprocessor(config);
+    const MincoPreprocessorProblem problem =
         preprocessor.buildProblem(estimates, {0.0, 0.0});
     ASSERT_EQ(problem.numSegments(), 3);
     ASSERT_EQ(problem.variableCount(), 8);
@@ -182,8 +181,8 @@ TEST(AlmPreprocessorTest, AnalyticGradientMatchesFiniteDifference) {
 // 因为初始时长被人为构造为病态悬殊分布（0.5/4.0/0.5，比值 8，超出
 // [ε_low, ε_upp]=[0.5, 2.0] 倍均值的允许带），所以优化后段间时长比必须
 // 被压回平衡约束的渐近边界（比值 4）附近。
-TEST(AlmPreprocessorTest, DurationBalanceConstrainsSpread) {
-    std::vector<AlmManeuverEstimate> estimates(1);
+TEST(MincoPreprocessorTest, DurationBalanceConstrainsSpread) {
+    std::vector<MincoManeuverEstimate> estimates(1);
     estimates[0].direction = Direction::FORWARD;
     estimates[0].start_theta = 0.0;
     estimates[0].start_arc_length = 0.0;
@@ -192,8 +191,8 @@ TEST(AlmPreprocessorTest, DurationBalanceConstrainsSpread) {
         {{1.0, 0.0}, 0.0, 1.0, 4.0},
         {{1.5, 0.0}, 0.0, 1.5, 0.5},
     };
-    const AlmPreprocessor preprocessor;
-    const AlmPreprocessorResult result =
+    const MincoPreprocessor preprocessor(MincoConfig{});
+    const MincoPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
     ASSERT_TRUE(result.success);
     ASSERT_EQ(result.durations.size(), 3U);
@@ -215,17 +214,16 @@ TEST(AlmPreprocessorTest, DurationBalanceConstrainsSpread) {
 // 倍余量，不锚具体数值——终点跟踪权重变化只改变残余误差的量级（实测
 // track=10 时 >1.0 m、track=20 时 ~0.88 m），不改变"远超容差而失败"
 // 的判据
-TEST(AlmPreprocessorTest, ConflictingLimitsReturnFailure) {
-    BicycleKinematicsConfig kinematics_config;
-    kinematics_config.max_velocity = 1e-3;
-    AlmPreprocessorConfig config;
-    config.weight_velocity = 1e9;
-    config.epsilon_time = 1.0;
-    const AlmPreprocessor preprocessor(config, kinematics_config);
+TEST(MincoPreprocessorTest, ConflictingLimitsReturnFailure) {
+    MincoConfig config;
+    config.max_velocity = 1e-3;
+    config.pre_weight_velocity = 1e9;
+    config.pre_epsilon_time = 1.0;
+    const MincoPreprocessor preprocessor(config);
     const Path path = BuildStraightPath(2.0);
-    const std::vector<AlmManeuverEstimate> estimates =
-        AlmManeuverSegmenter().segment(path);
-    const AlmPreprocessorResult result =
+    const std::vector<MincoManeuverEstimate> estimates =
+        MincoManeuverSegmenter(MincoConfig{}).segment(path);
+    const MincoPreprocessorResult result =
         preprocessor.preprocess(estimates, {0.0, 0.0});
     EXPECT_FALSE(result.success);
     EXPECT_GT(result.max_endpoint_error, 0.5);
@@ -235,13 +233,13 @@ TEST(AlmPreprocessorTest, ConflictingLimitsReturnFailure) {
 // 因为 J_pre 的装配依赖初值估计的全部字段（位置/朝向/弧长/时长），
 // 所以任何空输入、非有限字段或非正时长都必须在装配期以标准异常明确
 // 拒绝，而不是带着垃圾数据进入 L-BFGS。
-TEST(AlmPreprocessorTest, InvalidInputsThrow) {
-    const AlmPreprocessor preprocessor;
+TEST(MincoPreprocessorTest, InvalidInputsThrow) {
+    const MincoPreprocessor preprocessor(MincoConfig{});
     // 空估计
     EXPECT_THROW(preprocessor.preprocess({}, {0.0, 0.0}),
                  std::invalid_argument);
     // 空 segments 的 Maneuver
-    EXPECT_THROW(preprocessor.preprocess({AlmManeuverEstimate{}}, {0.0, 0.0}),
+    EXPECT_THROW(preprocessor.preprocess({MincoManeuverEstimate{}}, {0.0, 0.0}),
                  std::invalid_argument);
     // 非有限起点世界坐标
     EXPECT_THROW(preprocessor.preprocess(
@@ -272,38 +270,38 @@ TEST(AlmPreprocessorTest, InvalidInputsThrow) {
 // 测试非法配置的构造期校验。
 // 因为配置字段直接决定 J_pre 的代价地形与求解行为，所以负权重、非法
 // 采样数、奇数辛普森区间、倒挂的时长平衡系数等都必须在构造期拒绝。
-TEST(AlmPreprocessorTest, InvalidConfigThrows) {
-    EXPECT_NO_THROW(const AlmPreprocessor valid_preprocessor);
-    AlmPreprocessorConfig config;
-    config.weight_velocity = -1.0;
-    EXPECT_THROW(const AlmPreprocessor p(config), std::invalid_argument);
+TEST(MincoPreprocessorTest, InvalidConfigThrows) {
+    EXPECT_NO_THROW(const MincoPreprocessor valid_preprocessor(MincoConfig{}));
+    MincoConfig config;
+    config.pre_weight_velocity = -1.0;
+    EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
     config = {};
-    config.duration_balance_lower = 2.0;
-    EXPECT_THROW(const AlmPreprocessor p(config), std::invalid_argument);
+    config.pre_duration_balance_lower = 2.0;
+    EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
     config = {};
-    config.simpson_subintervals = 3;
-    EXPECT_THROW(const AlmPreprocessor p(config), std::invalid_argument);
+    config.pre_simpson_subintervals = 3;
+    EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
     config = {};
-    config.physics_samples_per_segment = 1;
-    EXPECT_THROW(const AlmPreprocessor p(config), std::invalid_argument);
+    config.pre_physics_samples_per_segment = 1;
+    EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
     config = {};
-    config.lbfgs_max_iterations = 0;
-    EXPECT_THROW(const AlmPreprocessor p(config), std::invalid_argument);
+    config.pre_lbfgs_max_iterations = 0;
+    EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
 }
 
 // 测试 config() 只读访问器返回构造时的配置值。
 // 因为同模块其它类（分段器/运动学提取器/ESDF 惩罚）均提供该访问器供
 // 下游（主优化）读取配置，所以返回值必须与构造入参逐字段一致。
-TEST(AlmPreprocessorTest, ConfigAccessorReturnsConstructionValues) {
-    AlmPreprocessorConfig config;
+TEST(MincoPreprocessorTest, ConfigAccessorReturnsConstructionValues) {
+    MincoConfig config;
     config.weight_endpoint_track = 7.5;
-    config.simpson_subintervals = 12;
+    config.pre_simpson_subintervals = 12;
     config.convergence_position_tolerance = 0.2;
-    const AlmPreprocessor preprocessor(config);
+    const MincoPreprocessor preprocessor(config);
     EXPECT_DOUBLE_EQ(preprocessor.config().weight_endpoint_track, 7.5);
-    EXPECT_EQ(preprocessor.config().simpson_subintervals, 12);
+    EXPECT_EQ(preprocessor.config().pre_simpson_subintervals, 12);
     EXPECT_DOUBLE_EQ(preprocessor.config().convergence_position_tolerance, 0.2);
-    EXPECT_DOUBLE_EQ(preprocessor.config().weight_gear_cusp, 1000.0);
+    EXPECT_DOUBLE_EQ(preprocessor.config().pre_weight_gear_cusp, 1000.0);
 }
 
 }  // namespace

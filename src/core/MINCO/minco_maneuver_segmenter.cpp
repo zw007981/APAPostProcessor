@@ -1,4 +1,4 @@
-#include "alm_maneuver_segmenter.h"
+#include "minco_maneuver_segmenter.h"
 
 #include <algorithm>
 #include <cmath>
@@ -9,7 +9,7 @@
 #include "../../util/constants.h"
 
 namespace apa_post_processor {
-AlmManeuverSegmenter::AlmManeuverSegmenter(AlmManeuverSegmenterConfig config)
+MincoManeuverSegmenter::MincoManeuverSegmenter(const MincoConfig& config)
     : config_(config) {
     if (!std::isfinite(config.nominal_segment_length) ||
         config.nominal_segment_length <= 0.0) {
@@ -36,12 +36,12 @@ AlmManeuverSegmenter::AlmManeuverSegmenter(AlmManeuverSegmenterConfig config)
     }
 }
 
-std::vector<AlmManeuverEstimate> AlmManeuverSegmenter::segment(
+std::vector<MincoManeuverEstimate> MincoManeuverSegmenter::segment(
     const Path& path) const {
     if (path.empty()) {
         throw std::invalid_argument("输入 Path 为空，无法解析");
     }
-    std::vector<AlmManeuverEstimate> estimates;
+    std::vector<MincoManeuverEstimate> estimates;
     estimates.reserve(path.numManeuvers());
     // 带符号累积弧长与解缠绕朝向均跨 Maneuver 连续传递，保证全局 θ-s 链一致
     double cumulative_arc = 0.0;
@@ -58,8 +58,8 @@ std::vector<AlmManeuverEstimate> AlmManeuverSegmenter::segment(
     return estimates;
 }
 
-std::vector<AlmManeuverEstimate> AlmManeuverSegmenter::FuseShortManeuvers(
-    std::vector<AlmManeuverEstimate> estimates) const {
+std::vector<MincoManeuverEstimate> MincoManeuverSegmenter::FuseShortManeuvers(
+    std::vector<MincoManeuverEstimate> estimates) const {
     const std::size_t n = estimates.size();
     if (n <= 2) {
         // 首末段绝对保护，序列过短时无可融对象
@@ -86,7 +86,7 @@ std::vector<AlmManeuverEstimate> AlmManeuverSegmenter::FuseShortManeuvers(
     }
     // 第二遍：重建——移除融合段、后续段的累积弧长整体平移重锚（融合段的
     // 带符号跨度被后续段吸收，保持 θ-s 链连续）、同向邻段合并
-    std::vector<AlmManeuverEstimate> result;
+    std::vector<MincoManeuverEstimate> result;
     result.reserve(n);
     double arc_shift = 0.0;
     for (std::size_t i = 0; i < n; ++i) {
@@ -96,7 +96,7 @@ std::vector<AlmManeuverEstimate> AlmManeuverSegmenter::FuseShortManeuvers(
                          estimates[i].start_arc_length;
             continue;
         }
-        AlmManeuverEstimate kept = std::move(estimates[i]);
+        MincoManeuverEstimate kept = std::move(estimates[i]);
         kept.start_arc_length += arc_shift;
         for (auto& segment : kept.segments) {
             segment.arc_length += arc_shift;
@@ -116,7 +116,7 @@ std::vector<AlmManeuverEstimate> AlmManeuverSegmenter::FuseShortManeuvers(
     return result;
 }
 
-AlmManeuverEstimate AlmManeuverSegmenter::segmentManeuver(
+MincoManeuverEstimate MincoManeuverSegmenter::segmentManeuver(
     const Maneuver& maneuver, double* cumulative_arc,
     double* prev_theta) const {
     const auto& points = maneuver.points;
@@ -124,7 +124,7 @@ AlmManeuverEstimate AlmManeuverSegmenter::segmentManeuver(
     if (num_points == 0) {
         throw std::invalid_argument("Maneuver 不含任何路径点");
     }
-    AlmManeuverEstimate estimate;
+    MincoManeuverEstimate estimate;
     estimate.direction = maneuver.direction;
     estimate.start_arc_length = *cumulative_arc;
     estimate.start_theta = UnwrapAngle(points.front().theta, *prev_theta);
@@ -132,7 +132,7 @@ AlmManeuverEstimate AlmManeuverSegmenter::segmentManeuver(
     const double sign = DirectionSign(maneuver.direction);
     if (num_points == 1) {
         // 单点 Maneuver：无位移、无朝向变化，退化为一段（时长取下限）
-        AlmSegmentEstimate segment;
+        MincoSegmentEstimate segment;
         segment.desired_position = {points.front().x, points.front().y};
         segment.theta = estimate.start_theta;
         segment.arc_length = *cumulative_arc;
@@ -165,7 +165,7 @@ AlmManeuverEstimate AlmManeuverSegmenter::segmentManeuver(
                                points[k + 1].y - points[k].y);
         }
         const auto& end_point = points[anchors[j + 1]];
-        AlmSegmentEstimate segment;
+        MincoSegmentEstimate segment;
         *cumulative_arc += sign * dist;
         segment.arc_length = *cumulative_arc;
         segment.theta = UnwrapAngle(end_point.theta, *prev_theta);
@@ -183,7 +183,7 @@ AlmManeuverEstimate AlmManeuverSegmenter::segmentManeuver(
     return estimate;
 }
 
-double AlmManeuverSegmenter::DirectionSign(Direction direction) {
+double MincoManeuverSegmenter::DirectionSign(Direction direction) {
     switch (direction) {
         case Direction::FORWARD:
             return 1.0;
@@ -196,7 +196,7 @@ double AlmManeuverSegmenter::DirectionSign(Direction direction) {
     }
 }
 
-double AlmManeuverSegmenter::UnwrapAngle(double theta, double reference) {
+double MincoManeuverSegmenter::UnwrapAngle(double theta, double reference) {
     return theta - 2.0 * PI * std::floor((theta - reference + PI) / (2.0 * PI));
 }
 }  // namespace apa_post_processor

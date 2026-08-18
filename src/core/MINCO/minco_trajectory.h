@@ -27,7 +27,7 @@ struct MincoBoundaryCondition2d {
 // 本段末端 1/2 阶导数连续性；末块行补上终点位置/速度/加速度。该排列使
 // 全部主对角块非奇异，块 Thomas 消元无需选主元。内部航点 d_m 在右端项 b
 // 中恰出现两次（相邻两段端点位置各一次），终点位置（如 s_f）固定位于 b
-// 的第 6M-3（0 基）个位置，与设计文档的伴随梯度下标公式一致。
+// 的第 6M-3（0 基）个位置，s_f 的伴随梯度反传据此定位该下标。
 class MincoTrajectory {
    public:
     // 每段多项式系数个数（5 阶多项式）
@@ -98,11 +98,14 @@ class MincoTrajectory {
     void checkEvaluable(int order) const;
 
    protected:
-    std::vector<double> durations_;  // M 段时长
+    // M 段时长
+    std::vector<double> durations_;
     // M+1 个累计时刻（首元素恒为 0），供按全局时刻定位段
     std::vector<double> cumulative_durations_;
-    CoeffMatrix coeffs_theta_;  // 6xM，θ 各段归一化系数
-    CoeffMatrix coeffs_s_;      // 6xM，s 各段归一化系数
+    // 6xM，θ 各段归一化系数
+    CoeffMatrix coeffs_theta_;
+    // 6xM，s 各段归一化系数
+    CoeffMatrix coeffs_s_;
     // 保留 K(T) 的块 LU 消元结果，供 s_f 伴随梯度与通用伴随求解复用
     BlockTridiagonalSolver solver_;
 };

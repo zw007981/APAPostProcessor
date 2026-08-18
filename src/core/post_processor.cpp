@@ -8,15 +8,20 @@
 
 #include "../preprocessing/preprocessing_pipeline.h"
 #include "../util/topology_cleaner.h"
-#include "ALM/alm_steer_padding.h"
-#include "ALM/alm_trajectory_sampler.h"
+#include "MINCO/minco_esdf_penalty.h"
+#include "MINCO/minco_maneuver_melter.h"
+#include "MINCO/minco_maneuver_segmenter.h"
+#include "MINCO/minco_preprocessor.h"
+#include "MINCO/minco_solver.h"
+#include "MINCO/minco_steer_padding.h"
+#include "MINCO/minco_trajectory_sampler.h"
 #include "iLQR/ilqr_solver.h"
 #include "NMPC/vehicle_circle_geometry.h"
 #include "collision_check.h"
 
 namespace apa_post_processor {
 namespace {
-// 优化结果允许的最大碰撞深度 (m)：NMPC 与 ALM 两条路径共用同一质量门
+// 优化结果允许的最大碰撞深度 (m)：NMPC 与 MINCO 两条路径共用同一质量门
 constexpr double kMaxAcceptableCollisionDepth = 0.02;
 // 从 NMPCConfig 构造 PreprocessingPipelineConfig（过渡期辅助函数）
 PreprocessingPipelineConfig BuildPipelineConfig(const NMPCConfig& nmpc_config) {
@@ -46,6 +51,73 @@ Trajectory FlattenManeuvers(const std::vector<Maneuver>& maneuvers) {
         }
     }
     return trajectory;
+}
+// 按弧长比例线性插值两点间的位姿与运动学量（t ∈ [0,1]）；航向角走最短
+// 角差。κ 不在此处插值，由后续 finalize() 统一按 Δθ/Δs 重算
+TrajectoryPoint InterpolatePoint(const TrajectoryPoint& a,
+                                 const TrajectoryPoint& b, double t) {
+    TrajectoryPoint p(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y),
+                      a.theta + t * NormalizeAngle(b.theta - a.theta));
+    if (a.hasV() && b.hasV()) {
+        p.setV(a.getV() + t * (b.getV() - a.getV()));
+    }
+    if (a.hasA() && b.hasA()) {
+        p.setA(a.getA() + t * (b.getA() - a.getA()));
+    }
+    if (a.hasDelta() && b.hasDelta()) {
+        p.setDelta(a.getDelta() + t * (b.getDelta() - a.getDelta()));
+    }
+    if (a.hasDeltaDot() && b.hasDeltaDot()) {
+        p.setDeltaDot(a.getDeltaDot() + t * (b.getDeltaDot() - a.getDeltaDot()));
+    }
+    if (a.hasT() && b.hasT()) {
+        p.setT(a.getT() + t * (b.getT() - a.getT()));
+    }
+    return p;
+}
+// 输出等距重采样：MINCO 轨迹按时间等分采样，点距随速度变化（低速蠕动区
+// 1~2cm、高速区可达 10cm）。沿弧长以 DELTA_DIST 为间隔对整条路径重采样：
+// 过密区抽稀、过疏区插值，使输出点距统一到约 5cm（与前端路径一致）；段
+// 首尾锚点始终保留。插值点运动学量按弧长比例线性插值
+void ResampleToUniformSpacing(std::vector<Maneuver>* maneuvers) {
+    if (maneuvers == nullptr) {
+        return;
+    }
+    for (auto& m : *maneuvers) {
+        auto& pts = m.points;
+        if (pts.size() < 3) {
+            continue;
+        }
+        std::vector<TrajectoryPoint> out;
+        out.reserve(pts.size());
+        out.push_back(pts.front());
+        double carry = 0.0;             // 距上一个发射点的累计弧长
+        double next_s = DELTA_DIST;     // 下一个发射点的目标弧长
+        for (std::size_t i = 1; i < pts.size(); ++i) {
+            const auto& prev = pts[i - 1];
+            const auto& cur = pts[i];
+            const double seg_len =
+                std::hypot(cur.x - prev.x, cur.y - prev.y);
+            if (seg_len < 1e-12) {
+                continue;  // 重合点：跳过
+            }
+            const double seg_end = carry + seg_len;
+            // 沿当前弦按 DELTA_DIST 步长发射插值点
+            while (next_s <= seg_end + 1e-9) {
+                const double t =
+                    std::clamp((next_s - carry) / seg_len, 0.0, 1.0);
+                out.push_back(InterpolatePoint(prev, cur, t));
+                next_s += DELTA_DIST;
+            }
+            carry = seg_end;
+        }
+        // 段末锚点总是保留（换挡/终点锚点）
+        if (std::hypot(pts.back().x - out.back().x,
+                       pts.back().y - out.back().y) > 1e-9) {
+            out.push_back(pts.back());
+        }
+        pts = std::move(out);
+    }
 }
 // 按节按键覆盖：仅显式出现的字段被写入（缺失保持原值）
 template <typename T>
@@ -485,11 +557,26 @@ void LoadiLQRConfigOverrides(const nlohmann::json& details, iLQRConfig* config) 
     config->synchronizeAmplitudeBounds();
 }
 
-BicycleKinematicsConfig PostProcessor::DeriveKinematicsConfig(
-    const VehicleParams& vehicle_params, double max_velocity) {
-    BicycleKinematicsConfig config;
+// MINCO 专有字段覆盖项：仅覆盖显式出现的字段，未出现的保持构造默认值
+void LoadMincoConfigOverrides(const nlohmann::json& details,
+                              MincoConfig* config) {
+    if (config == nullptr) {
+        throw std::invalid_argument(
+            "LoadMincoConfigOverrides received null config!!!");
+    }
+    // ESDF 双重安全惩罚节（与 MincoConfig 扁平字段同名）
+    const auto& esdf = JsonSectionOrEmpty(details, "esdf");
+    LoadJsonFieldIfPresent(esdf, "margin_safe", &config->margin_safe);
+    LoadJsonFieldIfPresent(esdf, "margin_comf", &config->margin_comf);
+    LoadJsonFieldIfPresent(esdf, "weight_safe", &config->weight_safe);
+    LoadJsonFieldIfPresent(esdf, "weight_comf", &config->weight_comf);
+}
+
+MincoConfig PostProcessor::DeriveKinematicsConfig(
+    const VehicleParams& vehicle_params, const MincoConfig& minco_config) {
+    MincoConfig config = minco_config;
     config.wheelbase = vehicle_params.wheelbase;
-    config.max_velocity = max_velocity;
+    // max_velocity 是 MINCO 路径独立配置量，保持 minco_config 原值不覆盖
     // 加速度上限取双向较小值，保证正向加速与倒车减速都不越界
     config.max_acceleration =
         std::min(vehicle_params.max_accel, std::abs(vehicle_params.max_decel));
@@ -498,8 +585,8 @@ BicycleKinematicsConfig PostProcessor::DeriveKinematicsConfig(
     return config;
 }
 
-PostProcessorResult PostProcessor::optimizeAlm(
-    const Path& init_path, const AlmConfig& alm_config) const {
+PostProcessorResult PostProcessor::optimizeMinco(
+    const Path& init_path, const MincoConfig& minco_config) const {
     PostProcessorResult result;
     const auto t_start = std::chrono::steady_clock::now();
     // 统一收尾：填充耗时与结果统计后返回（失败分支 optimized_path 为空）
@@ -508,7 +595,7 @@ PostProcessorResult PostProcessor::optimizeAlm(
                                    std::chrono::steady_clock::now() - t_start)
                                    .count();
         // 先填充输出标签再统计
-        result.algorithm = "alm";
+        result.algorithm = "minco";
         result.output_level = result.success ? OutputLevel::kFullSuccess
                                              : OutputLevel::kFallback;
         // 物理方向段数（v 变号）为默认口径——多项式段内过冲按实际换挡
@@ -523,7 +610,7 @@ PostProcessorResult PostProcessor::optimizeAlm(
     try {
         // 空路径无法提取起点锚点，直接显式失败
         if (init_path.empty()) {
-            result.message = "ALM input path is empty";
+            result.message = "MINCO input path is empty";
             return finish();
         }
         // 世界坐标还原积分的锚点：初始路径首点
@@ -531,19 +618,20 @@ PostProcessorResult PostProcessor::optimizeAlm(
                                              init_path.front().y};
         // 运动学配置由车辆物理参数派生，全链路（预处理/主求解/融化采样）
         // 共用同一份，避免跨阶段数值不自洽
-        const auto kinematics_config =
-            DeriveKinematicsConfig(vehicle_params_, alm_config.max_velocity);
-        const BicycleKinematicsExtractor kinematics(kinematics_config);
+        // 由车辆物理参数派生运动学字段并覆盖到完整配置副本，全链路
+        // （预处理/主求解/融化采样）共用同一份，避免跨阶段数值不自洽
+        const MincoConfig derived =
+            DeriveKinematicsConfig(vehicle_params_, minco_config);
+        const BicycleKinematicsExtractor kinematics(derived);
         // 1) 前端解析与分段：换挡打断 + 空间等距降采样
-        const AlmManeuverSegmenter segmenter(alm_config.segmenter);
+        const MincoManeuverSegmenter segmenter(derived);
         const auto estimates = segmenter.segment(init_path);
         // 2) 预处理粗优化：把初值拉近前端路径并满足运动学约束
-        const AlmPreprocessor preprocessor(alm_config.preprocessor,
-                                           kinematics_config);
+        const MincoPreprocessor preprocessor(derived);
         const auto pre_result =
             preprocessor.preprocess(estimates, start_position);
         if (!pre_result.success) {
-            result.message = "ALM preprocessing failed (max endpoint error " +
+            result.message = "MINCO preprocessing failed (max endpoint error " +
                              std::to_string(pre_result.max_endpoint_error) +
                              " m)";
             return finish();
@@ -552,41 +640,45 @@ PostProcessorResult PostProcessor::optimizeAlm(
         // 与最终输出共用同一套离散化工具、同一采样密度与同一运动学提取器，
         // 保证两条曲线只相差"主优化 + 机动融化"这一步
         result.intermediate_traces.emplace_back(
-            "alm_preprocessed",
+            "minco_preprocessed",
             FlattenManeuvers(SampleMincoTrajectory(
                 pre_result.trajectory, estimates, start_position, kinematics,
-                alm_config.melter.samples_per_segment)));
+                derived.samples_per_segment)));
         // 3) PHR-ALM 主优化：内层 L-BFGS + 外层乘子/惩罚权重更新
-        const AlmSolver solver(alm_config.solver, kinematics_config,
-                               alm_config.esdf_penalty);
+        const MincoSolver solver(derived);
         const auto solve_result = solver.solve(
             estimates, pre_result, start_position, esdf_map_, footprint_model_);
         if (solve_result.trajectory.numSegments() == 0) {
             // 内层首轮即失败或轨迹重建失败：无任何可用轨迹，显式失败
-            result.message = "ALM solve failed: no valid trajectory produced";
+            result.message = "MINCO solve failed: no valid trajectory produced";
             return finish();
         }
         // 4) 机动融化与拓扑修剪：剔除废段、同向合并，产出采样 Path
-        const AlmManeuverMelter melter(alm_config.melter);
+        const MincoManeuverMelter melter(derived);
         const auto melt_result = melter.meltAndPrune(
             solve_result.trajectory, estimates, start_position, kinematics);
         Path optimized = melt_result.path;
         if (optimized.empty()) {
-            result.message = "ALM melt produced empty path";
+            result.message = "MINCO melt produced empty path";
             return finish();
         }
+        // 4.2) 按 v 符号游程重切机动段：忠实于实际运动方向（几何特征），
+        // 与求解器 estimate 标签解耦；段内方向反转处切分为独立 maneuver
+        // （如揉库段内部的退-进-退微调），使输出 Path 段数与轨迹的
+        // "物理方向段数"（countDirectionRuns）口径一致
+        ResegmentByVelocityDirection(&optimized, derived.v_epsilon);
         // 4.5) 停驻窗口"停-打轮-走"合法化改写：净 Δθ 很小的换挡停驻窗口
         // （θ̇≠0 且 δ 翻转的伪影）改写为 v=0、θ 冻结、δ 按 ≤δ̇_max 有界
         // 过渡；净 Δθ 超阈值的真实 pivot 窗口保持原样（阿克曼车辆无原地
         // 转向能力，合法执行需多点掉头，登记为已知边界）
-        AlmSteerPaddingConfig padding_config;
-        padding_config.max_steer_angle = vehicle_params_.max_steer_angle;
-        padding_config.max_steer_rate = vehicle_params_.max_steer_rate;
+        MincoConfig padding_config = derived;
+        padding_config.pad_steer_angle = vehicle_params_.max_steer_angle;
+        padding_config.pad_steer_rate = vehicle_params_.max_steer_rate;
         const auto padding_stats =
             ApplySteerPadding(optimized.getManeuvers(), padding_config);
         if (padding_stats.windows_legalized > 0 ||
             padding_stats.windows_skipped > 0) {
-            LOG_FMT_INFO("ALM steer padding: legalized={}, skipped={}",
+            LOG_FMT_INFO("MINCO steer padding: legalized={}, skipped={}",
                          padding_stats.windows_legalized,
                          padding_stats.windows_skipped);
         }
@@ -594,22 +686,22 @@ PostProcessorResult PostProcessor::optimizeAlm(
         optimized.finalize();
         // 5) 质量门：无奇异（全部采样点有限）→ 碰撞深度 → 终点精度
         if (!IsPathFinite(optimized)) {
-            result.message = "ALM output rejected: non-finite samples";
+            result.message = "MINCO output rejected: non-finite samples";
             return finish();
         }
         const double max_collision =
             ComputeMaxCollisionDepth(optimized, esdf_map_, footprint_model_);
         if (max_collision > kMaxAcceptableCollisionDepth) {
             LOG_FMT_WARN(
-                "ALM collision depth {:.4f}m exceeds threshold, rejecting",
+                "MINCO collision depth {:.4f}m exceeds threshold, rejecting",
                 max_collision);
-            result.message = "ALM collision depth " +
+            result.message = "MINCO collision depth " +
                              std::to_string(max_collision) +
                              " m exceeds threshold, rejecting";
             return finish();
         }
         // 终点精度以采样后路径末点相对初始路径末点（即停车目标位姿）度量；
-        // 阈值复用主求解器的双指标收敛判据，与 ALM 收敛定义保持一致
+        // 阈值复用主求解器的双指标收敛判据，与 MINCO 收敛定义保持一致
         const double terminal_pos_err =
             std::hypot(optimized.back().x - init_path.back().x,
                        optimized.back().y - init_path.back().y);
@@ -617,32 +709,36 @@ PostProcessorResult PostProcessor::optimizeAlm(
             std::abs(NormalizeAngle(optimized.back().theta -
                                     init_path.back().theta)) *
             RAD2DEG;
-        if (terminal_pos_err > alm_config.solver.terminal_position_tolerance ||
-            terminal_head_err_deg >
-                alm_config.solver.terminal_heading_tolerance_deg) {
-            result.message = "ALM terminal error " +
+        if (terminal_pos_err > derived.terminal_position_tolerance ||
+            terminal_head_err_deg > derived.terminal_heading_tolerance_deg) {
+            result.message = "MINCO terminal error " +
                              std::to_string(terminal_pos_err) + " m / " +
                              std::to_string(terminal_head_err_deg) +
                              " deg exceeds tolerance, rejecting";
             return finish();
         }
-        // 填充 ALM 轨迹视图（与输出 Path 同序采样点，携带 v/a/delta/delta_dot，
+        // 5.5) 输出等距重采样：MINCO 按时间等分采样，低速蠕动区点距仅
+        // 1~2cm，几何曲率 κ=Δθ/Δs 被放大；按前端路径等距间隔 DELTA_DIST
+        // 对整条路径抽稀过密点，恢复输出点距（输出给控制的路径间隔与前端一致）
+        ResampleToUniformSpacing(&optimized.getManeuvers());
+        optimized.finalize();
+        // 填充 MINCO 轨迹视图（与输出 Path 同序采样点，携带 v/a/delta/delta_dot，
         // 未携带时间戳），供可视化与下游消费
         result.optimized_trajectory = FlattenManeuvers(optimized.getManeuvers());
         result.optimized_path = std::move(optimized);
         result.success = true;
         result.message =
-            solve_result.status == AlmSolverStatus::CONVERGED
-                ? "ALM converged"
-                : "ALM did not fully converge after " +
+            solve_result.status == MincoSolverStatus::CONVERGED
+                ? "MINCO converged"
+                : "MINCO did not fully converge after " +
                       std::to_string(solve_result.outer_iterations) +
                       " outer iterations, using last iterate (terminal "
                       "error " +
                       std::to_string(terminal_pos_err) + " m / " +
                       std::to_string(terminal_head_err_deg) + " deg)";
     } catch (const std::exception& e) {
-        LOG_FMT_WARN("optimizeAlm exception: {}", e.what());
-        result.message = std::string("ALM attempt failed: ") + e.what();
+        LOG_FMT_WARN("optimizeMinco exception: {}", e.what());
+        result.message = std::string("MINCO attempt failed: ") + e.what();
     }
     return finish();
 }

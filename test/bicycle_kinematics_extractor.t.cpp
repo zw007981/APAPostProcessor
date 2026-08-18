@@ -4,7 +4,7 @@
 #include <functional>
 #include <stdexcept>
 
-#include "core/ALM/bicycle_kinematics_extractor.h"
+#include "core/MINCO/bicycle_kinematics_extractor.h"
 
 namespace apa_post_processor {
 namespace {
@@ -12,8 +12,8 @@ namespace {
 constexpr double kWheelbase = 2.8;
 
 // 默认上限配置：wheelbase=2.8，epsilon_g 按测试需要单独指定
-BicycleKinematicsConfig MakeConfig(double epsilon_g) {
-    BicycleKinematicsConfig config;
+MincoConfig MakeConfig(double epsilon_g) {
+    MincoConfig config;
     config.wheelbase = kWheelbase;
     config.max_velocity = 2.0;
     config.max_acceleration = 1.5;
@@ -321,7 +321,7 @@ TEST(BicycleKinematicsExtractorTest, SteerGradientsMatchCentralDifference) {
 // 测试非法配置的拒绝行为。
 // 因为错误物理参数会静默污染全部下游计算，所以必须在构造期显式失败。
 TEST(BicycleKinematicsExtractorTest, InvalidConfigThrows) {
-    const auto expect_throw = [](BicycleKinematicsConfig config) {
+    const auto expect_throw = [](MincoConfig config) {
         EXPECT_THROW(BicycleKinematicsExtractor{config}, std::invalid_argument);
     };
     expect_throw([] {
@@ -369,7 +369,7 @@ TEST(BicycleKinematicsExtractorTest, InvalidConfigThrows) {
         c.epsilon_g = -1e-9;
         return c;
     }());
-    EXPECT_NO_THROW(BicycleKinematicsExtractor{});
+    EXPECT_NO_THROW(BicycleKinematicsExtractor(MincoConfig{}));
 }
 
 }  // namespace

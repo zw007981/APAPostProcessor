@@ -20,7 +20,7 @@ class PlanningScene {
     PlanningScene(const PlanningScene&) = delete;
     PlanningScene& operator=(const PlanningScene&) = delete;
     // 场景工厂：读取场景配置文件中的 config_details_path，按算法配置详情
-    // JSON 的 "algorithm" 字段（"alm"/"nmpc"/"ilqr"）路由到对应算法场景并完成
+    // JSON 的 "algorithm" 字段（"minco"/"nmpc"/"ilqr"）路由到对应算法场景并完成
     // 加载；文件缺失/字段缺失/算法无法识别时返回 nullptr（错误已记日志）。
     // 生产入口据此按配置运行时选择算法，无需改动代码
     static std::unique_ptr<PlanningScene> LoadFromFile(
@@ -32,7 +32,7 @@ class PlanningScene {
     // 最近一次优化产出的轨迹（未执行 optimize() 或优化失败时为空），
     // 供生产入口算法无关地绘制"初始 vs 优化后"对比图
     virtual const Trajectory& optimizedTraj() const = 0;
-    // 算法名（"ALM"/"NMPC"，绘图标签与日志用）
+    // 算法名（"MINCO"/"NMPC"，绘图标签与日志用）
     virtual std::string algorithmName() const = 0;
     // 生成优化摘要：优化前后路径长度与机动段数变化、优化耗时；未执行
     // optimize() 或优化失败时不含优化后指标并注明原因

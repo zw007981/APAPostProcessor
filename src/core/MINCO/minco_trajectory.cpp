@@ -231,7 +231,8 @@ MincoTrajectory::DerivativeBasisRow(double tau_norm, int order,
     for (int k = 1; k <= order; ++k) {
         falling *= k;
     }
-    double tau_pow = 1.0;  // tau^(k-order)，k=order 时为 1
+    // tau^(k-order)，k=order 时为 1
+    double tau_pow = 1.0;
     const double duration_pow = std::pow(duration, order);
     for (int k = order; k < COEFFS_PER_SEG; ++k) {
         row[k] = falling * tau_pow / duration_pow;

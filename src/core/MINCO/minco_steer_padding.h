@@ -3,27 +3,11 @@
 #include <vector>
 
 #include "../../util/maneuver.h"
+#include "minco_config.h"
 
 namespace apa_post_processor {
-// 停驻窗口"停-打轮-走"合法化改写配置
-struct AlmSteerPaddingConfig {
-    // 停驻判定速度上限 (m/s)：|v| 低于该值的连续点段视为停驻窗口
-    double v_epsilon = 0.05;
-    // 可冻结窗口的最大净朝向变化 (rad)：窗口净 Δθ 低于该值才允许改写——
-    // 冻结会把 Δθ 转嫁到下游航向（最终计入终点航向误差），阈值需与终点
-    // 航向容差（1.5°）保持足够余量；超过该值的窗口含真实旋转需求（多点
-    // 掉头机动），冻结会破坏几何，保持原样
-    double max_freeze_dtheta = 0.02;
-    // 前轮最大转角 δ_max (rad)（替换序列的转角限幅）
-    double max_steer_angle = 0.48;
-    // 前轮最大转角速度 δ̇_max (rad/s)（替换序列的过渡速率上限，决定窗口
-    // 最短分配时长，不足时在窗口内插入更多点并顺延后续时间戳）
-    double max_steer_rate = 0.4;
-    // 替换序列的采样间隔 (s)
-    double sample_dt = 0.1;
-};
 // 停驻窗口改写统计
-struct AlmSteerPaddingStats {
+struct MincoSteerPaddingStats {
     // 被合法化改写的窗口数
     int windows_legalized = 0;
     // 因净 Δθ 超阈值而保持原样的窗口数
@@ -41,6 +25,6 @@ struct AlmSteerPaddingStats {
 // 窗口后第一个驱动点的限幅值线性过渡（消除 atan 值域翻转伪影，且边界
 // 对 Δδ 最小），δ̇ 取过渡斜率。净 Δθ 超阈值的窗口（真实 pivot 旋转
 // 需求）保持原样并计数。
-AlmSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
-                                       const AlmSteerPaddingConfig& config);
+MincoSteerPaddingStats ApplySteerPadding(std::vector<Maneuver>& maneuvers,
+                                       const MincoConfig& config);
 }  // namespace apa_post_processor

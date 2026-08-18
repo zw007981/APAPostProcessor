@@ -3,7 +3,7 @@
 
 用法：
     python3 tool/profile.py              # 直接跑，用 DEFAULT_ALGORITHM / DEFAULT_REPEATS
-    python3 tool/profile.py alm          # 指定算法（重复次数仍取 DEFAULT_REPEATS）
+    python3 tool/profile.py minco          # 指定算法（重复次数仍取 DEFAULT_REPEATS）
     python3 tool/profile.py ilqr --repeats 3
     python3 tool/profile.py nmpc
 
@@ -28,7 +28,7 @@ FIG_DIR: str = os.path.join(PROJECT_ROOT, "fig")
 # 通用 profiling 驱动的 CMake 目标名与二进制名（同名）
 PROFILE_TARGET: str = "apa_profile"
 # 直接运行本文件（不带命令行参数）时 profile 的算法；命令行传入算法可覆盖
-DEFAULT_ALGORITHM: str = "alm"
+DEFAULT_ALGORITHM: str = "minco"
 # 直接运行本文件时每数据集的重复次数；--repeats 参数可覆盖
 DEFAULT_REPEATS: int = 5
 
@@ -49,11 +49,11 @@ class ProfileSpec:
 
 # 算法注册表：新增算法在此追加一条记录即可
 ALGORITHMS: Dict[str, ProfileSpec] = {
-    "alm": ProfileSpec(
-        "data/alm_config.json",
-        "ALM 4-dataset profile",
-        "alm_flame.svg",
-        "perf_alm.data",
+    "minco": ProfileSpec(
+        "data/minco_config.json",
+        "MINCO 4-dataset profile",
+        "minco_flame.svg",
+        "perf_minco.data",
     ),
     "ilqr": ProfileSpec(
         "data/ilqr_config.json",

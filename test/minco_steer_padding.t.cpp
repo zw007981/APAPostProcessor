@@ -3,7 +3,7 @@
 #include <cmath>
 #include <vector>
 
-#include "core/ALM/alm_steer_padding.h"
+#include "core/MINCO/minco_steer_padding.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/maneuver.h"
@@ -109,7 +109,7 @@ double MaxSteerResidual(const std::vector<TrajectoryPoint>& points) {
 // 测试场景：停驻窗口（净 Δθ≈0 的伪影摆动）被整体替换为合法的
 // "停-打轮-走"序列：窗口内 v=0、θ 冻结、|δ|≤δ_max、|δ̇|≤δ̇_max·(1+ε)，
 // 且替换后整条轨迹通过 Trajectory::validate() 全部三门（含运动学门）。
-TEST(AlmSteerPaddingTest, SmallDthetaWindowIsLegalized) {
+TEST(MincoSteerPaddingTest, SmallDthetaWindowIsLegalized) {
     // 速度剖面：平滑减速进入停驻窗口（索引 4..8：0.03/1e-4×3/0.03），
     // 平滑加速驶出，a 按递推与梯形配点严格一致
     const std::vector<double> vs = {0.2,  0.15, 0.1,  0.06, 0.03, 1e-4,
@@ -126,7 +126,7 @@ TEST(AlmSteerPaddingTest, SmallDthetaWindowIsLegalized) {
     maneuvers.emplace_back(
         BuildConsistentPoints(vs, thetas, deltas, delta_dots),
         Direction::FORWARD);
-    AlmSteerPaddingConfig config;
+    MincoConfig config;
     config.max_steer_angle = 0.48;
     config.max_steer_rate = 0.4;
     const auto stats = ApplySteerPadding(maneuvers, config);
@@ -178,7 +178,7 @@ TEST(AlmSteerPaddingTest, SmallDthetaWindowIsLegalized) {
 
 // 测试场景：停驻窗口净 Δθ 超过阈值时不改写——冻结会损失真实旋转量并
 // 破坏终点航向预算，保持原样并计入 skipped。
-TEST(AlmSteerPaddingTest, LargeDthetaWindowIsSkipped) {
+TEST(MincoSteerPaddingTest, LargeDthetaWindowIsSkipped) {
     const std::vector<double> vs = {0.2, 0.1, 1e-4, 1e-4, 1e-4, -0.1, -0.2};
     const std::vector<double> thetas = {0.0,  0.0,  0.01, 0.025,
                                         0.04, 0.04, 0.04};
@@ -190,7 +190,7 @@ TEST(AlmSteerPaddingTest, LargeDthetaWindowIsSkipped) {
         Direction::FORWARD);
     const double before_theta = maneuvers.front().points[3].theta;
     const double before_delta = maneuvers.front().points[3].getDelta();
-    AlmSteerPaddingConfig config;
+    MincoConfig config;
     const auto stats = ApplySteerPadding(maneuvers, config);
     EXPECT_EQ(stats.windows_legalized, 0);
     EXPECT_EQ(stats.windows_skipped, 1);
@@ -204,7 +204,7 @@ TEST(AlmSteerPaddingTest, LargeDthetaWindowIsSkipped) {
 // δ̇≈0——交界对残差 ~0.5·dt·|slope−δ̇_orig| = 0.067 超过 0.05 门（与
 // 真实数据（爬行区时间拉伸）同形态）；平滑后折角被分摊，最大残差必须
 // 低于 0.05 rad。
-TEST(AlmSteerPaddingTest, JunctionKinkIsTaperedUnderLongDt) {
+TEST(MincoSteerPaddingTest, JunctionKinkIsTaperedUnderLongDt) {
     // 速度：平滑减速进入停驻窗口（索引 3..6），0.335s 长 dt 爬行驶出
     const std::vector<double> vs = {0.2,  0.1,  0.06, 1e-4, 1e-4,
                                     1e-4, 1e-4, 0.06, 0.12};
@@ -220,7 +220,7 @@ TEST(AlmSteerPaddingTest, JunctionKinkIsTaperedUnderLongDt) {
     maneuvers.emplace_back(
         BuildConsistentPointsWithDts(vs, dts, thetas, deltas, delta_dots),
         Direction::FORWARD);
-    AlmSteerPaddingConfig config;
+    MincoConfig config;
     config.max_steer_angle = 0.48;
     config.max_steer_rate = 0.4;
     const auto stats = ApplySteerPadding(maneuvers, config);
@@ -247,6 +247,30 @@ TEST(AlmSteerPaddingTest, JunctionKinkIsTaperedUnderLongDt) {
     const TrajectoryPoint goal(traj.back().x, traj.back().y, traj.back().theta);
     const auto validation = traj.validate(goal, esdf, footprint);
     EXPECT_TRUE(validation.all_passed) << FormatValidationResult(validation);
+}
+
+// 测试场景：机动段首点为单点停驻窗口（方向反转重切分后共享边界点的副本），
+// 携带 ṡ≈0 处 θ̇ 残留打轮的极端 δ（0.96，远超 δ_max=0.48）。此前
+// `end - begin < 2` 会跳过单点窗口，使 |δ| 超限泄漏到输出；修复后单点
+// 窗口同样被合法化，δ 被限幅到 δ_max 以内。
+TEST(MincoSteerPaddingTest, SinglePointBoundaryWindowIsLegalized) {
+    const std::vector<double> vs = {0.03, 0.2, 0.3, 0.3};
+    const std::vector<double> thetas = {0.0, 0.0, 0.0, 0.0};
+    const std::vector<double> deltas = {0.96, 0.4, 0.3, 0.3};
+    const std::vector<double> delta_dots(vs.size(), 0.0);
+    std::vector<Maneuver> maneuvers;
+    maneuvers.emplace_back(
+        BuildConsistentPoints(vs, thetas, deltas, delta_dots),
+        Direction::FORWARD);
+    MincoConfig config;
+    config.max_steer_angle = 0.48;
+    config.max_steer_rate = 0.4;
+    const auto stats = ApplySteerPadding(maneuvers, config);
+    EXPECT_EQ(stats.windows_legalized, 1);
+    EXPECT_EQ(stats.windows_skipped, 0);
+    const auto& out = maneuvers.front().points;
+    // 单点停驻窗口被合法化后，首点 δ 必须被限幅到 δ_max 以内
+    EXPECT_LE(std::abs(out[0].getDelta()), config.max_steer_angle + 1e-9);
 }
 
 }  // namespace

@@ -1,4 +1,4 @@
 {
-  "algorithm": "alm",
-  "outer_row_num": 4
+    "algorithm": "minco",
+    "outer_row_num": 2
 }

@@ -15,7 +15,7 @@
 #include "ilqr_reference_builder.h"
 
 namespace apa_post_processor {
-// PIVOT 判据用朝向变化 Δθ（与 ALM 同语义），不用前轮转角差 Δδ
+// PIVOT 判据用朝向变化 Δθ（与 MINCO 同语义），不用前轮转角差 Δδ
 struct iLQRPruneConfig {
     // 剔除弧长阈值 (m)
     double min_arc_length{0.05};

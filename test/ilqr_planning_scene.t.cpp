@@ -43,7 +43,7 @@ std::unique_ptr<PlanningScene> LoadSceneWithDetails(
 
 // 测试场景：详情 JSON 的 algorithm 字段为 "ilqr" 且配置 outer_row_num=3。
 // 预期行为：工厂路由到 iLQR 场景，外圆行数透传为 3（基类覆盖项与
-// ALM/NMPC 场景同一解析入口）。
+// MINCO/NMPC 场景同一解析入口）。
 TEST(iLQRPlanningSceneTest, FactoryRoutesToiLQRSceneWithConfiguredOuterRowNum) {
     auto scene =
         LoadSceneWithDetails("{\"algorithm\": \"ilqr\", \"outer_row_num\": 3}");

@@ -5,7 +5,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/ALM/minco_trajectory.h"
+#include "core/MINCO/minco_trajectory.h"
 
 namespace apa_post_processor {
 namespace {

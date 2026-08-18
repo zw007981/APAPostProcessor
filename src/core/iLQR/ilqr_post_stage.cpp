@@ -130,7 +130,7 @@ bool iLQRPostStage::pruneManeuvers(std::vector<Maneuver>* maneuvers) const {
     if (maneuvers == nullptr || maneuvers->empty()) {
         return true;
     }
-    // 自有分类（Δθ 语义，与 ALM 侧 detectMelting 同一物理含义）：极小
+    // 自有分类（Δθ 语义，与 MINCO 侧 detectMelting 同一物理含义）：极小
     for (std::size_t i = 1; i + 1 < maneuvers->size(); ++i) {
         auto& maneuver = (*maneuvers)[i];
         if (maneuver.length() >= config_.prune.min_arc_length) {

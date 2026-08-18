@@ -1,4 +1,4 @@
-#include "alm_esdf_penalty.h"
+#include "minco_esdf_penalty.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -6,9 +6,9 @@
 #include "../NMPC/vehicle_circle_geometry.h"
 
 namespace apa_post_processor {
-AlmEsdfPenalty::AlmEsdfPenalty(const ESDFMap& esdf_map,
+MincoEsdfPenalty::MincoEsdfPenalty(const ESDFMap& esdf_map,
                                const VehicleFootprintModel& footprint_model,
-                               AlmEsdfPenaltyConfig config)
+                               const MincoConfig& config)
     : esdf_map_(esdf_map),
       config_(config),
       circle_local_centers_(vehicle_circle_geometry::ExtractLocalCircleCenters(
@@ -36,9 +36,9 @@ AlmEsdfPenalty::AlmEsdfPenalty(const ESDFMap& esdf_map,
     }
 }
 
-AlmEsdfPoseCost AlmEsdfPenalty::evaluate(double x, double y,
+MincoEsdfPoseCost MincoEsdfPenalty::evaluate(double x, double y,
                                          double theta) const {
-    AlmEsdfPoseCost result;
+    MincoEsdfPoseCost result;
     const double cos_theta = std::cos(theta);
     const double sin_theta = std::sin(theta);
     for (const auto& local_center : circle_local_centers_) {
@@ -47,10 +47,10 @@ AlmEsdfPoseCost AlmEsdfPenalty::evaluate(double x, double y,
     return result;
 }
 
-void AlmEsdfPenalty::accumulateCircle(const Eigen::Vector2d& local_center,
+void MincoEsdfPenalty::accumulateCircle(const Eigen::Vector2d& local_center,
                                       double cos_theta, double sin_theta,
                                       double x, double y,
-                                      AlmEsdfPoseCost& result) const {
+                                      MincoEsdfPoseCost& result) const {
     const double lx = local_center.x();
     const double ly = local_center.y();
     // 圆心世界坐标 P_k = (x,y) + R(θ)·p_k^local
@@ -60,7 +60,8 @@ void AlmEsdfPenalty::accumulateCircle(const Eigen::Vector2d& local_center,
     const double c_safe = circle_radius_ + config_.margin_safe - dist;
     const double c_comf = circle_radius_ + config_.margin_comf - dist;
     // 两段三次外点罚共享同一个空间梯度方向（仅边界值不同），合并为一个
-    // 梯度系数：∂I_k/∂d = -(3·W_safe·max(0,C_safe)² + 3·W_comf·max(0,C_comf)²)
+    // 梯度系数 ∂I_k/∂d = -(3·W_safe·max(0,C_safe)²
+    //                  + 3·W_comf·max(0,C_comf)²)
     double factor = 0.0;
     if (c_safe > 0.0) {
         result.cost += config_.weight_safe * c_safe * c_safe * c_safe;

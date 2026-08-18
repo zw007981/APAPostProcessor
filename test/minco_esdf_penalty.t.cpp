@@ -5,7 +5,7 @@
 #include <limits>
 #include <vector>
 
-#include "core/ALM/alm_esdf_penalty.h"
+#include "core/MINCO/minco_esdf_penalty.h"
 #include "core/NMPC/vehicle_circle_geometry.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
@@ -47,7 +47,7 @@ struct ReferenceCostGrad {
 // 双重分段惩罚与链式法则可全部用双精度闭式推导（g_y 恒为 0）
 ReferenceCostGrad ComputeReference(
     const std::vector<Eigen::Vector2d>& local_centers, double radius, double x,
-    double y, double theta, const AlmEsdfPenaltyConfig& config) {
+    double y, double theta, const MincoConfig& config) {
     const double cos_theta = std::cos(theta);
     const double sin_theta = std::sin(theta);
     ReferenceCostGrad ref;
@@ -80,7 +80,7 @@ ReferenceCostGrad ComputeReference(
 // 压到 O(h^4)，为步长选择留出充足余量，实测相对误差可达 1e-6 以内。
 // 注意场景设计必须保证差分模板范围内不跨越 max(0,C)^3 的 C=0 折点，
 // 否则差分误差由折点主导（双精度下暴露得尤为明显）。
-double NumericGradientComponent(const AlmEsdfPenalty& penalty, double x,
+double NumericGradientComponent(const MincoEsdfPenalty& penalty, double x,
                                 double y, double theta, int component,
                                 double h) {
     auto cost_at = [&](double offset) {
@@ -103,9 +103,9 @@ double NumericGradientComponent(const AlmEsdfPenalty& penalty, double x,
 
 // 公共测试夹具：直墙 ESDF 地图 + 真实车辆外圆模型（outer_row_num=1，3 个外圆，
 // 局部圆心 lx∈{-0.0833, 1.35, 2.7833}、ly=0，r_outer≈1.1505）
-class AlmEsdfPenaltyTest : public ::testing::Test {
+class MincoEsdfPenaltyTest : public ::testing::Test {
    protected:
-    AlmEsdfPenaltyTest()
+    MincoEsdfPenaltyTest()
         : grid_map_(kResolution, kMapCols, kMapRows, Position{0.0, 0.0},
                     BuildWallCells()),
           esdf_map_(grid_map_),
@@ -125,8 +125,8 @@ class AlmEsdfPenaltyTest : public ::testing::Test {
         return cells;
     }
 
-    AlmEsdfPenalty MakePenalty(AlmEsdfPenaltyConfig config = {}) const {
-        return AlmEsdfPenalty(esdf_map_, footprint_model_, config);
+    MincoEsdfPenalty MakePenalty(MincoConfig config = {}) const {
+        return MincoEsdfPenalty(esdf_map_, footprint_model_, config);
     }
 
    protected:
@@ -141,8 +141,8 @@ class AlmEsdfPenaltyTest : public ::testing::Test {
 // 测试构造期配置校验：负 margin_safe、margin_comf 不大于 margin_safe、
 // 负权重、非有限值均必须抛 std::invalid_argument。
 // 因为非法配置会静默污染全部下游优化目标，必须在构造期显式拒绝。
-TEST_F(AlmEsdfPenaltyTest, ConstructorThrowsOnInvalidConfig) {
-    AlmEsdfPenaltyConfig config;
+TEST_F(MincoEsdfPenaltyTest, ConstructorThrowsOnInvalidConfig) {
+    MincoConfig config;
     config.margin_safe = -0.01;
     EXPECT_THROW(MakePenalty(config), std::invalid_argument);
     config.margin_safe = 0.02;
@@ -164,7 +164,7 @@ TEST_F(AlmEsdfPenaltyTest, ConstructorThrowsOnInvalidConfig) {
 // y=2.5（而非地图中部 4.0）：L8.2 后 θ=π/2 时前圆 cy=y+2.78 会逼近
 // 第 63 行边界圈（y=7.875），y=4.0 时其 d≈1.09<r+margin_comf 被边界圈激活；
 // y=2.5 时全部圆心 cy∈[2.42,5.28]，墙面仍是唯一最近特征，场精确 D=cx。
-TEST_F(AlmEsdfPenaltyTest, ReturnsZeroOutsideComfortMargin) {
+TEST_F(MincoEsdfPenaltyTest, ReturnsZeroOutsideComfortMargin) {
     const auto penalty = MakePenalty();
     // 平行位姿（θ=π/2）下全部圆心 cx=x0>d 阈值 r+margin_comf
     const double x0 = circle_radius_ + 0.5;
@@ -176,7 +176,7 @@ TEST_F(AlmEsdfPenaltyTest, ReturnsZeroOutsideComfortMargin) {
 
 // 测试 d = r+margin_comf 边界处代价光滑归零。
 // 因为 max(0,C)^3 在 C=0 处值与一阶导数都为 0，边界两侧必须 C¹ 连续。
-TEST_F(AlmEsdfPenaltyTest, BoundaryAtComfortMarginIsContinuous) {
+TEST_F(MincoEsdfPenaltyTest, BoundaryAtComfortMarginIsContinuous) {
     const auto penalty = MakePenalty();
     const double x0 = circle_radius_ + penalty.config().margin_comf;
     const auto on_boundary = penalty.evaluate(x0, 2.5, kHalfPi);
@@ -190,7 +190,7 @@ TEST_F(AlmEsdfPenaltyTest, BoundaryAtComfortMarginIsContinuous) {
 // 测试仅舒适段激活时（r+margin_safe < d < r+margin_comf）代价/梯度与手推一致。
 // 因为双重机制的关键分段特性是"safe 段不激活、comf
 // 段单独起作用"，必须独立验证。
-TEST_F(AlmEsdfPenaltyTest, HandDerivedComfortOnlyZoneMatches) {
+TEST_F(MincoEsdfPenaltyTest, HandDerivedComfortOnlyZoneMatches) {
     const auto penalty = MakePenalty();
     // 平行位姿全部圆心 cx=x0=r+0.06：C_safe=-0.04<0（safe 段不激活）、
     // C_comf=0.04>0（comf 段激活）；y=2.5 保证墙面主导（见文件头部注释）
@@ -211,7 +211,7 @@ TEST_F(AlmEsdfPenaltyTest, HandDerivedComfortOnlyZoneMatches) {
 
 // 测试两段同时激活时（d < r+margin_safe）代价/梯度与手推一致。
 // 因为 safe+comf 混合代价是本模块的核心输出，强信号区容差取 1e-6。
-TEST_F(AlmEsdfPenaltyTest, HandDerivedMixedZoneMatches) {
+TEST_F(MincoEsdfPenaltyTest, HandDerivedMixedZoneMatches) {
     const auto penalty = MakePenalty();
     // 平行位姿全部圆心 cx=x0=0.35：C_safe≈0.82、C_comf≈0.90，两段均激活
     const double x0 = 0.35;
@@ -228,7 +228,7 @@ TEST_F(AlmEsdfPenaltyTest, HandDerivedMixedZoneMatches) {
 // 测试旋转位姿（θ≠0）下代价/梯度与手推一致。
 // 因为外圆圆心随 θ 旋转，θ 通道梯度必须包含几何链式法则 dP_k/dθ=dR/dθ·p_k；
 // 本用例 θ 梯度量级 ~9.24，若遗漏旋转项将与真值偏差 9 个数量级。
-TEST_F(AlmEsdfPenaltyTest, HandDerivedRotatedPoseMatches) {
+TEST_F(MincoEsdfPenaltyTest, HandDerivedRotatedPoseMatches) {
     const auto penalty = MakePenalty();
     // θ=atan2(0.8,-0.6)（cos=-0.6、sin=0.8，车辆前部朝向墙面）：前圆
     // （lx=2.7833）cx≈0.28 埋入惩罚区，提供强 θ 梯度信号
@@ -248,8 +248,8 @@ TEST_F(AlmEsdfPenaltyTest, HandDerivedRotatedPoseMatches) {
 // 测试自定义权重与边界值下仍与手推一致。
 // 因为 W_safe/W_comf 与 margin_safe/margin_comf 是外层调参的暴露面，非默认
 // 配置同样必须满足解析公式。
-TEST_F(AlmEsdfPenaltyTest, CustomWeightsAndMarginsMatchHandDerived) {
-    AlmEsdfPenaltyConfig config;
+TEST_F(MincoEsdfPenaltyTest, CustomWeightsAndMarginsMatchHandDerived) {
+    MincoConfig config;
     config.margin_safe = 0.05;
     config.margin_comf = 0.20;
     config.weight_safe = 2.0;
@@ -270,7 +270,7 @@ TEST_F(AlmEsdfPenaltyTest, CustomWeightsAndMarginsMatchHandDerived) {
 // 测试负角度位姿（θ=-π/4）下代价/梯度与手推一致。
 // 因为负角度的 cos/sin 符号组合（cos>0、sin<0）与既有 [0, π/2] 用例不同，
 // 旋转链式法则 dP_k/dθ=dR/dθ·p_k 的符号处理必须在该符号组合下同样成立。
-TEST_F(AlmEsdfPenaltyTest, HandDerivedNegativeAngleMatches) {
+TEST_F(MincoEsdfPenaltyTest, HandDerivedNegativeAngleMatches) {
     const auto penalty = MakePenalty();
     // θ=-π/4，x0=0.4：后圆（lx=-0.0833）cx≈0.34 埋入惩罚区
     const double theta = -std::acos(-1.0) / 4.0;
@@ -287,7 +287,7 @@ TEST_F(AlmEsdfPenaltyTest, HandDerivedNegativeAngleMatches) {
 
 // 测试双重惩罚随侵入深度严格增大（分段行为的方向性验证）。
 // 因为优化的避障能力依赖惩罚对"更深侵入"给出严格更大的代价信号。
-TEST_F(AlmEsdfPenaltyTest, DeeperIntrusionYieldsStrictlyLargerCost) {
+TEST_F(MincoEsdfPenaltyTest, DeeperIntrusionYieldsStrictlyLargerCost) {
     const auto penalty = MakePenalty();
     const double x0_values[] = {circle_radius_ + 0.08, circle_radius_,
                                 circle_radius_ - 0.3};
@@ -302,7 +302,7 @@ TEST_F(AlmEsdfPenaltyTest, DeeperIntrusionYieldsStrictlyLargerCost) {
 // 测试平行位姿下解析梯度与五点中心差分数值梯度对拍，相对误差 < 1e-6。
 // 数值梯度是独立于手推公式的第三方验证：场景取平行深惩罚区（梯度量级
 // ~13~18）以稀释 float 场噪声；步长 h=1e-2 为实测噪声/截断权衡最优。
-TEST_F(AlmEsdfPenaltyTest, NumericGradientMatchesAnalyticParallel) {
+TEST_F(MincoEsdfPenaltyTest, NumericGradientMatchesAnalyticParallel) {
     const auto penalty = MakePenalty();
     const double x0 = 0.35;
     const auto result = penalty.evaluate(x0, 4.0, kHalfPi);
@@ -322,7 +322,7 @@ TEST_F(AlmEsdfPenaltyTest, NumericGradientMatchesAnalyticParallel) {
 // 测试旋转位姿（θ≠0）下解析梯度与数值梯度对拍，相对误差 < 1e-6（含 θ 通道）。
 // 这是"若忽略外圆随 θ 旋转的链式法则，梯度会明显偏离数值梯度"的直接验证：
 // θ 通道数值梯度 ~9.24，遗漏旋转项时解析值为 0，偏差达 9 个数量级。
-TEST_F(AlmEsdfPenaltyTest, NumericGradientMatchesAnalyticRotated) {
+TEST_F(MincoEsdfPenaltyTest, NumericGradientMatchesAnalyticRotated) {
     const auto penalty = MakePenalty();
     const double theta = std::atan2(0.8, -0.6);
     const double x0 = 1.95;
@@ -349,7 +349,7 @@ TEST_F(AlmEsdfPenaltyTest, NumericGradientMatchesAnalyticRotated) {
 // 与恒指向图内的非零梯度：惩罚为大的正值且梯度非零（沿负梯度下降把圆拉回
 // 图内），「保守惩罚」语义保留且严格强于 L8 前的 (0, 零梯度) 哨兵（d=0
 // 对应的全侵入罚）。
-TEST_F(AlmEsdfPenaltyTest, OutOfMapCircleYieldsConservativePenalty) {
+TEST_F(MincoEsdfPenaltyTest, OutOfMapCircleYieldsConservativePenalty) {
     const auto penalty = MakePenalty();
     const auto& config = penalty.config();
     // θ=0 位姿 x0=5.25：前圆 cx=5.25+2.7833≈8.033 越出东边界（s≈0.033）；

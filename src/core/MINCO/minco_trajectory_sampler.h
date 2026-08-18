@@ -4,7 +4,7 @@
 #include <vector>
 
 #include "../../util/maneuver.h"
-#include "alm_maneuver_segmenter.h"
+#include "minco_maneuver_segmenter.h"
 #include "bicycle_kinematics_extractor.h"
 #include "minco_trajectory.h"
 
@@ -22,12 +22,12 @@ namespace apa_post_processor {
 // std::invalid_argument。
 std::vector<Maneuver> SampleMincoTrajectory(
     const MincoTrajectory& trajectory,
-    const std::vector<AlmManeuverEstimate>& estimates,
+    const std::vector<MincoManeuverEstimate>& estimates,
     const Eigen::Vector2d& start_position,
     const BicycleKinematicsExtractor& kinematics, int samples_per_segment);
 // 估计与轨迹的段结构一致性校验（独立可测）：空估计、含空 Maneuver 的估计、
 // 估计段数总和与轨迹段数不一致均抛 std::invalid_argument
 void CheckMincoSampleStructure(
     const MincoTrajectory& trajectory,
-    const std::vector<AlmManeuverEstimate>& estimates);
+    const std::vector<MincoManeuverEstimate>& estimates);
 }  // namespace apa_post_processor

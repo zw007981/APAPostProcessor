@@ -1,4 +1,4 @@
-#include "alm_preprocessor.h"
+#include "minco_preprocessor.h"
 
 #include <LBFGS.h>
 
@@ -6,7 +6,7 @@
 #include <stdexcept>
 
 namespace apa_post_processor {
-Eigen::VectorXd AlmPreprocessorProblem::initialGuess() const {
+Eigen::VectorXd MincoPreprocessorProblem::initialGuess() const {
     const int num_segments = numSegments();
     Eigen::VectorXd guess(variableCount());
     for (int m = 0; m + 1 < num_segments; ++m) {
@@ -21,38 +21,37 @@ Eigen::VectorXd AlmPreprocessorProblem::initialGuess() const {
     return guess;
 }
 
-AlmPreprocessor::AlmPreprocessor(AlmPreprocessorConfig config,
-                                 BicycleKinematicsConfig kinematics_config)
-    : config_(config), kinematics_(kinematics_config) {
+MincoPreprocessor::MincoPreprocessor(const MincoConfig& config)
+    : config_(config), kinematics_(config) {
     // 权重类字段：非负且有限
     if (config_.weight_endpoint_track < 0.0 ||
         !std::isfinite(config_.weight_endpoint_track) ||
-        config_.weight_velocity < 0.0 ||
-        !std::isfinite(config_.weight_velocity) ||
-        config_.weight_acceleration < 0.0 ||
-        !std::isfinite(config_.weight_acceleration) ||
-        config_.weight_steer_angle < 0.0 ||
-        !std::isfinite(config_.weight_steer_angle) ||
-        config_.weight_steer_rate < 0.0 ||
-        !std::isfinite(config_.weight_steer_rate) ||
-        config_.weight_duration_balance < 0.0 ||
-        !std::isfinite(config_.weight_duration_balance) ||
-        config_.weight_gear_cusp < 0.0 ||
-        !std::isfinite(config_.weight_gear_cusp) ||
-        config_.weight_gear_cusp_theta < 0.0 ||
-        !std::isfinite(config_.weight_gear_cusp_theta) ||
-        config_.epsilon_time < 0.0 || !std::isfinite(config_.epsilon_time)) {
-        throw std::invalid_argument("AlmPreprocessorConfig 权重必须非负有限");
+        config_.pre_weight_velocity < 0.0 ||
+        !std::isfinite(config_.pre_weight_velocity) ||
+        config_.pre_weight_acceleration < 0.0 ||
+        !std::isfinite(config_.pre_weight_acceleration) ||
+        config_.pre_weight_steer_angle < 0.0 ||
+        !std::isfinite(config_.pre_weight_steer_angle) ||
+        config_.pre_weight_steer_rate < 0.0 ||
+        !std::isfinite(config_.pre_weight_steer_rate) ||
+        config_.pre_weight_duration_balance < 0.0 ||
+        !std::isfinite(config_.pre_weight_duration_balance) ||
+        config_.pre_weight_gear_cusp < 0.0 ||
+        !std::isfinite(config_.pre_weight_gear_cusp) ||
+        config_.pre_weight_gear_cusp_theta < 0.0 ||
+        !std::isfinite(config_.pre_weight_gear_cusp_theta) ||
+        config_.pre_epsilon_time < 0.0 || !std::isfinite(config_.pre_epsilon_time)) {
+        throw std::invalid_argument("MincoConfig 权重必须非负有限");
     }
     // 段时长平衡系数：0 < ε_low < ε_upp 才有非空可行带
-    if (!(config_.duration_balance_lower > 0.0) ||
-        !(config_.duration_balance_upper > config_.duration_balance_lower)) {
+    if (!(config_.pre_duration_balance_lower > 0.0) ||
+        !(config_.pre_duration_balance_upper > config_.pre_duration_balance_lower)) {
         throw std::invalid_argument("段时长平衡系数必须满足 0 < ε_low < ε_upp");
     }
     // 采样配置：梯形至少 2 点；辛普森子区间必须为偶数且至少 2
-    if (config_.physics_samples_per_segment < 2 ||
-        config_.simpson_subintervals < 2 ||
-        config_.simpson_subintervals % 2 != 0) {
+    if (config_.pre_physics_samples_per_segment < 2 ||
+        config_.pre_simpson_subintervals < 2 ||
+        config_.pre_simpson_subintervals % 2 != 0) {
         throw std::invalid_argument(
             "物理采样数须 >= 2，辛普森子区间须为 >= 2 的偶数");
     }
@@ -61,38 +60,38 @@ AlmPreprocessor::AlmPreprocessor(AlmPreprocessorConfig config,
         throw std::invalid_argument("收敛位置容差必须为正有限值");
     }
     // L-BFGS 参数（与 BSplineSmoother 同一套校验约定）
-    if (config_.lbfgs_max_iterations <= 0 || config_.lbfgs_epsilon <= 0.0 ||
-        config_.lbfgs_epsilon_rel < 0.0 || config_.lbfgs_m <= 0 ||
-        config_.lbfgs_max_linesearch <= 0 ||
-        config_.lbfgs_linesearch_algo < 1 ||
-        config_.lbfgs_linesearch_algo > 3 || config_.lbfgs_ftol <= 0.0 ||
-        config_.lbfgs_ftol >= 0.5 ||
-        config_.lbfgs_wolfe <= config_.lbfgs_ftol ||
-        config_.lbfgs_wolfe >= 1.0) {
-        throw std::invalid_argument("AlmPreprocessorConfig L-BFGS 参数非法");
+    if (config_.pre_lbfgs_max_iterations <= 0 || config_.pre_lbfgs_epsilon <= 0.0 ||
+        config_.pre_lbfgs_epsilon_rel < 0.0 || config_.pre_lbfgs_m <= 0 ||
+        config_.pre_lbfgs_max_linesearch <= 0 ||
+        config_.pre_lbfgs_linesearch_algo < 1 ||
+        config_.pre_lbfgs_linesearch_algo > 3 || config_.pre_lbfgs_ftol <= 0.0 ||
+        config_.pre_lbfgs_ftol >= 0.5 ||
+        config_.pre_lbfgs_wolfe <= config_.pre_lbfgs_ftol ||
+        config_.pre_lbfgs_wolfe >= 1.0) {
+        throw std::invalid_argument("MincoConfig L-BFGS 参数非法");
     }
 }
 
-AlmPreprocessorResult AlmPreprocessor::preprocess(
-    const std::vector<AlmManeuverEstimate>& estimates,
+MincoPreprocessorResult MincoPreprocessor::preprocess(
+    const std::vector<MincoManeuverEstimate>& estimates,
     const Eigen::Vector2d& start_position) const {
-    const AlmPreprocessorProblem problem =
+    const MincoPreprocessorProblem problem =
         buildProblem(estimates, start_position);
-    AlmPreprocessorResult result;
+    MincoPreprocessorResult result;
     Eigen::VectorXd x = problem.initialGuess();
     auto objective = [this, &problem](const Eigen::VectorXd& vars,
                                       Eigen::VectorXd& grad) -> double {
         return evaluateCostAndGradient(problem, vars, &grad);
     };
     LBFGSpp::LBFGSParam<double> param;
-    param.epsilon = config_.lbfgs_epsilon;
-    param.epsilon_rel = config_.lbfgs_epsilon_rel;
-    param.max_iterations = config_.lbfgs_max_iterations;
-    param.m = config_.lbfgs_m;
-    param.max_linesearch = config_.lbfgs_max_linesearch;
-    param.linesearch = config_.lbfgs_linesearch_algo;
-    param.ftol = config_.lbfgs_ftol;
-    param.wolfe = config_.lbfgs_wolfe;
+    param.epsilon = config_.pre_lbfgs_epsilon;
+    param.epsilon_rel = config_.pre_lbfgs_epsilon_rel;
+    param.max_iterations = config_.pre_lbfgs_max_iterations;
+    param.m = config_.pre_lbfgs_m;
+    param.max_linesearch = config_.pre_lbfgs_max_linesearch;
+    param.linesearch = config_.pre_lbfgs_linesearch_algo;
+    param.ftol = config_.pre_lbfgs_ftol;
+    param.wolfe = config_.pre_lbfgs_wolfe;
     double final_cost = 0.0;
     // 按线搜索算法分支：Armijo(1) / Wolfe(2) / Strong Wolfe(3) 使用
     // LineSearchBacktracking（与 BSplineSmoother 同一套接入方式）
@@ -147,8 +146,8 @@ AlmPreprocessorResult AlmPreprocessor::preprocess(
     return result;
 }
 
-AlmPreprocessorProblem AlmPreprocessor::buildProblem(
-    const std::vector<AlmManeuverEstimate>& estimates,
+MincoPreprocessorProblem MincoPreprocessor::buildProblem(
+    const std::vector<MincoManeuverEstimate>& estimates,
     const Eigen::Vector2d& start_position) const {
     if (estimates.empty()) {
         throw std::invalid_argument("初值估计不能为空");
@@ -156,7 +155,7 @@ AlmPreprocessorProblem AlmPreprocessor::buildProblem(
     if (!start_position.allFinite()) {
         throw std::invalid_argument("起点世界坐标必须为有限值");
     }
-    AlmPreprocessorProblem problem;
+    MincoPreprocessorProblem problem;
     problem.start_position = start_position;
     int total_segments = 0;
     for (const auto& estimate : estimates) {
@@ -210,8 +209,8 @@ AlmPreprocessorProblem AlmPreprocessor::buildProblem(
     return problem;
 }
 
-double AlmPreprocessor::evaluateCostAndGradient(
-    const AlmPreprocessorProblem& problem, const Eigen::VectorXd& x,
+double MincoPreprocessor::evaluateCostAndGradient(
+    const MincoPreprocessorProblem& problem, const Eigen::VectorXd& x,
     Eigen::VectorXd* gradient) const {
     const int num_segments = problem.numSegments();
     const MincoTrajectory trajectory = buildTrajectory(problem, x);
@@ -224,7 +223,7 @@ double AlmPreprocessor::evaluateCostAndGradient(
     Eigen::VectorXd dJ_dT = Eigen::VectorXd::Zero(num_segments);
     double cost = 0.0;
     // ---- 物理约束惩罚：每段梯形积分，梯度经基函数行回传到多项式系数 ----
-    const int num_physics = config_.physics_samples_per_segment;
+    const int num_physics = config_.pre_physics_samples_per_segment;
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
         for (int j = 0; j < num_physics; ++j) {
@@ -250,44 +249,44 @@ double AlmPreprocessor::evaluateCostAndGradient(
             const PhysicalConstraintPenalties penalties =
                 kinematics_.evaluatePenalties(sample);
             const double penalty_value =
-                config_.weight_velocity * penalties.velocity.penalty +
-                config_.weight_acceleration * penalties.acceleration.penalty +
-                config_.weight_steer_angle * penalties.steer_angle.penalty +
-                config_.weight_steer_rate * penalties.steer_rate.penalty;
+                config_.pre_weight_velocity * penalties.velocity.penalty +
+                config_.pre_weight_acceleration * penalties.acceleration.penalty +
+                config_.pre_weight_steer_angle * penalties.steer_angle.penalty +
+                config_.pre_weight_steer_rate * penalties.steer_rate.penalty;
             cost += weight * penalty_value;
             const double g_theta_dot =
-                config_.weight_velocity *
+                config_.pre_weight_velocity *
                     penalties.velocity.gradient.d_theta_dot +
-                config_.weight_acceleration *
+                config_.pre_weight_acceleration *
                     penalties.acceleration.gradient.d_theta_dot +
-                config_.weight_steer_angle *
+                config_.pre_weight_steer_angle *
                     penalties.steer_angle.gradient.d_theta_dot +
-                config_.weight_steer_rate *
+                config_.pre_weight_steer_rate *
                     penalties.steer_rate.gradient.d_theta_dot;
             const double g_theta_ddot =
-                config_.weight_velocity *
+                config_.pre_weight_velocity *
                     penalties.velocity.gradient.d_theta_ddot +
-                config_.weight_acceleration *
+                config_.pre_weight_acceleration *
                     penalties.acceleration.gradient.d_theta_ddot +
-                config_.weight_steer_angle *
+                config_.pre_weight_steer_angle *
                     penalties.steer_angle.gradient.d_theta_ddot +
-                config_.weight_steer_rate *
+                config_.pre_weight_steer_rate *
                     penalties.steer_rate.gradient.d_theta_ddot;
             const double g_s_dot =
-                config_.weight_velocity * penalties.velocity.gradient.d_s_dot +
-                config_.weight_acceleration *
+                config_.pre_weight_velocity * penalties.velocity.gradient.d_s_dot +
+                config_.pre_weight_acceleration *
                     penalties.acceleration.gradient.d_s_dot +
-                config_.weight_steer_angle *
+                config_.pre_weight_steer_angle *
                     penalties.steer_angle.gradient.d_s_dot +
-                config_.weight_steer_rate *
+                config_.pre_weight_steer_rate *
                     penalties.steer_rate.gradient.d_s_dot;
             const double g_s_ddot =
-                config_.weight_velocity * penalties.velocity.gradient.d_s_ddot +
-                config_.weight_acceleration *
+                config_.pre_weight_velocity * penalties.velocity.gradient.d_s_ddot +
+                config_.pre_weight_acceleration *
                     penalties.acceleration.gradient.d_s_ddot +
-                config_.weight_steer_angle *
+                config_.pre_weight_steer_angle *
                     penalties.steer_angle.gradient.d_s_ddot +
-                config_.weight_steer_rate *
+                config_.pre_weight_steer_rate *
                     penalties.steer_rate.gradient.d_s_ddot;
             // ∂D^k/∂c_i = 实时间导数基函数行
             const auto basis_d1 =
@@ -312,7 +311,7 @@ double AlmPreprocessor::evaluateCostAndGradient(
     // ---- 逐段终点跟踪：辛普森积分还原世界坐标，位置误差梯度按段后缀和 ----
     // 先离散后求导：代价与梯度共用同一组固定求积节点（由
     // computeSimpsonNodeData 统一产出，与结果指标计算共享），保证严格一致
-    const int num_simpson = config_.simpson_subintervals;
+    const int num_simpson = config_.pre_simpson_subintervals;
     const std::vector<double> simpson_unit_weights =
         SimpsonUnitWeights(num_simpson);
     const SimpsonNodeData simpson_data = computeSimpsonNodeData(trajectory);
@@ -362,45 +361,45 @@ double AlmPreprocessor::evaluateCostAndGradient(
     }
     mean_duration /= num_segments;
     for (int i = 0; i < num_segments; ++i) {
-        const double c_low = config_.duration_balance_lower * mean_duration -
+        const double c_low = config_.pre_duration_balance_lower * mean_duration -
                              trajectory.duration(i);
         if (c_low > 0.0) {
-            cost += config_.weight_duration_balance * c_low * c_low * c_low;
+            cost += config_.pre_weight_duration_balance * c_low * c_low * c_low;
             // ∂C_low/∂T_j = ε_low/M - δ_ij
             const double grad_factor =
-                3.0 * config_.weight_duration_balance * c_low * c_low;
+                3.0 * config_.pre_weight_duration_balance * c_low * c_low;
             dJ_dT(i) -= grad_factor;
             for (int j = 0; j < num_segments; ++j) {
                 dJ_dT(j) +=
-                    grad_factor * config_.duration_balance_lower / num_segments;
+                    grad_factor * config_.pre_duration_balance_lower / num_segments;
             }
         }
         const double c_upp = trajectory.duration(i) -
-                             config_.duration_balance_upper * mean_duration;
+                             config_.pre_duration_balance_upper * mean_duration;
         if (c_upp > 0.0) {
-            cost += config_.weight_duration_balance * c_upp * c_upp * c_upp;
+            cost += config_.pre_weight_duration_balance * c_upp * c_upp * c_upp;
             // ∂C_upp/∂T_j = δ_ij - ε_upp/M
             const double grad_factor =
-                3.0 * config_.weight_duration_balance * c_upp * c_upp;
+                3.0 * config_.pre_weight_duration_balance * c_upp * c_upp;
             dJ_dT(i) += grad_factor;
             for (int j = 0; j < num_segments; ++j) {
                 dJ_dT(j) -=
-                    grad_factor * config_.duration_balance_upper / num_segments;
+                    grad_factor * config_.pre_duration_balance_upper / num_segments;
             }
         }
     }
     // ---- 时间正则：ε_T·ΣT_i，消除 T 方向的平坦退化 ----
     for (int i = 0; i < num_segments; ++i) {
-        cost += config_.epsilon_time * trajectory.duration(i);
-        dJ_dT(i) += config_.epsilon_time;
+        cost += config_.pre_epsilon_time * trajectory.duration(i);
+        dJ_dT(i) += config_.pre_epsilon_time;
     }
     // ---- 换挡点 ṡ² 软惩罚（点态，无积分权重）----
     for (const int cusp_index : problem.cusp_segment_indices) {
         const double duration_g = trajectory.duration(cusp_index);
         const double s_dot_end =
             trajectory.evaluateSegment(cusp_index, duration_g, 1).y();
-        cost += config_.weight_gear_cusp * s_dot_end * s_dot_end;
-        const double g_s_dot = 2.0 * config_.weight_gear_cusp * s_dot_end;
+        cost += config_.pre_weight_gear_cusp * s_dot_end * s_dot_end;
+        const double g_s_dot = 2.0 * config_.pre_weight_gear_cusp * s_dot_end;
         dJ_dc_s.col(cusp_index) +=
             g_s_dot *
             MincoTrajectory::DerivativeBasisRow(1.0, 1, duration_g).transpose();
@@ -412,9 +411,9 @@ double AlmPreprocessor::evaluateCostAndGradient(
         const double duration_g = trajectory.duration(cusp_index);
         const double theta_dot_end =
             trajectory.evaluateSegment(cusp_index, duration_g, 1).x();
-        cost += config_.weight_gear_cusp_theta * theta_dot_end * theta_dot_end;
+        cost += config_.pre_weight_gear_cusp_theta * theta_dot_end * theta_dot_end;
         const double g_theta_dot =
-            2.0 * config_.weight_gear_cusp_theta * theta_dot_end;
+            2.0 * config_.pre_weight_gear_cusp_theta * theta_dot_end;
         dJ_dc_theta.col(cusp_index) +=
             g_theta_dot *
             MincoTrajectory::DerivativeBasisRow(1.0, 1, duration_g).transpose();
@@ -482,8 +481,8 @@ double AlmPreprocessor::evaluateCostAndGradient(
     return cost;
 }
 
-MincoTrajectory AlmPreprocessor::buildTrajectory(
-    const AlmPreprocessorProblem& problem, const Eigen::VectorXd& x) const {
+MincoTrajectory MincoPreprocessor::buildTrajectory(
+    const MincoPreprocessorProblem& problem, const Eigen::VectorXd& x) const {
     const int num_segments = problem.numSegments();
     if (x.size() != problem.variableCount()) {
         throw std::invalid_argument("决策变量维数与问题规模不匹配");
@@ -505,8 +504,8 @@ MincoTrajectory AlmPreprocessor::buildTrajectory(
     return trajectory;
 }
 
-std::vector<Eigen::Vector2d> AlmPreprocessor::computeSegmentEndPositions(
-    const AlmPreprocessorProblem& problem,
+std::vector<Eigen::Vector2d> MincoPreprocessor::computeSegmentEndPositions(
+    const MincoPreprocessorProblem& problem,
     const MincoTrajectory& trajectory) const {
     const SimpsonNodeData simpson_data = computeSimpsonNodeData(trajectory);
     std::vector<Eigen::Vector2d> positions;
@@ -519,10 +518,10 @@ std::vector<Eigen::Vector2d> AlmPreprocessor::computeSegmentEndPositions(
     return positions;
 }
 
-AlmPreprocessor::SimpsonNodeData AlmPreprocessor::computeSimpsonNodeData(
+MincoPreprocessor::SimpsonNodeData MincoPreprocessor::computeSimpsonNodeData(
     const MincoTrajectory& trajectory) const {
     const int num_segments = trajectory.numSegments();
-    const int num_simpson = config_.simpson_subintervals;
+    const int num_simpson = config_.pre_simpson_subintervals;
     const std::vector<double> simpson_unit_weights =
         SimpsonUnitWeights(num_simpson);
     SimpsonNodeData data;
@@ -551,7 +550,7 @@ AlmPreprocessor::SimpsonNodeData AlmPreprocessor::computeSimpsonNodeData(
     return data;
 }
 
-std::vector<double> AlmPreprocessor::SimpsonUnitWeights(int num_subintervals) {
+std::vector<double> MincoPreprocessor::SimpsonUnitWeights(int num_subintervals) {
     std::vector<double> weights(num_subintervals + 1, 2.0);
     weights.front() = 1.0;
     weights.back() = 1.0;

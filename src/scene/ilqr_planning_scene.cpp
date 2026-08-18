@@ -27,7 +27,7 @@ std::unique_ptr<ILQRPlanningScene> ILQRPlanningScene::LoadFromFile(
 
 void ILQRPlanningScene::loadConfigDetails(
     const std::string& config_details_path) {
-    // 算法无关的基类字段覆盖项（outer_row_num 等）与 ALM/NMPC 场景同一解析
+    // 算法无关的基类字段覆盖项（outer_row_num 等）与 MINCO/NMPC 场景同一解析
     // 入口，防止基类字段被静默忽略（Config 双源缺口的历史教训）
     if (!LoadBaseConfigOverrides(config_details_path, ilqr_config_)) {
         LOG_FMT_ERROR(
@@ -58,7 +58,7 @@ PostProcessorResult ILQRPlanningScene::optimize() {
         last_result_.success, last_result_.final_maneuvers,
         last_result_.final_length, last_result_.total_time_ms,
         last_result_.message);
-    // 统一从 optimized_trajectory 读取（与 NMPC/ALM 共用基类 optimized_traj_）
+    // 统一从 optimized_trajectory 读取（与 NMPC/MINCO 共用基类 optimized_traj_）
     optimized_traj_ = last_result_.optimized_trajectory;
     return last_result_;
 }

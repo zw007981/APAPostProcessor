@@ -345,7 +345,7 @@ TEST(iLQRTopologyPruneTest, LargeSteerChangeWithoutHeadingChangeIsNotPivot) {
 
 // 不改写采样数据红线：修剪只打方向标签（UNKNOWN 剔除标记），保留段与
 // 剔除段的逐点数据（x/y/θ/v/δ）在修剪前后必须逐位一致——压平位置/清零
-// 速度会产生 v≡0 但 θ 变化的自相矛盾状态（ALM 侧已废弃的做法）
+// 速度会产生 v≡0 但 θ 变化的自相矛盾状态（MINCO 侧已废弃的做法）
 TEST(iLQRTopologyPruneTest, PruneDoesNotRewritePoints) {
     PostStageFixture fixture;
     std::vector<ProfileEntry> profile;

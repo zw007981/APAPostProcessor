@@ -19,7 +19,7 @@ std::unique_ptr<NMPCPlanningScene> NMPCPlanningScene::LoadFromFile(
 
 void NMPCPlanningScene::loadConfigDetails(
     const std::string& config_details_path) {
-    // 算法无关的基类字段覆盖项（outer_row_num 等）与 ALM 场景同一解析
+    // 算法无关的基类字段覆盖项（outer_row_num 等）与 MINCO 场景同一解析
     // 入口；proto 路由不识别这些字段，缺此会被静默忽略
     if (!LoadBaseConfigOverrides(config_details_path, &config())) {
         LOG_FMT_ERROR(
@@ -54,7 +54,7 @@ PostProcessorResult NMPCPlanningScene::optimize() {
             break;
         }
     }
-    // 统一从 optimized_trajectory 读取（与 ALM/iLQR 共用基类 optimized_traj_）
+    // 统一从 optimized_trajectory 读取（与 MINCO/iLQR 共用基类 optimized_traj_）
     optimized_traj_ = last_result_.optimized_trajectory;
     return last_result_;
 }

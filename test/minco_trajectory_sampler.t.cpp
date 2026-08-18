@@ -5,8 +5,8 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/ALM/alm_trajectory_sampler.h"
-#include "core/ALM/bicycle_kinematics_extractor.h"
+#include "core/MINCO/minco_trajectory_sampler.h"
+#include "core/MINCO/bicycle_kinematics_extractor.h"
 #include "util/maneuver.h"
 
 namespace apa_post_processor {
@@ -26,7 +26,7 @@ struct ManeuverSpec {
 // 边界同理静止
 struct FabricatedScene {
     MincoTrajectory trajectory;
-    std::vector<AlmManeuverEstimate> estimates;
+    std::vector<MincoManeuverEstimate> estimates;
 };
 
 FabricatedScene Fabricate(
@@ -44,7 +44,7 @@ FabricatedScene Fabricate(
     }
     int global_index = 0;
     for (const auto& segment_specs : maneuver_specs) {
-        AlmManeuverEstimate estimate;
+        MincoManeuverEstimate estimate;
         estimate.direction = segment_specs.front().direction;
         estimate.start_theta = theta;
         estimate.start_arc_length = arc_length;
@@ -80,7 +80,7 @@ FabricatedScene Fabricate(const std::vector<ManeuverSpec>& specs) {
 
 // 与车辆物理参数一致的运动学提取器（状态量解析只依赖提取器本身）
 BicycleKinematicsExtractor MakeKinematics() {
-    BicycleKinematicsConfig config;
+    MincoConfig config;
     config.wheelbase = 2.7;
     return BicycleKinematicsExtractor(config);
 }
@@ -93,7 +93,7 @@ constexpr int kSamplesPerSegment = 8;
 // 起点世界坐标；末点 θ/s 取轨迹全局终点的精确值，世界坐标由梯形积分还原，
 // 与构造位移的偏差应在积分截断误差量级内（直线构造下两端 s̈=0，梯形主误差
 // 项相消，0.02 m 容差足以钉住符号/锚点/量级错误）。
-TEST(AlmTrajectorySamplerTest, SingleManeuverSamplingMatchesTrajectory) {
+TEST(MincoTrajectorySamplerTest, SingleManeuverSamplingMatchesTrajectory) {
     const FabricatedScene scene = Fabricate({
         {{{Direction::FORWARD, 0.0, 1.0, 2.0},
           {Direction::FORWARD, 0.0, 1.0, 2.0}}},
@@ -130,7 +130,7 @@ TEST(AlmTrajectorySamplerTest, SingleManeuverSamplingMatchesTrajectory) {
     EXPECT_NEAR(last.x, 3.0, 0.02);
     // 时间戳：首点 t=0，末点 t=轨迹总时长（2+2=4s），逐点严格递增——
     // θ-s 轨迹本身是时间参数化的多项式，采样点携带真实时刻后运动学
-    // 可行性校验（梯形配点残差）才能对 ALM 产出真正生效
+    // 可行性校验（梯形配点残差）才能对 MINCO 产出真正生效
     EXPECT_TRUE(maneuvers[0].points.front().hasT());
     EXPECT_DOUBLE_EQ(maneuvers[0].points.front().getT(), 0.0);
     EXPECT_DOUBLE_EQ(last.getT(), 4.0);
@@ -143,7 +143,7 @@ TEST(AlmTrajectorySamplerTest, SingleManeuverSamplingMatchesTrajectory) {
 // 测试换挡场景（前进 → 后退）的带符号弧长积分：世界坐标必须按 ṡ 的符号
 // 反向推进，而非按 |Δs| 单向累积——若实现错误地用无符号弧长积分，全局终点
 // 会落在 1.5 m 而非 0.5 m 附近。
-TEST(AlmTrajectorySamplerTest, GearShiftManeuverIntegratesSignedArcLength) {
+TEST(MincoTrajectorySamplerTest, GearShiftManeuverIntegratesSignedArcLength) {
     const FabricatedScene scene = Fabricate({
         {Direction::FORWARD, 0.0, 1.0, 2.0},
         {Direction::BACKWARD, 0.0, -0.5, 1.5},
@@ -168,7 +168,7 @@ TEST(AlmTrajectorySamplerTest, GearShiftManeuverIntegratesSignedArcLength) {
 
 // 测试多 Maneuver 场景的方向保留与点数分配：方向直接取自估计（离散化不做
 // 任何方向推断/改写），只有最后一个 Maneuver 携带全局终点补采样点。
-TEST(AlmTrajectorySamplerTest, MultiManeuverCountsAndDirectionsPreserved) {
+TEST(MincoTrajectorySamplerTest, MultiManeuverCountsAndDirectionsPreserved) {
     const FabricatedScene scene = Fabricate({
         {Direction::FORWARD, 0.0, 1.0, 2.0},
         {Direction::BACKWARD, 0.0, -0.5, 1.5},
@@ -195,7 +195,7 @@ TEST(AlmTrajectorySamplerTest, MultiManeuverCountsAndDirectionsPreserved) {
 // 测试同一工具多次调用互不干扰（无隐藏状态残留）：同一份 estimates 分别
 // 离散化两条段结构一致但数值不同的 MincoTrajectory，两次结果各自与对应
 // 轨迹一致；对同一条轨迹重复离散化必须逐位一致（纯函数语义）。
-TEST(AlmTrajectorySamplerTest, RepeatedCallsArePureAndIndependent) {
+TEST(MincoTrajectorySamplerTest, RepeatedCallsArePureAndIndependent) {
     const FabricatedScene scene_a = Fabricate({
         {{{Direction::FORWARD, 0.0, 1.0, 2.0},
           {Direction::FORWARD, 0.0, 1.0, 2.0}}},
@@ -243,7 +243,7 @@ TEST(AlmTrajectorySamplerTest, RepeatedCallsArePureAndIndependent) {
 // 测试非法输入的异常反馈：估计与轨迹的段数结构必须一致（离散化按估计的
 // 段结构索引轨迹段），空估计、空 Maneuver、段数不一致、非有限起点、非法
 // 采样数都必须以标准异常明确拒绝；合法输入不抛。
-TEST(AlmTrajectorySamplerTest, InvalidInputsThrow) {
+TEST(MincoTrajectorySamplerTest, InvalidInputsThrow) {
     const FabricatedScene scene = Fabricate({
         {Direction::FORWARD, 0.0, 1.0, 2.0},
         {Direction::BACKWARD, 0.0, -0.5, 1.5},
@@ -258,11 +258,11 @@ TEST(AlmTrajectorySamplerTest, InvalidInputsThrow) {
                  std::invalid_argument);
     // 空 segments 的 Maneuver
     EXPECT_THROW(
-        SampleMincoTrajectory(scene.trajectory, {AlmManeuverEstimate{}},
+        SampleMincoTrajectory(scene.trajectory, {MincoManeuverEstimate{}},
                               {0.0, 0.0}, kinematics, kSamplesPerSegment),
         std::invalid_argument);
     // 段数不一致：估计 1 段 vs 轨迹 2 段
-    std::vector<AlmManeuverEstimate> mismatched = scene.estimates;
+    std::vector<MincoManeuverEstimate> mismatched = scene.estimates;
     mismatched.pop_back();
     EXPECT_THROW(SampleMincoTrajectory(scene.trajectory, mismatched, {0.0, 0.0},
                                        kinematics, kSamplesPerSegment),
@@ -289,7 +289,7 @@ TEST(AlmTrajectorySamplerTest, InvalidInputsThrow) {
 
 // 测试段结构校验工具本身：合法结构不抛，三类非法结构（空估计/空 Maneuver/
 // 段数不一致）均以 std::invalid_argument 明确拒绝。
-TEST(AlmTrajectorySamplerTest, StructureCheckRejectsInconsistentEstimates) {
+TEST(MincoTrajectorySamplerTest, StructureCheckRejectsInconsistentEstimates) {
     const FabricatedScene scene = Fabricate({
         {Direction::FORWARD, 0.0, 1.0, 2.0},
         {Direction::BACKWARD, 0.0, -0.5, 1.5},
@@ -299,9 +299,9 @@ TEST(AlmTrajectorySamplerTest, StructureCheckRejectsInconsistentEstimates) {
     EXPECT_THROW(CheckMincoSampleStructure(scene.trajectory, {}),
                  std::invalid_argument);
     EXPECT_THROW(
-        CheckMincoSampleStructure(scene.trajectory, {AlmManeuverEstimate{}}),
+        CheckMincoSampleStructure(scene.trajectory, {MincoManeuverEstimate{}}),
         std::invalid_argument);
-    std::vector<AlmManeuverEstimate> mismatched = scene.estimates;
+    std::vector<MincoManeuverEstimate> mismatched = scene.estimates;
     mismatched.pop_back();
     EXPECT_THROW(CheckMincoSampleStructure(scene.trajectory, mismatched),
                  std::invalid_argument);

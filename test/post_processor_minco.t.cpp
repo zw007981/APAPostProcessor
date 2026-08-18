@@ -37,12 +37,12 @@ VehicleFootprintModel MakeFootprintModel(const VehicleParams& params) {
 }
 
 // 白盒访问器：暴露 protected 静态方法
-class PostProcessorAlmTestAccess : public PostProcessor {
+class PostProcessorMincoTestAccess : public PostProcessor {
    public:
     using PostProcessor::PostProcessor;
-    static BicycleKinematicsConfig CallDeriveKinematicsConfig(
-        const VehicleParams& vehicle_params, double max_velocity) {
-        return DeriveKinematicsConfig(vehicle_params, max_velocity);
+    static MincoConfig CallDeriveKinematicsConfig(
+        const VehicleParams& vehicle_params, const MincoConfig& minco_config) {
+        return DeriveKinematicsConfig(vehicle_params, minco_config);
     }
 };
 
@@ -95,12 +95,14 @@ double TerminalHeadingErrorDeg(const Path& optimized, const Path& init) {
 // ============================================================
 
 // 轴距/最大前轮转角/转角速度必须与 VehicleParams 同源；加速度上限取
-// max_accel 与 |max_decel| 的较小值；速度上限取自 ALM 配置。
-TEST(PostProcessorAlmTest, DeriveKinematicsConfigMatchesVehicleParams) {
+// max_accel 与 |max_decel| 的较小值；速度上限取自 MINCO 配置。
+TEST(PostProcessorMincoTest, DeriveKinematicsConfigMatchesVehicleParams) {
     const auto vehicle_params = MakeVehicleParams();
+    MincoConfig minco_config;
+    minco_config.max_velocity = 1.8;
     const auto kinematics_config =
-        PostProcessorAlmTestAccess::CallDeriveKinematicsConfig(vehicle_params,
-                                                               1.8);
+        PostProcessorMincoTestAccess::CallDeriveKinematicsConfig(vehicle_params,
+                                                                minco_config);
     EXPECT_DOUBLE_EQ(kinematics_config.wheelbase, 2.7);
     EXPECT_DOUBLE_EQ(kinematics_config.max_steer_angle, 0.6);
     EXPECT_DOUBLE_EQ(kinematics_config.max_steer_rate, 0.4);
@@ -110,35 +112,35 @@ TEST(PostProcessorAlmTest, DeriveKinematicsConfigMatchesVehicleParams) {
 }
 
 // ============================================================
-// 测试：ALM 路径不污染配置、不与 NMPC 路径互相干扰
+// 测试：MINCO 路径不污染配置、不与 NMPC 路径互相干扰
 // ============================================================
 
-// 调用方传入的 AlmConfig 对象在 optimizeAlm 后必须保持原值。
-TEST(PostProcessorAlmTest, DoesNotMutateAlmConfig) {
+// 调用方传入的 MincoConfig 对象在 optimizeMinco 后必须保持原值。
+TEST(PostProcessorMincoTest, DoesNotMutateMincoConfig) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
-    AlmConfig alm_config;
-    alm_config.segmenter.nominal_segment_length = 0.45;
-    alm_config.solver.max_outer_iterations = 3;
-    alm_config.solver.weight_gear_cusp = 500.0;
-    alm_config.esdf_penalty.margin_safe = 0.03;
-    alm_config.melter.melt_arc_threshold = 0.08;
-    alm_config.max_velocity = 1.5;
+    MincoConfig minco_config;
+    minco_config.nominal_segment_length = 0.45;
+    minco_config.max_outer_iterations = 3;
+    minco_config.solver_weight_gear_cusp = 500.0;
+    minco_config.margin_safe = 0.03;
+    minco_config.melt_arc_threshold = 0.08;
+    minco_config.max_velocity = 1.5;
     const auto path = BuildStraightPath(2.0);
-    processor.optimizeAlm(path, alm_config);
-    EXPECT_DOUBLE_EQ(alm_config.segmenter.nominal_segment_length, 0.45);
-    EXPECT_EQ(alm_config.solver.max_outer_iterations, 3);
-    EXPECT_DOUBLE_EQ(alm_config.solver.weight_gear_cusp, 500.0);
-    EXPECT_DOUBLE_EQ(alm_config.esdf_penalty.margin_safe, 0.03);
-    EXPECT_DOUBLE_EQ(alm_config.melter.melt_arc_threshold, 0.08);
-    EXPECT_DOUBLE_EQ(alm_config.max_velocity, 1.5);
+    processor.optimizeMinco(path, minco_config);
+    EXPECT_DOUBLE_EQ(minco_config.nominal_segment_length, 0.45);
+    EXPECT_EQ(minco_config.max_outer_iterations, 3);
+    EXPECT_DOUBLE_EQ(minco_config.solver_weight_gear_cusp, 500.0);
+    EXPECT_DOUBLE_EQ(minco_config.margin_safe, 0.03);
+    EXPECT_DOUBLE_EQ(minco_config.melt_arc_threshold, 0.08);
+    EXPECT_DOUBLE_EQ(minco_config.max_velocity, 1.5);
 }
 
-// 先跑一次 NMPC 路径（max_iter=0 强制回退），再跑 ALM 路径，最后再跑
+// 先跑一次 NMPC 路径（max_iter=0 强制回退），再跑 MINCO 路径，最后再跑
 // NMPC 路径：两次 NMPC 结果必须完全一致，且 NMPC 配置对象未被触碰。
-TEST(PostProcessorAlmTest, AlmPathDoesNotInterfereWithNmpcPath) {
+TEST(PostProcessorMincoTest, MincoPathDoesNotInterfereWithNmpcPath) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
@@ -149,31 +151,31 @@ TEST(PostProcessorAlmTest, AlmPathDoesNotInterfereWithNmpcPath) {
     const auto path = BuildStraightPath(5.0);
     const auto before = processor.optimize(path, nmpc_config);
     ASSERT_TRUE(before.success);
-    const auto alm_result = processor.optimizeAlm(path, AlmConfig{});
-    ASSERT_TRUE(alm_result.success) << alm_result.message;
+    const auto minco_result = processor.optimizeMinco(path, MincoConfig{});
+    ASSERT_TRUE(minco_result.success) << minco_result.message;
     const auto after = processor.optimize(path, nmpc_config);
     ASSERT_TRUE(after.success);
     EXPECT_EQ(before.message, after.message);
     EXPECT_EQ(before.final_maneuvers, after.final_maneuvers);
     EXPECT_DOUBLE_EQ(before.final_length, after.final_length);
-    // NMPC 配置对象未被 ALM 路径触碰
+    // NMPC 配置对象未被 MINCO 路径触碰
     EXPECT_EQ(nmpc_config.max_iter, 0);
     EXPECT_FALSE(nmpc_config.use_static_corridor);
 }
 
 // ============================================================
-// 测试：alm_traj 结果轨迹填充
+// 测试：minco_traj 结果轨迹填充
 // ============================================================
 
-// 成功路径必须同步填充 alm_traj（点数与输出 Path 一致，逐点携带状态/控制量）；
-// 失败路径 alm_traj 必须为空。
-TEST(PostProcessorAlmTest, AlmTrajFilledOnSuccessAndEmptyOnFailure) {
+// 成功路径必须同步填充 minco_traj（点数与输出 Path 一致，逐点携带状态/控制量）；
+// 失败路径 minco_traj 必须为空。
+TEST(PostProcessorMincoTest, MincoTrajFilledOnSuccessAndEmptyOnFailure) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success) << result.message;
     std::size_t path_points = 0;
     for (const auto& maneuver : result.optimized_path.getManeuvers()) {
@@ -188,32 +190,32 @@ TEST(PostProcessorAlmTest, AlmTrajFilledOnSuccessAndEmptyOnFailure) {
         EXPECT_TRUE(pt.hasDelta());
     }
     const Path empty_path;
-    const auto failed = processor.optimizeAlm(empty_path, AlmConfig{});
+    const auto failed = processor.optimizeMinco(empty_path, MincoConfig{});
     EXPECT_FALSE(failed.success);
     EXPECT_TRUE(failed.optimized_trajectory.empty());
 }
 
 // ============================================================
-// 测试：alm_preprocessed_traj 预处理粗优化轨迹填充
+// 测试：minco_preprocessed_traj 预处理粗优化轨迹填充
 // ============================================================
 
-// 预处理成功后必须填充 intermediate_traces["alm_preprocessed"]（预处理
+// 预处理成功后必须填充 intermediate_traces["minco_preprocessed"]（预处理
 // 粗优化轨迹的离散化结果，作为"优化前"对比基线）：首点锚定初始路径首点，
 // 末点在预处理收敛容差内贴近初始路径末点，逐点携带状态/控制量；预处理
 // 失败时 intermediate_traces 中无此项。
-TEST(PostProcessorAlmTest,
-     AlmPreprocessedTrajFilledOnSuccessAndEmptyOnFailure) {
+TEST(PostProcessorMincoTest,
+     MincoPreprocessedTrajFilledOnSuccessAndEmptyOnFailure) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success) << result.message;
     // 从 intermediate_traces 中查找预处理轨迹
     const Trajectory* preprocessed = nullptr;
     for (const auto& [name, traj] : result.intermediate_traces) {
-        if (name == "alm_preprocessed") {
+        if (name == "minco_preprocessed") {
             preprocessed = &traj;
             break;
         }
@@ -233,14 +235,14 @@ TEST(PostProcessorAlmTest,
     // 预处理收敛容差默认 0.1 m，叠加离散化积分还原余量后取 0.15 m 上限
     EXPECT_NEAR(preprocessed->back().x, path.back().x, 0.15);
     EXPECT_NEAR(preprocessed->back().y, path.back().y, 0.15);
-    // 预处理失败：intermediate_traces 中无 alm_preprocessed 项
-    AlmConfig fail_config;
-    fail_config.preprocessor.convergence_position_tolerance = 1e-9;
-    const auto failed = processor.optimizeAlm(path, fail_config);
+    // 预处理失败：intermediate_traces 中无 minco_preprocessed 项
+    MincoConfig fail_config;
+    fail_config.convergence_position_tolerance = 1e-9;
+    const auto failed = processor.optimizeMinco(path, fail_config);
     ASSERT_FALSE(failed.success);
     bool has_preprocessed = false;
     for (const auto& [name, traj] : failed.intermediate_traces) {
-        if (name == "alm_preprocessed") {
+        if (name == "minco_preprocessed") {
             has_preprocessed = true;
             break;
         }
@@ -253,13 +255,13 @@ TEST(PostProcessorAlmTest,
 // ============================================================
 
 // 空路径输入必须显式失败，不抛异常、不返回半成品。
-TEST(PostProcessorAlmTest, EmptyPathReturnsFailure) {
+TEST(PostProcessorMincoTest, EmptyPathReturnsFailure) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const Path empty_path;
-    const auto result = processor.optimizeAlm(empty_path, AlmConfig{});
+    const auto result = processor.optimizeMinco(empty_path, MincoConfig{});
     EXPECT_FALSE(result.success);
     EXPECT_TRUE(result.optimized_path.empty());
     EXPECT_FALSE(result.message.empty());
@@ -268,29 +270,29 @@ TEST(PostProcessorAlmTest, EmptyPathReturnsFailure) {
 // 预处理失败必须显式走失败分支（第 2 道质量门），不抛异常、不返回半成品。
 // 把预处理跟踪容差收紧到物理上不可达的量级（合成场景收敛后跟踪误差在
 // 1e-3 m 量级，远大于 1e-9），确定性触发预处理失败。
-TEST(PostProcessorAlmTest, PreprocessFailureReturnsFailure) {
+TEST(PostProcessorMincoTest, PreprocessFailureReturnsFailure) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
-    AlmConfig alm_config;
-    alm_config.preprocessor.convergence_position_tolerance = 1e-9;
+    MincoConfig minco_config;
+    minco_config.convergence_position_tolerance = 1e-9;
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, alm_config);
+    const auto result = processor.optimizeMinco(path, minco_config);
     EXPECT_FALSE(result.success);
     EXPECT_TRUE(result.optimized_path.empty());
     EXPECT_NE(result.message.find("preprocessing failed"), std::string::npos);
     EXPECT_TRUE(result.optimized_trajectory.empty());
 }
 
-// 空旷直线场景应收敛：终点双指标满足 ALM 收敛判据，轨迹无碰撞、无奇异。
-TEST(PostProcessorAlmTest, EndToEndStraightLineConverges) {
+// 空旷直线场景应收敛：终点双指标满足 MINCO 收敛判据，轨迹无碰撞、无奇异。
+TEST(PostProcessorMincoTest, EndToEndStraightLineConverges) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success) << result.message;
     EXPECT_EQ(result.final_maneuvers, 1);
     EXPECT_GT(result.final_length, 0.0);
@@ -307,13 +309,13 @@ TEST(PostProcessorAlmTest, EndToEndStraightLineConverges) {
 // 可合法消除冗余换挡（直接从起点爬向终点，长度 1.5m→~0.55m，终点误差
 // 0.04 m 在 0.05 m 容差内），也可保留换挡——两种形态均为合法输出；真实
 // 数据集的换挡由障碍物几何强制，不会出现这种退化
-TEST(PostProcessorAlmTest, EndToEndGearShiftConverges) {
+TEST(PostProcessorMincoTest, EndToEndGearShiftConverges) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildGearShiftPath();
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success) << result.message;
     EXPECT_GE(result.final_maneuvers, 1);
     EXPECT_LE(result.final_maneuvers, 2);
@@ -330,13 +332,13 @@ TEST(PostProcessorAlmTest, EndToEndGearShiftConverges) {
 // ============================================================
 
 // 成功路径：optimized_trajectory 包含完整运动学量
-TEST(PostProcessorAlmTest, OptimizedTrajectoryContainsFullKinematics) {
+TEST(PostProcessorMincoTest, OptimizedTrajectoryContainsFullKinematics) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success) << result.message;
     ASSERT_FALSE(result.optimized_trajectory.empty());
     for (const auto& pt : result.optimized_trajectory) {
@@ -349,39 +351,39 @@ TEST(PostProcessorAlmTest, OptimizedTrajectoryContainsFullKinematics) {
 }
 
 // algorithm 字段反映实际运行的求解器
-TEST(PostProcessorAlmTest, AlgorithmFieldIsAlm) {
+TEST(PostProcessorMincoTest, AlgorithmFieldIsMinco) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.algorithm, "alm");
+    EXPECT_EQ(result.algorithm, "minco");
 }
 
 // intermediate_traces 包含预处理轨迹（成功路径）
-TEST(PostProcessorAlmTest, IntermediateTracesContainAlmPreprocessed) {
+TEST(PostProcessorMincoTest, IntermediateTracesContainMincoPreprocessed) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto result = processor.optimizeAlm(path, AlmConfig{});
+    const auto result = processor.optimizeMinco(path, MincoConfig{});
     ASSERT_TRUE(result.success) << result.message;
-    // intermediate_traces 应包含 "alm_preprocessed" 条目
+    // intermediate_traces 应包含 "minco_preprocessed" 条目
     bool found = false;
     for (const auto& [name, traj] : result.intermediate_traces) {
-        if (name == "alm_preprocessed") {
+        if (name == "minco_preprocessed") {
             found = true;
             EXPECT_FALSE(traj.empty());
         }
     }
-    EXPECT_TRUE(found) << "intermediate_traces should contain alm_preprocessed";
+    EXPECT_TRUE(found) << "intermediate_traces should contain minco_preprocessed";
 }
 
 // output_level 分级语义
-TEST(PostProcessorAlmTest, OutputLevelReflectsResultQuality) {
+TEST(PostProcessorMincoTest, OutputLevelReflectsResultQuality) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
@@ -389,14 +391,14 @@ TEST(PostProcessorAlmTest, OutputLevelReflectsResultQuality) {
     // 直线场景：应收敛，输出级别为完全成功
     {
         const auto path = BuildStraightPath(2.0);
-        const auto result = processor.optimizeAlm(path, AlmConfig{});
+        const auto result = processor.optimizeMinco(path, MincoConfig{});
         ASSERT_TRUE(result.success);
         EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
     }
     // 空路径：直接失败
     {
         const Path empty_path;
-        const auto result = processor.optimizeAlm(empty_path, AlmConfig{});
+        const auto result = processor.optimizeMinco(empty_path, MincoConfig{});
         EXPECT_FALSE(result.success);
         EXPECT_EQ(result.output_level, OutputLevel::kFallback);
     }

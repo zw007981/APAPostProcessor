@@ -1,4 +1,4 @@
-#include "alm_trajectory_sampler.h"
+#include "minco_trajectory_sampler.h"
 
 #include <cmath>
 #include <stdexcept>
@@ -6,7 +6,7 @@
 namespace apa_post_processor {
 std::vector<Maneuver> SampleMincoTrajectory(
     const MincoTrajectory& trajectory,
-    const std::vector<AlmManeuverEstimate>& estimates,
+    const std::vector<MincoManeuverEstimate>& estimates,
     const Eigen::Vector2d& start_position,
     const BicycleKinematicsExtractor& kinematics, int samples_per_segment) {
     CheckMincoSampleStructure(trajectory, estimates);
@@ -100,7 +100,7 @@ std::vector<Maneuver> SampleMincoTrajectory(
 
 void CheckMincoSampleStructure(
     const MincoTrajectory& trajectory,
-    const std::vector<AlmManeuverEstimate>& estimates) {
+    const std::vector<MincoManeuverEstimate>& estimates) {
     if (estimates.empty()) {
         throw std::invalid_argument("初值估计不能为空");
     }

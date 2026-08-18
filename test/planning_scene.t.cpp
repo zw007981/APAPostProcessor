@@ -45,13 +45,13 @@ std::unique_ptr<PlanningScene> LoadSceneWithDetails(
 
 }  // namespace
 
-// 测试场景：详情 JSON 的 algorithm 字段为 "alm" 且配置 outer_row_num=3。
-// 预期行为：工厂路由到 ALM 场景，外圆行数透传为 3。
-TEST(PlanningSceneTest, FactoryRoutesToAlmSceneWithConfiguredOuterRowNum) {
+// 测试场景：详情 JSON 的 algorithm 字段为 "minco" 且配置 outer_row_num=3。
+// 预期行为：工厂路由到 MINCO 场景，外圆行数透传为 3。
+TEST(PlanningSceneTest, FactoryRoutesToMincoSceneWithConfiguredOuterRowNum) {
     auto scene =
-        LoadSceneWithDetails("{\"algorithm\": \"alm\", \"outer_row_num\": 3}");
+        LoadSceneWithDetails("{\"algorithm\": \"minco\", \"outer_row_num\": 3}");
     ASSERT_NE(scene, nullptr);
-    EXPECT_EQ(scene->algorithmName(), "ALM");
+    EXPECT_EQ(scene->algorithmName(), "MINCO");
     EXPECT_EQ(scene->footprintModel().getOuterRowNum(), 3);
 }
 
@@ -66,7 +66,7 @@ TEST(PlanningSceneTest, FactoryRoutesToNmpcSceneWithDefaultOuterRowNum) {
 
 // 测试场景：NMPC 详情 JSON 配置 outer_row_num=3。
 // 预期行为：基类覆盖项经 loadConfigDetails 生效，外圆行数透传为 3（与
-// ALM 场景同一解析入口，防止 proto 路由静默忽略基类字段）。
+// MINCO 场景同一解析入口，防止 proto 路由静默忽略基类字段）。
 TEST(PlanningSceneTest, NmpcSceneAppliesBaseConfigOverrides) {
     auto scene =
         LoadSceneWithDetails("{\"algorithm\": \"nmpc\", \"outer_row_num\": 3}");
@@ -75,10 +75,10 @@ TEST(PlanningSceneTest, NmpcSceneAppliesBaseConfigOverrides) {
     EXPECT_EQ(scene->footprintModel().getOuterRowNum(), 3);
 }
 
-// 测试场景：ALM 详情 JSON 未配置 outer_row_num。
+// 测试场景：MINCO 详情 JSON 未配置 outer_row_num。
 // 预期行为：外圆行数取 Config 基类默认值 4。
 TEST(PlanningSceneTest, OuterRowNumDefaultsToConfigDefaultWhenAbsent) {
-    auto scene = LoadSceneWithDetails("{\"algorithm\": \"alm\"}");
+    auto scene = LoadSceneWithDetails("{\"algorithm\": \"minco\"}");
     ASSERT_NE(scene, nullptr);
     EXPECT_EQ(scene->footprintModel().getOuterRowNum(), 4);
 }
@@ -104,18 +104,18 @@ TEST(PlanningSceneTest, FactoryReturnsNullptrWhenDetailsPathAbsent) {
 // 测试场景：未执行 optimize() 时生成优化摘要。
 // 预期行为：摘要注明"未执行或失败"，不含优化后指标。
 TEST(PlanningSceneTest, OptimizeSummaryHandlesNotExecuted) {
-    auto scene = LoadSceneWithDetails("{\"algorithm\": \"alm\"}");
+    auto scene = LoadSceneWithDetails("{\"algorithm\": \"minco\"}");
     ASSERT_NE(scene, nullptr);
     const auto summary = scene->optimizeSummary();
     EXPECT_NE(summary.find("failed or not executed"), std::string::npos);
     EXPECT_EQ(summary.find("->"), std::string::npos);
 }
 
-// 测试场景：优化失败时生成优化摘要（data/test.json 的退化路径使 ALM
+// 测试场景：优化失败时生成优化摘要（data/test.json 的退化路径使 MINCO
 // 预处理无法收敛，真实失败分支）。
 // 预期行为：摘要注明失败原因与耗时，不含优化后指标。
 TEST(PlanningSceneTest, OptimizeSummaryHandlesOptimizationFailure) {
-    auto scene = LoadSceneWithDetails("{\"algorithm\": \"alm\"}");
+    auto scene = LoadSceneWithDetails("{\"algorithm\": \"minco\"}");
     ASSERT_NE(scene, nullptr);
     const auto result = scene->optimize();
     ASSERT_FALSE(result.success);
@@ -125,10 +125,10 @@ TEST(PlanningSceneTest, OptimizeSummaryHandlesOptimizationFailure) {
     EXPECT_EQ(summary.find("->"), std::string::npos);
 }
 
-// 测试场景：优化成功后生成优化摘要（data3 真实数据集，ALM 可收敛）。
+// 测试场景：优化成功后生成优化摘要（data3 真实数据集，MINCO 可收敛）。
 // 预期行为：摘要含优化前后路径长度、机动段数变化与耗时。
 TEST(PlanningSceneTest, OptimizeSummaryReportsBeforeAfterMetrics) {
-    auto scene = LoadSceneWithDetails("{\"algorithm\": \"alm\"}",
+    auto scene = LoadSceneWithDetails("{\"algorithm\": \"minco\"}",
                                       "/data/mid_park/data3.json");
     ASSERT_NE(scene, nullptr);
     const auto result = scene->optimize();

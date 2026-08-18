@@ -46,8 +46,10 @@ class BlockTridiagonalSolver {
     void checkSolvable(const BlockMatrix& rhs) const;
 
    protected:
-    std::vector<Block> lower_;  // N-1 个下对角块
-    std::vector<Block> upper_;  // N-1 个上对角块
+    // N-1 个下对角块
+    std::vector<Block> lower_;
+    // N-1 个上对角块
+    std::vector<Block> upper_;
     // 消元后对角块 P_i 的完全主元 LU（正向求解用）；完全主元在块病态时
     // 仍能保持秩判定与求解的稳健性，6x6 固定尺寸下开销可忽略
     std::vector<Eigen::FullPivLU<Block>> lu_diag_;

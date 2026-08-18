@@ -269,7 +269,7 @@ TEST(BicycleDynamicsTest, VaryingSteerMidpointOutperformsOldTheta) {
 }
 
 // 测试换挡场景：v 过零处动力学光滑、无分支、无 NaN。
-// 因为 δ 是显式状态、由 η 积分而来（对照 ALM 的 0/0 奇异反解），
+// 因为 δ 是显式状态、由 η 积分而来（对照 MINCO 的 0/0 奇异反解），
 // 所以 v=0 邻域不需要任何正则化常数，v=±ε 的单步结果必须连续，
 // 且持续倒车加速度驱动的过零 rollout 全程有限。
 TEST(BicycleDynamicsTest, VelocitySignCrossingIsSmoothAndFinite) {

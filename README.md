@@ -71,16 +71,16 @@ APA路径规划后处理器
 ```json
 {
   "data_file_path": "data/rub_park/data1.json",
-  "config_details_path": "data/alm_config.json"
+  "config_details_path": "data/minco_config.json"
 }
 ```
 
 | 字段 | 含义 | 可选值 |
 | --- | --- | --- |
 | `data_file_path` | 输入数据集（车辆参数/栅格地图/初始路径的 protobuf JSON） | `data/rub_park/data1.json`、`data/rub_park/data7.json`、`data/mid_park/data3.json`、`data/long_park/data6.json`（`data/test.json` 为轻量调试数据仅用于单元测试） |
-| `config_details_path` | 算法配置详情 JSON，**按约定每个算法一个** | `data/alm_config.json`（ALM 路径）、`data/nmpc_config.json`（NMPC 路径） |
+| `config_details_path` | 算法配置详情 JSON，**按约定每个算法一个** | `data/minco_config.json`（MINCO 路径）、`data/nmpc_config.json`（NMPC 路径） |
 
-切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"alm"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在两种算法下的效果时，先指向 `data/alm_config.json` 跑一遍，再改成`data/nmpc_config.json` 直接重跑即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
+切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"minco"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在两种算法下的效果时，先指向 `data/minco_config.json` 跑一遍，再改成`data/nmpc_config.json` 直接重跑即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
 
 运行后产物：
 
@@ -98,34 +98,34 @@ bench_apa_post_processor
 
 ---
 
-## 2. ALM
+## 2. MINCO
 
-详细设计文档见 [docs/ALM.md](docs/ALM.md)基于ALM的方法优化 HybridA* 等方法生成的初始轨迹。在不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/MINCO.md](docs/MINCO.md)基于MINCO的方法优化 HybridA* 等方法生成的初始轨迹。在不同数据集上的优化效果如下表所示：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→32.593m（−11.6%） | 6→4 | 293ms | 收敛 |
-| `data/mid_park/data3.json` | 24.582→21.431m（−12.8%） | 9→7 | 468ms | 收敛 |
-| `data/rub_park/data1.json` | 12.988→10.682m（−17.8%） | 10→4 | 203ms | 收敛 |
-| `data/rub_park/data7.json` | 18.744→16.388m（−12.6%） | 6→4 | 272ms | 收敛 |
+| `data/long_park/data6.json` | 36.862→32.475m（−11.9%） | 6→4 | 279ms | 收敛 |
+| `data/mid_park/data3.json` | 24.582→22.114m（−10.0%） | 9→7 | 816ms | 收敛 |
+| `data/rub_park/data1.json` | 12.988→10.967m（−15.6%） | 10→4 | 165ms | 收敛 |
+| `data/rub_park/data7.json` | 18.744→16.580m（−11.5%） | 6→4 | 425ms | 收敛 |
 
-各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 ALM 优化后轨迹，顺序与上表一致）：
+各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 MINCO 优化后轨迹，顺序与上表一致）：
 
-**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 11.6%：
+**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 11.9%：
 
-![alm_data6](fig/alm_data6.png)
+![minco_data6](fig/minco_data6.png)
 
-**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→7，长度缩短 12.8%：
+**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→7，长度缩短 10.0%：
 
-![alm_data3](fig/alm_data3.png)
+![minco_data3](fig/minco_data3.png)
 
-**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 17.8%：
+**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 15.6%：
 
-![alm_data1](fig/alm_data1.png)
+![minco_data1](fig/minco_data1.png)
 
-**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 12.6%：
+**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 11.5%：
 
-![alm_data7](fig/alm_data7.png)
+![minco_data7](fig/minco_data7.png)
 
 ---
 

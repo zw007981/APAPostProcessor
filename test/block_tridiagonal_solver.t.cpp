@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/ALM/block_tridiagonal_solver.h"
+#include "core/MINCO/block_tridiagonal_solver.h"
 
 namespace apa_post_processor {
 namespace {

@@ -7,7 +7,7 @@
 
 namespace apa_post_processor {
 BicycleKinematicsExtractor::BicycleKinematicsExtractor(
-    BicycleKinematicsConfig config)
+    const MincoConfig& config)
     : config_(config),
       tan_steer_max_sq_(std::tan(config.max_steer_angle) *
                         std::tan(config.max_steer_angle)) {
