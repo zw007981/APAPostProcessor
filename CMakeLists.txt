@@ -210,7 +210,7 @@ endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     target_compile_options(apa_core_lib PUBLIC -Wno-stringop-overread)
     # LTO 链接期补充抑制：编译选项只在编译阶段生效；开启 IPO 后 GCC 在
-    # 链接阶段（WPA/LTRANS）重新内联 post_processor/ddp_solver 的 LOG
+    # 链接阶段（WPA/LTRANS）重新内联 post_processor/ilqr_solver 的 LOG
     # 调用链并再次触发同一 quill 误报，而编译选项不会传递到链接驱动。
     # 以链接选项携带同一 -Wno 旗标，压制所有后续可执行目标的 LTO 链接期诊断
     add_link_options(-Wno-stringop-overread)

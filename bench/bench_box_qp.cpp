@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "core/DDP/box_qp.h"
+#include "core/iLQR/box_qp.h"
 
 namespace apa_post_processor {
 namespace {
@@ -13,7 +13,7 @@ namespace {
 using QpSolver = BoxQpSolver<>;
 
 // 计时场景：单轮后向传递沿时间轴求解 N=399 个控制盒约束 QP，
-// 与 DDP 标称时域一致；相邻时间步的 QP 高度相似（H/q/盒边界沿步缓变），
+// 与 iLQR 标称时域一致；相邻时间步的 QP 高度相似（H/q/盒边界沿步缓变），
 // 正是活动集热启动的目标工况
 constexpr std::size_t kChainLength = 399;
 

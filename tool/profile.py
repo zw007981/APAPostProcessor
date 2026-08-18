@@ -4,7 +4,7 @@
 用法：
     python3 tool/profile.py              # 直接跑，用 DEFAULT_ALGORITHM / DEFAULT_REPEATS
     python3 tool/profile.py alm          # 指定算法（重复次数仍取 DEFAULT_REPEATS）
-    python3 tool/profile.py ddp --repeats 3
+    python3 tool/profile.py ilqr --repeats 3
     python3 tool/profile.py nmpc
 
 算法由 ALGORITHMS 注册表驱动：新增算法只需追加一条记录（键名 -> 配置路径、
@@ -55,11 +55,11 @@ ALGORITHMS: Dict[str, ProfileSpec] = {
         "alm_flame.svg",
         "perf_alm.data",
     ),
-    "ddp": ProfileSpec(
-        "data/ddp_config.json",
-        "DDP 4-dataset profile",
-        "ddp_flame.svg",
-        "perf_ddp.data",
+    "ilqr": ProfileSpec(
+        "data/ilqr_config.json",
+        "iLQR 4-dataset profile",
+        "ilqr_flame.svg",
+        "perf_ilqr.data",
     ),
     "nmpc": ProfileSpec(
         "data/nmpc_config.json",

@@ -7,7 +7,7 @@
 #include <random>
 #include <vector>
 
-#include "core/DDP/box_qp.h"
+#include "core/iLQR/box_qp.h"
 
 namespace apa_post_processor {
 namespace {
@@ -129,7 +129,7 @@ RandomQp<TDim> MakeRandomQp(std::mt19937* rng) {
 // 投影牛顿解必须退化为无约束解析解 −H⁻¹q，且一次分解、一次迭代收敛
 TEST(BoxQpSolverTest, UnconstrainedSolutionMatchesAnalytic) {
     std::mt19937 rng(42);
-    const RandomQp<DDP_CONTROL_DIM> qp = MakeRandomQp<DDP_CONTROL_DIM>(&rng);
+    const RandomQp<ILQR_CONTROL_DIM> qp = MakeRandomQp<ILQR_CONTROL_DIM>(&rng);
     QpSolver::Problem problem;
     problem.hessian = qp.hessian;
     problem.gradient = qp.gradient;
@@ -139,7 +139,7 @@ TEST(BoxQpSolverTest, UnconstrainedSolutionMatchesAnalytic) {
     const QpSolver solver;
     const QpSolver::Result result = solver.solve(problem);
     ASSERT_EQ(result.status, QpSolver::Status::CONVERGED);
-    EXPECT_EQ(result.free_dim, DDP_CONTROL_DIM);
+    EXPECT_EQ(result.free_dim, ILQR_CONTROL_DIM);
     EXPECT_EQ(result.factorizations, 1);
     EXPECT_EQ(result.iterations, 1);
     const Vec2 analytic = -qp.hessian.inverse() * qp.gradient;
@@ -166,7 +166,7 @@ TEST(BoxQpSolverTest, SingleSidedClampingMatchesBruteForce) {
     EXPECT_TRUE(result.clamped[0]);
     EXPECT_FALSE(result.clamped[1]);
     Vec2 brute = Vec2::Zero();
-    BruteForceBoxQp<DDP_CONTROL_DIM>(h, problem.gradient, problem.lower,
+    BruteForceBoxQp<ILQR_CONTROL_DIM>(h, problem.gradient, problem.lower,
                                      problem.upper, &brute);
     EXPECT_LT((result.x - brute).norm(), 1e-10);
     EXPECT_DOUBLE_EQ(result.x(0), -0.1);
@@ -188,7 +188,7 @@ TEST(BoxQpSolverTest, DoubleSidedClampingMatchesBruteForce) {
     ASSERT_EQ(result.status, QpSolver::Status::CONVERGED);
     EXPECT_EQ(result.free_dim, 0);
     Vec2 brute = Vec2::Zero();
-    BruteForceBoxQp<DDP_CONTROL_DIM>(h, problem.gradient, problem.lower,
+    BruteForceBoxQp<ILQR_CONTROL_DIM>(h, problem.gradient, problem.lower,
                                      problem.upper, &brute);
     EXPECT_LT((result.x - brute).norm(), 1e-10);
     EXPECT_LT((result.x - problem.lower).norm(), 1e-15);
@@ -200,8 +200,8 @@ TEST(BoxQpSolverTest, RandomProblemsMatchBruteForceEnumeration) {
     std::mt19937 rng(20260728);
     const QpSolver solver;
     for (int trial = 0; trial < 60; ++trial) {
-        const RandomQp<DDP_CONTROL_DIM> qp =
-            MakeRandomQp<DDP_CONTROL_DIM>(&rng);
+        const RandomQp<ILQR_CONTROL_DIM> qp =
+            MakeRandomQp<ILQR_CONTROL_DIM>(&rng);
         QpSolver::Problem problem;
         problem.hessian = qp.hessian;
         problem.gradient = qp.gradient;
@@ -212,7 +212,7 @@ TEST(BoxQpSolverTest, RandomProblemsMatchBruteForceEnumeration) {
         ASSERT_EQ(result.status, QpSolver::Status::CONVERGED)
             << "trial " << trial << " 未收敛";
         Vec2 brute = Vec2::Zero();
-        BruteForceBoxQp<DDP_CONTROL_DIM>(qp.hessian, qp.gradient, qp.lower,
+        BruteForceBoxQp<ILQR_CONTROL_DIM>(qp.hessian, qp.gradient, qp.lower,
                                          qp.upper, &brute);
         EXPECT_LT((result.x - brute).norm(), 1e-10) << "trial " << trial;
     }
@@ -225,8 +225,8 @@ TEST(BoxQpSolverTest, WarmStartWithOptimalActiveSetConvergesInOneStep) {
     std::mt19937 rng(7);
     const QpSolver solver;
     for (int trial = 0; trial < 20; ++trial) {
-        const RandomQp<DDP_CONTROL_DIM> qp =
-            MakeRandomQp<DDP_CONTROL_DIM>(&rng);
+        const RandomQp<ILQR_CONTROL_DIM> qp =
+            MakeRandomQp<ILQR_CONTROL_DIM>(&rng);
         QpSolver::Problem cold;
         cold.hessian = qp.hessian;
         cold.gradient = qp.gradient;
@@ -240,7 +240,7 @@ TEST(BoxQpSolverTest, WarmStartWithOptimalActiveSetConvergesInOneStep) {
         warm.initial_clamped = cold_result.clamped;
         // 初始点取盒中点，钳制维贴到最优解所在的边界值
         warm.initial = 0.5 * (qp.lower + qp.upper);
-        for (int j = 0; j < DDP_CONTROL_DIM; ++j) {
+        for (int j = 0; j < ILQR_CONTROL_DIM; ++j) {
             if (cold_result.clamped[j]) {
                 warm.initial(j) = cold_result.x(j);
             }
@@ -262,8 +262,8 @@ TEST(BoxQpSolverTest, WarmStartWithWrongActiveSetStillConverges) {
     std::mt19937 rng(11);
     const QpSolver solver;
     for (int trial = 0; trial < 20; ++trial) {
-        const RandomQp<DDP_CONTROL_DIM> qp =
-            MakeRandomQp<DDP_CONTROL_DIM>(&rng);
+        const RandomQp<ILQR_CONTROL_DIM> qp =
+            MakeRandomQp<ILQR_CONTROL_DIM>(&rng);
         QpSolver::Problem cold;
         cold.hessian = qp.hessian;
         cold.gradient = qp.gradient;
@@ -275,7 +275,7 @@ TEST(BoxQpSolverTest, WarmStartWithWrongActiveSetStillConverges) {
         QpSolver::Problem warm = cold;
         warm.warm_start = true;
         warm.initial = 0.5 * (qp.lower + qp.upper);
-        for (int j = 0; j < DDP_CONTROL_DIM; ++j) {
+        for (int j = 0; j < ILQR_CONTROL_DIM; ++j) {
             warm.initial_clamped[j] = !cold_result.clamped[j];
             if (warm.initial_clamped[j]) {
                 warm.initial(j) = qp.upper(j);
@@ -295,8 +295,8 @@ TEST(BoxQpSolverTest, FreeHessianFactorMatchesFreeSubspace) {
     std::mt19937 rng(99);
     const QpSolver solver;
     for (int trial = 0; trial < 30; ++trial) {
-        const RandomQp<DDP_CONTROL_DIM> qp =
-            MakeRandomQp<DDP_CONTROL_DIM>(&rng);
+        const RandomQp<ILQR_CONTROL_DIM> qp =
+            MakeRandomQp<ILQR_CONTROL_DIM>(&rng);
         QpSolver::Problem problem;
         problem.hessian = qp.hessian;
         problem.gradient = qp.gradient;
@@ -321,8 +321,8 @@ TEST(BoxQpSolverTest, FreeHessianFactorMatchesFreeSubspace) {
             << "trial " << trial;
         // 满维散布求解：自由行 = Hff⁻¹·rhs，钳制行恒为零
         constexpr int kCols = 3;
-        Eigen::Matrix<double, DDP_CONTROL_DIM, kCols> rhs =
-            Eigen::Matrix<double, DDP_CONTROL_DIM, kCols>::Zero();
+        Eigen::Matrix<double, ILQR_CONTROL_DIM, kCols> rhs =
+            Eigen::Matrix<double, ILQR_CONTROL_DIM, kCols>::Zero();
         Eigen::MatrixXd rhs_compact(nf, kCols);
         for (int i = 0; i < nf; ++i) {
             for (int c = 0; c < kCols; ++c) {
@@ -341,7 +341,7 @@ TEST(BoxQpSolverTest, FreeHessianFactorMatchesFreeSubspace) {
                 1e-12)
                 << "trial " << trial;
         }
-        for (int j = 0; j < DDP_CONTROL_DIM; ++j) {
+        for (int j = 0; j < ILQR_CONTROL_DIM; ++j) {
             if (result.clamped[j]) {
                 EXPECT_TRUE(expanded.row(j).isZero(0.0)) << "trial " << trial;
             }
@@ -368,8 +368,8 @@ TEST(BoxQpSolverTest, FullyClampedDegenerateCaseIsWellDefined) {
     EXPECT_TRUE(result.x.allFinite());
     EXPECT_LT((result.x - problem.initial).norm(), 1e-15);
     // 退化分解下的满维散布求解返回零矩阵（无任何自由行）
-    const Eigen::Matrix<double, DDP_CONTROL_DIM, 2> ones =
-        Eigen::Matrix<double, DDP_CONTROL_DIM, 2>::Ones();
+    const Eigen::Matrix<double, ILQR_CONTROL_DIM, 2> ones =
+        Eigen::Matrix<double, ILQR_CONTROL_DIM, 2>::Ones();
     const auto expanded = QpSolver::SolveFreeExpanded(result, ones);
     EXPECT_TRUE(expanded.isZero(0.0));
 }
@@ -395,7 +395,7 @@ TEST(BoxQpSolverTest, NearSingularHessianStaysFinite) {
     ASSERT_EQ(result.status, QpSolver::Status::CONVERGED);
     EXPECT_TRUE(result.x.allFinite());
     Vec2 brute = Vec2::Zero();
-    const double brute_cost = BruteForceBoxQp<DDP_CONTROL_DIM>(
+    const double brute_cost = BruteForceBoxQp<ILQR_CONTROL_DIM>(
         h, problem.gradient, problem.lower, problem.upper, &brute);
     EXPECT_LE(result.cost, brute_cost + 1e-6 * (1.0 + std::abs(brute_cost)));
 }
@@ -459,8 +459,8 @@ TEST(BoxQpSolverTest, InfeasibleInitialPointIsProjected) {
     std::mt19937 rng(5);
     const QpSolver solver;
     for (int trial = 0; trial < 20; ++trial) {
-        const RandomQp<DDP_CONTROL_DIM> qp =
-            MakeRandomQp<DDP_CONTROL_DIM>(&rng);
+        const RandomQp<ILQR_CONTROL_DIM> qp =
+            MakeRandomQp<ILQR_CONTROL_DIM>(&rng);
         QpSolver::Problem problem;
         problem.hessian = qp.hessian;
         problem.gradient = qp.gradient;
@@ -470,7 +470,7 @@ TEST(BoxQpSolverTest, InfeasibleInitialPointIsProjected) {
         const QpSolver::Result result = solver.solve(problem);
         ASSERT_EQ(result.status, QpSolver::Status::CONVERGED);
         Vec2 brute = Vec2::Zero();
-        BruteForceBoxQp<DDP_CONTROL_DIM>(qp.hessian, qp.gradient, qp.lower,
+        BruteForceBoxQp<ILQR_CONTROL_DIM>(qp.hessian, qp.gradient, qp.lower,
                                          qp.upper, &brute);
         EXPECT_LT((result.x - brute).norm(), 1e-10) << "trial " << trial;
     }

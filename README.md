@@ -129,9 +129,9 @@ bench_apa_post_processor
 
 ---
 
-## 3. DDP
+## 3. iLQR
 
-详细设计文档见 [docs/DDP.md](docs/DDP.md)。在不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/iLQR.md](docs/iLQR.md)。在不同数据集上的优化效果如下表所示：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
@@ -140,27 +140,27 @@ bench_apa_post_processor
 | `data/rub_park/data1.json` | 12.988→11.999m（−7.6%） | 10→4 | 427ms | 阶段一降级输出 |
 | `data/rub_park/data7.json` | 18.744→16.273m（−13.2%） | 6→4 | 855ms | 阶段一降级输出 |
 
-各场景优化前后对比（红色为原始 A\* 路径，绿色为 DDP 优化轨迹，顺序与上表一致）：
+各场景优化前后对比（红色为原始 A\* 路径，绿色为 iLQR 优化轨迹，顺序与上表一致）：
 
 **long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 57.2%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法的初始轨迹的几何特征：
 
-![ddp_data6](fig/ddp_data6.png)
+![ilqr_data6](fig/ilqr_data6.png)
 
 **mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度缩短 10.4%：
 
-![ddp_data3](fig/ddp_data3.png)
+![ilqr_data3](fig/ilqr_data3.png)
 
 **rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 7.6%：
 
-![ddp_data1](fig/ddp_data1.png)
+![ilqr_data1](fig/ilqr_data1.png)
 
 **rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 13.2%：
 
-![ddp_data7](fig/ddp_data7.png)
+![ilqr_data7](fig/ilqr_data7.png)
 
 **虚拟控制初始化变体（ALTRO 机制，默认关闭）**：通过配置键
 `solver.inner.use_virtual_control=true` 启用 ALTRO 式虚拟控制初始化
-（首轮 rollout 缺陷恒零，见 docs/DDP.md §1.3）。四数据集对比：长度
+（首轮 rollout 缺陷恒零，见 docs/iLQR.md §1.3）。四数据集对比：长度
 普遍更短，但端点误差与耗时均增加，故不转正为默认方法：
 
 | 数据集 | 默认长度 | 变体长度 | 变体端点误差 | 默认耗时 | 变体耗时 |
@@ -175,13 +175,13 @@ bench_apa_post_processor
 变体优化前后对比（红色为原始 A\* 路径，绿色为变体优化轨迹，文件名
 后缀 `_vc` 与默认版对照）：
 
-![ddp_data6_vc](fig/ddp_data6_vc.png)
+![ilqr_data6_vc](fig/ilqr_data6_vc.png)
 
-![ddp_data3_vc](fig/ddp_data3_vc.png)
+![ilqr_data3_vc](fig/ilqr_data3_vc.png)
 
-![ddp_data1_vc](fig/ddp_data1_vc.png)
+![ilqr_data1_vc](fig/ilqr_data1_vc.png)
 
-![ddp_data7_vc](fig/ddp_data7_vc.png)
+![ilqr_data7_vc](fig/ilqr_data7_vc.png)
 
 ---
 

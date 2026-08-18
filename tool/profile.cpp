@@ -4,7 +4,7 @@
 // 重复跑若干次，供 perf record 采样定位求解耗时瓶颈；全程不做可视化，
 // 避免 OpenCV 绘图/写图时间污染求解采样。
 // 算法由命令行传入的配置详情 JSON 的 "algorithm" 字段（"alm"/"nmpc"/
-// "ddp"）路由到对应算法场景，新增算法只需准备对应配置文件，无需新增驱动。
+// "ilqr"）路由到对应算法场景，新增算法只需准备对应配置文件，无需新增驱动。
 // 运行：./build/Profile/apa_profile <算法配置详情路径> [每数据集重复次数]
 // 示例：./apa_profile data/alm_config.json 5
 // 配套脚本 tool/profile.py 一键完成配置/构建/采样/火焰图生成。

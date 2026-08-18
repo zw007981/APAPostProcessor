@@ -6,7 +6,7 @@
 #include "../util/data_loader.hpp"
 #include "../util/logger.h"
 #include "alm_planning_scene.h"
-#include "ddp_planning_scene.h"
+#include "ilqr_planning_scene.h"
 #include "nmpc_planning_scene.h"
 
 namespace apa_post_processor {
@@ -77,8 +77,8 @@ std::unique_ptr<PlanningScene> PlanningScene::LoadFromFile(
     if (algorithm == "nmpc") {
         return NMPCPlanningScene::LoadFromFile(config_file_path);
     }
-    if (algorithm == "ddp") {
-        return DDPPlanningScene::LoadFromFile(config_file_path);
+    if (algorithm == "ilqr") {
+        return ILQRPlanningScene::LoadFromFile(config_file_path);
     }
     LOG_FMT_ERROR(
         "PlanningScene::LoadFromFile: unknown algorithm \"{}\" in {}!!!",

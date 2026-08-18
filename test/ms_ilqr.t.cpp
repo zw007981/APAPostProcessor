@@ -5,10 +5,10 @@
 #include <cstddef>
 #include <vector>
 
-#include "core/DDP/bicycle_dynamics.h"
-#include "core/DDP/ddp_cost.h"
-#include "core/DDP/esdf_constraint.h"
-#include "core/DDP/ms_ilqr.h"
+#include "core/iLQR/bicycle_dynamics.h"
+#include "core/iLQR/ilqr_cost.h"
+#include "core/iLQR/esdf_constraint.h"
+#include "core/iLQR/ms_ilqr.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "vehicle/vehicle_footprint_model.h"
@@ -21,16 +21,16 @@ constexpr double kWheelbase = 2.7;
 constexpr double kDt = 0.1;
 
 // 按状态分量布局 [x, y, θ, v, a, δ, ω] 构造七维状态
-DdpState MakeState(double x, double y, double theta, double v, double a,
+iLQRState MakeState(double x, double y, double theta, double v, double a,
                    double delta, double omega) {
-    DdpState state;
+    iLQRState state;
     state << x, y, theta, v, a, delta, omega;
     return state;
 }
 
 // 按控制分量布局 [j, η] 构造二维控制
-DdpControl MakeControl(double jerk, double eta) {
-    DdpControl control;
+iLQRControl MakeControl(double jerk, double eta) {
+    iLQRControl control;
     control << jerk, eta;
     return control;
 }
@@ -128,21 +128,21 @@ class MsIlqrVcTestAccess : public MsIlqrSolverVirtualControl {
 // 若未来 bicycle_dynamics 雅可比结构变更而内核未同步，本用例立即失败。
 TEST(MsIlqrTest, UpdateValueHessianMatchesDenseProduct) {
     const BicycleDynamics dynamics(kWheelbase);
-    DdpStateJacobian a;
-    DdpControlJacobian b;
+    iLQRStateJacobian a;
+    iLQRControlJacobian b;
     dynamics.jacobians(MakeState(0.0, 0.0, 0.4, 0.5, 0.2, 0.3, 0.05),
                        MakeControl(0.1, -0.2), kDt, &a, &b);
-    DdpStateHessian s;
-    for (int i = 0; i < DDP_STATE_DIM; ++i) {
-        for (int j = 0; j < DDP_STATE_DIM; ++j) {
+    iLQRStateHessian s;
+    for (int i = 0; i < ILQR_STATE_DIM; ++i) {
+        for (int j = 0; j < ILQR_STATE_DIM; ++j) {
             s(i, j) = 0.01 * static_cast<double>((i * 7 + j) % 13 - 6);
         }
     }
     s = 0.5 * (s + s.transpose());
-    const DdpStateHessian dense = (a.transpose() * s * a).eval();
-    const DdpStateHessian fast = MsIlqrTestAccess::UpdateValueHessian(s, a);
-    for (int i = 0; i < DDP_STATE_DIM; ++i) {
-        for (int j = 0; j < DDP_STATE_DIM; ++j) {
+    const iLQRStateHessian dense = (a.transpose() * s * a).eval();
+    const iLQRStateHessian fast = MsIlqrTestAccess::UpdateValueHessian(s, a);
+    for (int i = 0; i < ILQR_STATE_DIM; ++i) {
+        for (int j = 0; j < ILQR_STATE_DIM; ++j) {
             EXPECT_NEAR(dense(i, j), fast(i, j),
                         1e-12 * std::max(1.0, std::abs(dense(i, j))))
                 << "row=" << i << " col=" << j;
@@ -152,11 +152,11 @@ TEST(MsIlqrTest, UpdateValueHessianMatchesDenseProduct) {
 
 // 一致性滚动：从 x0 出发按给定控制全量积分（不注入任何打靶状态），
 // 用于构造零缺陷初值
-DdpAlignedVec<DdpState> RolloutStates(const BicycleDynamics& dynamics,
-                                      const DdpState& x0,
-                                      const DdpAlignedVec<DdpControl>& controls,
+iLQRAlignedVec<iLQRState> RolloutStates(const BicycleDynamics& dynamics,
+                                      const iLQRState& x0,
+                                      const iLQRAlignedVec<iLQRControl>& controls,
                                       double dt) {
-    DdpAlignedVec<DdpState> states;
+    iLQRAlignedVec<iLQRState> states;
     states.reserve(controls.size() + 1);
     states.push_back(x0);
     for (const auto& control : controls) {
@@ -166,9 +166,9 @@ DdpAlignedVec<DdpState> RolloutStates(const BicycleDynamics& dynamics,
 }
 
 // 手工构造最小可用参考：求解器只消费位姿/dt/打靶节点集
-DdpReference MakeReference(const std::vector<Pose>& poses, double dt,
+iLQRReference MakeReference(const std::vector<Pose>& poses, double dt,
                            const std::vector<std::size_t>& shooting_nodes) {
-    DdpReference reference;
+    iLQRReference reference;
     reference.ds = 0.05;
     reference.dt = dt;
     reference.poses = poses;
@@ -179,33 +179,33 @@ DdpReference MakeReference(const std::vector<Pose>& poses, double dt,
 // 标准圆弧测试问题：零控制一致性滚动得到的名义轨迹，跟踪目标在 y/θ 上
 // 错开给定偏移以产生非零代价梯度
 struct ArcProblem {
-    DdpReference reference;
-    DdpAlignedVec<DdpState> states;
-    DdpAlignedVec<DdpControl> controls;
+    iLQRReference reference;
+    iLQRAlignedVec<iLQRState> states;
+    iLQRAlignedVec<iLQRControl> controls;
 };
-ArcProblem MakeArcProblem(std::size_t num_steps, const DdpState& x0,
+ArcProblem MakeArcProblem(std::size_t num_steps, const iLQRState& x0,
                           double offset_y, double offset_theta,
                           const std::vector<std::size_t>& shooting_nodes) {
     ArcProblem problem;
-    problem.controls.resize(num_steps, DdpControl::Zero());
+    problem.controls.resize(num_steps, iLQRControl::Zero());
     const BicycleDynamics dynamics(kWheelbase);
     problem.states = RolloutStates(dynamics, x0, problem.controls, kDt);
     std::vector<Pose> poses;
     poses.reserve(num_steps + 1);
     for (const auto& state : problem.states) {
-        poses.emplace_back(state(DDP_IDX_X), state(DDP_IDX_Y) + offset_y,
-                           state(DDP_IDX_THETA) + offset_theta);
+        poses.emplace_back(state(ILQR_IDX_X), state(ILQR_IDX_Y) + offset_y,
+                           state(ILQR_IDX_THETA) + offset_theta);
     }
     problem.reference = MakeReference(poses, kDt, shooting_nodes);
     return problem;
 }
 
 // 默认零乘子与跟踪权重输入
-DdpCostMultiplierState MakeMultipliers(std::size_t num_steps) {
-    return DdpCostMultiplierState::MakeZero(num_steps);
+iLQRCostMultiplierState MakeMultipliers(std::size_t num_steps) {
+    return iLQRCostMultiplierState::MakeZero(num_steps);
 }
-DdpCostInput MakeCostInput(double tracking_weight) {
-    DdpCostInput input;
+iLQRCostInput MakeCostInput(double tracking_weight) {
+    iLQRCostInput input;
     input.tracking_weight = tracking_weight;
     input.anneal_exempt_mask = nullptr;
     return input;
@@ -224,45 +224,45 @@ MsIlqrConfig MakeConfig() {
 // 独立 LQR 参照（不经过求解器内部缓存）：对线性化模型 + 二次代价做无约束
 // Riccati 回推（含与求解器相同的极小正则化），再做 α=1 线性滚动
 struct LqrReference {
-    DdpAlignedVec<DdpControl> ff;
-    DdpAlignedVec<DdpControlStateHessian> gain;
-    DdpAlignedVec<DdpState> dx;
-    DdpAlignedVec<DdpControl> du;
+    iLQRAlignedVec<iLQRControl> ff;
+    iLQRAlignedVec<iLQRControlStateHessian> gain;
+    iLQRAlignedVec<iLQRState> dx;
+    iLQRAlignedVec<iLQRControl> du;
 };
 LqrReference ComputeLqrReference(const BicycleDynamics& dynamics, double dt,
                                  double rho,
-                                 const DdpAlignedVec<DdpState>& states,
-                                 const DdpAlignedVec<DdpControl>& controls,
-                                 const DdpCostEvaluation& evaluation) {
+                                 const iLQRAlignedVec<iLQRState>& states,
+                                 const iLQRAlignedVec<iLQRControl>& controls,
+                                 const iLQRCostEvaluation& evaluation) {
     const std::size_t num_steps = controls.size();
     LqrReference reference;
     reference.ff.resize(num_steps);
     reference.gain.resize(num_steps);
     reference.dx.resize(num_steps + 1);
     reference.du.resize(num_steps);
-    DdpAlignedVec<DdpStateJacobian> jac_a(num_steps);
-    DdpAlignedVec<DdpControlJacobian> jac_b(num_steps);
-    DdpStateHessian value_hessian = evaluation.stages[num_steps].lxx;
-    DdpState value_gradient = evaluation.stages[num_steps].lx;
+    iLQRAlignedVec<iLQRStateJacobian> jac_a(num_steps);
+    iLQRAlignedVec<iLQRControlJacobian> jac_b(num_steps);
+    iLQRStateHessian value_hessian = evaluation.stages[num_steps].lxx;
+    iLQRState value_gradient = evaluation.stages[num_steps].lx;
     for (std::size_t k = num_steps; k-- > 0;) {
         dynamics.jacobians(states[k], controls[k], dt, &jac_a[k], &jac_b[k]);
         const auto& stage = evaluation.stages[k];
-        const DdpState q_x = stage.lx + jac_a[k].transpose() * value_gradient;
-        const DdpControl q_u = stage.lu + jac_b[k].transpose() * value_gradient;
-        const DdpStateHessian q_xx =
+        const iLQRState q_x = stage.lx + jac_a[k].transpose() * value_gradient;
+        const iLQRControl q_u = stage.lu + jac_b[k].transpose() * value_gradient;
+        const iLQRStateHessian q_xx =
             stage.lxx + jac_a[k].transpose() * value_hessian * jac_a[k];
-        const DdpControlHessian q_uu =
+        const iLQRControlHessian q_uu =
             stage.luu + jac_b[k].transpose() * value_hessian * jac_b[k] +
-            rho * DdpControlHessian::Identity();
-        const DdpControlStateHessian q_ux =
+            rho * iLQRControlHessian::Identity();
+        const iLQRControlStateHessian q_ux =
             stage.lux + jac_b[k].transpose() * value_hessian * jac_a[k];
-        const DdpControl ff = -q_uu.ldlt().solve(q_u);
-        const DdpControlStateHessian gain = -q_uu.ldlt().solve(q_ux);
-        DdpStateHessian next_hessian = q_xx + gain.transpose() * q_uu * gain +
+        const iLQRControl ff = -q_uu.ldlt().solve(q_u);
+        const iLQRControlStateHessian gain = -q_uu.ldlt().solve(q_ux);
+        iLQRStateHessian next_hessian = q_xx + gain.transpose() * q_uu * gain +
                                        gain.transpose() * q_ux +
                                        q_ux.transpose() * gain;
         next_hessian = 0.5 * (next_hessian + next_hessian.transpose());
-        const DdpState next_gradient = q_x + gain.transpose() * q_uu * ff +
+        const iLQRState next_gradient = q_x + gain.transpose() * q_uu * ff +
                                        gain.transpose() * q_u +
                                        q_ux.transpose() * ff;
         reference.ff[k] = ff;
@@ -281,11 +281,11 @@ LqrReference ComputeLqrReference(const BicycleDynamics& dynamics, double dt,
 
 // 白盒驱动一轮完整准备流程（初始名义建立 -> 代价求值 -> 雅可比），
 // 返回 false 表示中途契约异常
-void PrepareNominal(MsIlqrTestAccess* solver, const DdpReference& reference,
-                    const DdpCostMultiplierState& multipliers,
-                    const DdpCostInput& cost_input,
-                    const DdpAlignedVec<DdpState>& initial_states,
-                    const DdpAlignedVec<DdpControl>& initial_controls) {
+void PrepareNominal(MsIlqrTestAccess* solver, const iLQRReference& reference,
+                    const iLQRCostMultiplierState& multipliers,
+                    const iLQRCostInput& cost_input,
+                    const iLQRAlignedVec<iLQRState>& initial_states,
+                    const iLQRAlignedVec<iLQRControl>& initial_controls) {
     solver->prepareWorkspace(reference.poses.size() - 1);
     solver->setShootingLookup(reference.shooting_nodes);
     solver->setNominalTrajectory(reference, initial_states, initial_controls);
@@ -297,9 +297,9 @@ void PrepareNominal(MsIlqrTestAccess* solver, const DdpReference& reference,
 // 搜索方向必须与独立 Riccati 参照（无约束 LQR 解析解）逐元素一致
 TEST(MsIlqrTest, LqrDirectionConsistency) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {num_steps});
     MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
     PrepareNominal(&solver, problem.reference, MakeMultipliers(num_steps),
@@ -325,9 +325,9 @@ TEST(MsIlqrTest, LqrDirectionConsistency) {
 // 并在少数几轮内收敛，终态轨迹与 LQR 参照轨迹的差异保持在非线性残差量级
 TEST(MsIlqrTest, LqrConvergesWithFullStep) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {num_steps});
     MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
     const MsIlqrResult result =
@@ -344,7 +344,7 @@ TEST(MsIlqrTest, LqrConvergesWithFullStep) {
         evaluator.evaluate(problem.reference, problem.states, problem.controls,
                            MakeMultipliers(num_steps), MakeCostInput(10.0)));
     for (std::size_t k = 0; k <= num_steps; ++k) {
-        const DdpState lqr_state = problem.states[k] + reference.dx[k];
+        const iLQRState lqr_state = problem.states[k] + reference.dx[k];
         ExpectMatrixNear(lqr_state, solver.states()[k], 1e-2);
     }
 }
@@ -353,12 +353,12 @@ TEST(MsIlqrTest, LqrConvergesWithFullStep) {
 // （各分量 < 1e-8），且 merit 按 Armijo 接受逐轮严格下降
 TEST(MsIlqrTest, DefectConvergence) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 20;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
     ArcProblem problem =
         MakeArcProblem(num_steps, x0, 0.0, 0.0, {5, 10, 15, 20});
-    const DdpState offset =
+    const iLQRState offset =
         MakeState(0.15, -0.10, 0.05, 0.02, 0.01, 0.02, 0.01);
     for (const std::size_t node : {5U, 10U, 15U, 20U}) {
         problem.states[node] += offset;
@@ -386,52 +386,52 @@ TEST(MsIlqrTest, DefectConvergence) {
 // 左邻步（k=0）生效，节点 2（非打靶）的左邻步（k=1）不得出现修正项
 TEST(MsIlqrTest, SingleDefectNodeBackward) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 2;
-    const DdpReference reference = MakeReference(
+    const iLQRReference reference = MakeReference(
         {Pose(0.0, 0.0, 0.0), Pose(0.05, 0.0, 0.0), Pose(0.10, 0.01, 0.10)},
         kDt, {1});
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.4, 0.0, 0.03, 0.0);
-    const DdpControl u0 = MakeControl(0.01, 0.02);
-    const DdpControl u1 = MakeControl(-0.02, 0.01);
-    const DdpState x1_integral = dynamics.step(x0, u0, kDt);
-    const DdpState offset =
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.4, 0.0, 0.03, 0.0);
+    const iLQRControl u0 = MakeControl(0.01, 0.02);
+    const iLQRControl u1 = MakeControl(-0.02, 0.01);
+    const iLQRState x1_integral = dynamics.step(x0, u0, kDt);
+    const iLQRState offset =
         MakeState(0.10, -0.05, 0.02, 0.06, -0.04, 0.01, -0.03);
-    const DdpState x1_injected = x1_integral + offset;
-    DdpAlignedVec<DdpState> initial_states = {x0, x1_injected,
-                                              DdpState::Zero()};
-    const DdpAlignedVec<DdpControl> initial_controls = {u0, u1};
+    const iLQRState x1_injected = x1_integral + offset;
+    iLQRAlignedVec<iLQRState> initial_states = {x0, x1_injected,
+                                              iLQRState::Zero()};
+    const iLQRAlignedVec<iLQRControl> initial_controls = {u0, u1};
     MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
     PrepareNominal(&solver, reference, MakeMultipliers(num_steps),
                    MakeCostInput(10.0), initial_states, initial_controls);
     ExpectMatrixNear(-offset, solver.defects_[1], 1e-12);
-    ExpectMatrixNear(DdpState::Zero(), solver.defects_[0], 1e-12);
-    ExpectMatrixNear(DdpState::Zero(), solver.defects_[2], 1e-12);
+    ExpectMatrixNear(iLQRState::Zero(), solver.defects_[0], 1e-12);
+    ExpectMatrixNear(iLQRState::Zero(), solver.defects_[2], 1e-12);
     ASSERT_TRUE(solver.backwardPass());
     const auto& stages = solver.cost_eval_.stages;
-    DdpStateJacobian jac_a0, jac_a1;
-    DdpControlJacobian jac_b0, jac_b1;
+    iLQRStateJacobian jac_a0, jac_a1;
+    iLQRControlJacobian jac_b0, jac_b1;
     dynamics.jacobians(x0, u0, kDt, &jac_a0, &jac_b0);
     dynamics.jacobians(x1_injected, u1, kDt, &jac_a1, &jac_b1);
     // 手工回推第 k=1 步：下游节点 2 非打靶（d₂=0），不得出现缺陷修正
-    const DdpStateHessian s2_hessian = stages[2].lxx;
-    const DdpState s2_gradient = stages[2].lx;
-    const DdpState q_x1 = stages[1].lx + jac_a1.transpose() * s2_gradient;
-    const DdpControl q_u1 = stages[1].lu + jac_b1.transpose() * s2_gradient;
-    const DdpStateHessian q_xx1 =
+    const iLQRStateHessian s2_hessian = stages[2].lxx;
+    const iLQRState s2_gradient = stages[2].lx;
+    const iLQRState q_x1 = stages[1].lx + jac_a1.transpose() * s2_gradient;
+    const iLQRControl q_u1 = stages[1].lu + jac_b1.transpose() * s2_gradient;
+    const iLQRStateHessian q_xx1 =
         stages[1].lxx + jac_a1.transpose() * s2_hessian * jac_a1;
-    const DdpControlHessian q_uu1 = stages[1].luu +
+    const iLQRControlHessian q_uu1 = stages[1].luu +
                                     jac_b1.transpose() * s2_hessian * jac_b1 +
-                                    1e-12 * DdpControlHessian::Identity();
-    const DdpControlStateHessian q_ux1 =
+                                    1e-12 * iLQRControlHessian::Identity();
+    const iLQRControlStateHessian q_ux1 =
         stages[1].lux + jac_b1.transpose() * s2_hessian * jac_a1;
-    const DdpControl ff1 = -q_uu1.ldlt().solve(q_u1);
-    const DdpControlStateHessian gain1 = -q_uu1.ldlt().solve(q_ux1);
-    DdpStateHessian s1_hessian = q_xx1 + gain1.transpose() * q_uu1 * gain1 +
+    const iLQRControl ff1 = -q_uu1.ldlt().solve(q_u1);
+    const iLQRControlStateHessian gain1 = -q_uu1.ldlt().solve(q_ux1);
+    iLQRStateHessian s1_hessian = q_xx1 + gain1.transpose() * q_uu1 * gain1 +
                                  gain1.transpose() * q_ux1 +
                                  q_ux1.transpose() * gain1;
     s1_hessian = 0.5 * (s1_hessian + s1_hessian.transpose());
-    const DdpState s1_gradient = q_x1 + gain1.transpose() * q_uu1 * ff1 +
+    const iLQRState s1_gradient = q_x1 + gain1.transpose() * q_uu1 * ff1 +
                                  gain1.transpose() * q_u1 +
                                  q_ux1.transpose() * ff1;
     ExpectMatrixNear(q_x1, solver.q_x_[1], 1e-9);
@@ -442,7 +442,7 @@ TEST(MsIlqrTest, SingleDefectNodeBackward) {
     ExpectMatrixNear(s1_gradient, solver.value_s_[1], 1e-9);
     // 手工回推第 k=0 步：下游节点 1 为打靶节点，修正 ẑ = s₁ + S₁·d₁ 必须
     // 恰好作用在此处（右端索引），任何左端错位都会被以下两式捕获
-    const DdpState z0 = s1_gradient + s1_hessian * solver.defects_[1];
+    const iLQRState z0 = s1_gradient + s1_hessian * solver.defects_[1];
     ExpectMatrixNear(stages[0].lx + jac_a0.transpose() * z0, solver.q_x_[0],
                      1e-9);
     ExpectMatrixNear(stages[0].lu + jac_b0.transpose() * z0, solver.q_u_[0],
@@ -453,9 +453,9 @@ TEST(MsIlqrTest, SingleDefectNodeBackward) {
 // 必须恒为零，且 QP 解出的控制恰好贴在盒边界上
 TEST(MsIlqrTest, BoxActivationBangBang) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 10;
-    const DdpState x0 = DdpState::Zero();
+    const iLQRState x0 = iLQRState::Zero();
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
     for (std::size_t k = 0; k <= num_steps; ++k) {
         problem.reference.poses[k] = Pose(0.5, 0.0, 0.0);
@@ -469,15 +469,15 @@ TEST(MsIlqrTest, BoxActivationBangBang) {
     ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, result.status);
     bool has_clamped_jerk = false;
     for (std::size_t k = 0; k < num_steps; ++k) {
-        if (!solver.clamped_[k][DDP_IDX_JERK]) {
+        if (!solver.clamped_[k][ILQR_IDX_JERK]) {
             continue;
         }
         has_clamped_jerk = true;
-        ExpectMatrixNear(Eigen::Matrix<double, 1, DDP_STATE_DIM>::Zero(),
-                         solver.gain_K_[k].row(DDP_IDX_JERK), 0.0);
+        ExpectMatrixNear(Eigen::Matrix<double, 1, ILQR_STATE_DIM>::Zero(),
+                         solver.gain_K_[k].row(ILQR_IDX_JERK), 0.0);
         EXPECT_NEAR(config.jerk_max,
-                    std::abs(solver.controls_[k](DDP_IDX_JERK) +
-                             solver.feedforward_[k](DDP_IDX_JERK)),
+                    std::abs(solver.controls_[k](ILQR_IDX_JERK) +
+                             solver.feedforward_[k](ILQR_IDX_JERK)),
                     1e-9)
             << "step=" << k;
     }
@@ -488,9 +488,9 @@ TEST(MsIlqrTest, BoxActivationBangBang) {
 // 求解结果必须一致，且全部钳制集为空
 TEST(MsIlqrTest, UnconstrainedMatchesWideBox) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {num_steps});
     MsIlqrConfig wide_config = MakeConfig();
     MsIlqrTestAccess wide_solver(wide_config, &dynamics, &evaluator);
@@ -512,10 +512,10 @@ TEST(MsIlqrTest, UnconstrainedMatchesWideBox) {
     for (std::size_t k = 0; k < num_steps; ++k) {
         ExpectMatrixNear(wide_solver.controls()[k], free_solver.controls()[k],
                          1e-12);
-        EXPECT_FALSE(wide_solver.clamped_[k][DDP_IDX_JERK]);
-        EXPECT_FALSE(wide_solver.clamped_[k][DDP_IDX_ETA]);
-        EXPECT_FALSE(free_solver.clamped_[k][DDP_IDX_JERK]);
-        EXPECT_FALSE(free_solver.clamped_[k][DDP_IDX_ETA]);
+        EXPECT_FALSE(wide_solver.clamped_[k][ILQR_IDX_JERK]);
+        EXPECT_FALSE(wide_solver.clamped_[k][ILQR_IDX_ETA]);
+        EXPECT_FALSE(free_solver.clamped_[k][ILQR_IDX_JERK]);
+        EXPECT_FALSE(free_solver.clamped_[k][ILQR_IDX_ETA]);
     }
 }
 
@@ -524,11 +524,11 @@ TEST(MsIlqrTest, UnconstrainedMatchesWideBox) {
 // 完整 solve 后线性 rollout 次数必须恰好等于后向传递次数
 TEST(MsIlqrTest, EcCachingAndRolloutCounts) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {4, 8});
-    const DdpState offset =
+    const iLQRState offset =
         MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
     problem.states[4] += offset;
     problem.states[8] += offset;
@@ -585,11 +585,11 @@ TEST(MsIlqrTest, EcCachingAndRolloutCounts) {
 // 更新、段内闭环跟踪，接受后缺陷精确缩放为 (1-α)·d̄
 TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 6;
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {3, 6});
-    const DdpState offset =
+    const iLQRState offset =
         MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
     problem.states[3] += offset;
     problem.states[6] += offset;
@@ -598,9 +598,9 @@ TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
                    MakeCostInput(10.0), problem.states, problem.controls);
     ASSERT_TRUE(solver.backwardPass());
     solver.linearRollout();
-    const DdpAlignedVec<DdpState> old_states = solver.states_;
-    const DdpAlignedVec<DdpControl> old_controls = solver.controls_;
-    const DdpAlignedVec<DdpState> old_defects = solver.defects_;
+    const iLQRAlignedVec<iLQRState> old_states = solver.states_;
+    const iLQRAlignedVec<iLQRControl> old_controls = solver.controls_;
+    const iLQRAlignedVec<iLQRState> old_defects = solver.defects_;
     const double old_defect_norm = solver.defectNorm();
     const double alpha = 0.5;
     // 白盒 rollout 对拍：阈值取 +inf 关闭早停筛选（筛选只影响被拒
@@ -608,10 +608,10 @@ TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
     solver.nonlinearRollout(alpha, problem.reference,
                             MakeMultipliers(num_steps), MakeCostInput(10.0),
                             std::numeric_limits<double>::infinity());
-    DdpState expected_state = old_states[0];
+    iLQRState expected_state = old_states[0];
     ExpectMatrixNear(old_states[0], solver.cand_states_[0], 1e-12);
     for (std::size_t k = 0; k < num_steps; ++k) {
-        const DdpControl expected_control =
+        const iLQRControl expected_control =
             old_controls[k] + alpha * solver.feedforward_[k] +
             solver.gain_K_[k] * (expected_state - old_states[k]);
         ExpectMatrixNear(expected_control, solver.cand_controls_[k], 1e-12);
@@ -633,9 +633,9 @@ TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
 // 正则化增大并重跑整个后向传递（盒不激活，方向可随 ρ 增大自由收缩）
 TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
-    const DdpState x0 = DdpState::Zero();
+    const iLQRState x0 = iLQRState::Zero();
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
     for (std::size_t k = 0; k <= num_steps; ++k) {
         problem.reference.poses[k] = Pose(1.5, 1.5, 1.57);
@@ -682,9 +682,9 @@ TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
 // 也是本次早停筛选改动影响的核心路径（被拒 trial 的判定边界）。
 TEST(MsIlqrTest, PartialStepAcceptance) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
-    const DdpState x0 = DdpState::Zero();
+    const iLQRState x0 = iLQRState::Zero();
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
     // 目标拉远 + 高跟踪权重 + 严格 Armijo（γ=0.8）：首轮方向过冲、
     // α=1 被拒，回溯后以 0<α<1 的部分步长接受（默认回溯上限充足）
@@ -718,7 +718,7 @@ TEST(MsIlqrTest, PartialStepAcceptance) {
 // std::invalid_argument
 TEST(MsIlqrTest, InputValidation) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     EXPECT_THROW(MsIlqrSolver(MakeConfig(), nullptr, &evaluator),
                  std::invalid_argument);
     EXPECT_THROW(MsIlqrSolver(MakeConfig(), &dynamics, nullptr),
@@ -743,14 +743,14 @@ TEST(MsIlqrTest, InputValidation) {
                  std::invalid_argument);
     const std::size_t num_steps = 4;
     ArcProblem problem =
-        MakeArcProblem(num_steps, DdpState::Zero(), 0.0, 0.0, {num_steps});
+        MakeArcProblem(num_steps, iLQRState::Zero(), 0.0, 0.0, {num_steps});
     MsIlqrSolver solver(MakeConfig(), &dynamics, &evaluator);
-    DdpAlignedVec<DdpState> bad_states = {DdpState::Zero()};
+    iLQRAlignedVec<iLQRState> bad_states = {iLQRState::Zero()};
     EXPECT_THROW(
         solver.solve(problem.reference, MakeMultipliers(num_steps),
                      MakeCostInput(10.0), bad_states, problem.controls),
         std::invalid_argument);
-    DdpReference bad_reference = problem.reference;
+    iLQRReference bad_reference = problem.reference;
     bad_reference.shooting_nodes = {num_steps + 3};
     EXPECT_THROW(
         solver.solve(bad_reference, MakeMultipliers(num_steps),
@@ -766,10 +766,10 @@ TEST(MsIlqrTest, InputValidation) {
 // 一次被接受迭代的记录
 TEST(MsIlqrTest, RegularizationOverflowReported) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 8;
     ArcProblem problem =
-        MakeArcProblem(num_steps, DdpState::Zero(), 0.0, 0.0, {num_steps});
+        MakeArcProblem(num_steps, iLQRState::Zero(), 0.0, 0.0, {num_steps});
     for (std::size_t k = 0; k <= num_steps; ++k) {
         problem.reference.poses[k] = Pose(1.5, 1.5, 1.57);
     }
@@ -802,13 +802,13 @@ TEST(MsIlqrTest, RegularizationOverflowReported) {
 // 不崩溃且代价下降、快速收敛
 TEST(MsIlqrTest, SingleStepProblemSmoke) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const std::size_t num_steps = 1;
-    const DdpReference reference = MakeReference(
+    const iLQRReference reference = MakeReference(
         {Pose(0.05, 0.01, 0.05), Pose(0.1, 0.02, 0.05)}, kDt, {1});
-    const DdpState x0 = MakeState(0.0, 0.0, 0.0, 0.3, 0.0, 0.02, 0.0);
-    const DdpAlignedVec<DdpControl> controls = {MakeControl(0.2, 0.1)};
-    const DdpAlignedVec<DdpState> states =
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.3, 0.0, 0.02, 0.0);
+    const iLQRAlignedVec<iLQRControl> controls = {MakeControl(0.2, 0.1)};
+    const iLQRAlignedVec<iLQRState> states =
         RolloutStates(dynamics, x0, controls, kDt);
     MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
     const MsIlqrResult result =
@@ -828,16 +828,16 @@ TEST(MsIlqrTest, SingleStepProblemSmoke) {
 // 可行性），放行前必须确认缺陷已愈合
 TEST(MsIlqrTest, ConvergenceRequiresFeasibility) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
     // 容差默认与外层缺陷门同量级（1e-3）：缺陷未愈时不允许收敛出口
     solver.defects_.resize(3);
     solver.defects_[0].setZero();
     solver.defects_[1].setZero();
     solver.defects_[2].setZero();
-    solver.defects_[1](DDP_IDX_DELTA) = 0.05;
+    solver.defects_[1](ILQR_IDX_DELTA) = 0.05;
     EXPECT_FALSE(solver.convergenceAllowed());
-    solver.defects_[1](DDP_IDX_DELTA) = 1e-4;
+    solver.defects_[1](ILQR_IDX_DELTA) = 1e-4;
     EXPECT_TRUE(solver.convergenceAllowed());
 }
 
@@ -849,7 +849,7 @@ TEST(MsIlqrTest, ConvergenceRequiresFeasibility) {
 // merit_mu_max 封顶（c 过大重演「以任意代价歼灭缺陷」的灾难）
 TEST(MsIlqrTest, MeritMuScalesWithAlPenalty) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     MsIlqrConfig config = MakeConfig();
     config.merit_mu0 = 100.0;
     config.merit_mu_max = 1e3;
@@ -889,8 +889,8 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
     const ESDFMap esdf_map(grid_map);
     const VehicleParams vehicle_params{4.9, 1.9, 2.7, 0.48};
     const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 1);
-    const DdpEsdfConstraint esdf_constraint(esdf_map, footprint_model);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, &esdf_constraint);
+    const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, &esdf_constraint);
     // 名义轨迹：从 y=21.9 以 v=1.0 朝 +y 直行，第 2 步起越出 y≤22——
     // 每个候选（= 名义 + α·修正）都携带越界状态
     const std::size_t num_steps = 20;
@@ -899,11 +899,11 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
     for (std::size_t k = 0; k <= num_steps; ++k) {
         poses.emplace_back(10.0, 21.9 + 0.1 * static_cast<double>(k), 0.5 * PI);
     }
-    const DdpReference reference = MakeReference(poses, kDt, {num_steps});
-    const DdpState x0 = MakeState(10.0, 21.9, 0.5 * PI, 1.0, 0.0, 0.0, 0.0);
-    DdpAlignedVec<DdpControl> controls;
-    controls.resize(num_steps, DdpControl::Zero());
-    const DdpAlignedVec<DdpState> states =
+    const iLQRReference reference = MakeReference(poses, kDt, {num_steps});
+    const iLQRState x0 = MakeState(10.0, 21.9, 0.5 * PI, 1.0, 0.0, 0.0, 0.0);
+    iLQRAlignedVec<iLQRControl> controls;
+    controls.resize(num_steps, iLQRControl::Zero());
+    const iLQRAlignedVec<iLQRState> states =
         RolloutStates(dynamics, x0, controls, kDt);
     // (A) 守卫开启：越界候选被拒绝（计数 >0），被接受的状态轨迹始终留在
     // 域内（y ≤ 22），无坐标爆炸（参考在域外不可达，收敛与否不作断言）
@@ -916,9 +916,9 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
                          MakeCostInput(10.0), states, controls);
         EXPECT_GT(result.domain_guard_rejections, 0);
         for (const auto& state : solver.states()) {
-            EXPECT_LE(state(DDP_IDX_Y), 22.0 + 1e-9);
-            EXPECT_LT(std::abs(state(DDP_IDX_X)), 1e6);
-            EXPECT_LT(std::abs(state(DDP_IDX_Y)), 1e6);
+            EXPECT_LE(state(ILQR_IDX_Y), 22.0 + 1e-9);
+            EXPECT_LT(std::abs(state(ILQR_IDX_X)), 1e6);
+            EXPECT_LT(std::abs(state(ILQR_IDX_Y)), 1e6);
         }
     }
     // (B) 守卫关闭：同一问题拒绝计数为 0、求解正常推进
@@ -950,7 +950,7 @@ TEST(MsIlqrTest, VirtualControlEliminationPreservesValue) {
         MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
                        0.2, {0, 8});
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const auto multipliers = MakeMultipliers(8);
     const auto cost_input = MakeCostInput(1.0);
     // 关闭路径回推
@@ -968,7 +968,7 @@ TEST(MsIlqrTest, VirtualControlEliminationPreservesValue) {
     on_config.virtual_control_weight = 1e8;
     MsIlqrVcTestAccess on_solver(on_config, &dynamics, &evaluator);
     on_solver.prepareWorkspace(8);
-    on_solver.virtual_controls_.assign(8, DdpState::Zero());
+    on_solver.virtual_controls_.assign(8, iLQRState::Zero());
     on_solver.setShootingLookup(problem.reference.shooting_nodes);
     on_solver.setNominalTrajectory(problem.reference, problem.states,
                                    problem.controls);
@@ -993,14 +993,14 @@ TEST(MsIlqrTest, VirtualControlInitReproducesReference) {
     const ArcProblem problem =
         MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
                        0.2, {0, 8});
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     MsIlqrConfig config = MakeConfig();
     MsIlqrVcTestAccess solver(config, &dynamics, &evaluator);
     const auto w = solver.computeVirtualControls(
         problem.reference, problem.states, problem.controls);
     ASSERT_EQ(w.size(), 8u);
     for (std::size_t k = 0; k < 8; ++k) {
-        const DdpState integral =
+        const iLQRState integral =
             dynamics.step(problem.states[k], problem.controls[k], kDt);
         ExpectMatrixNear(problem.states[k + 1], integral + w[k], 1e-12);
     }
@@ -1013,18 +1013,18 @@ TEST(MsIlqrTest, VirtualControlShrinksToZero) {
         MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
                        0.2, {0, 8});
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const auto multipliers = MakeMultipliers(8);
     const auto cost_input = MakeCostInput(1.0);
     MsIlqrConfig config = MakeConfig();
     config.virtual_control_weight = 1e4;
     MsIlqrVcTestAccess solver(config, &dynamics, &evaluator);
-    DdpAlignedVec<DdpState> w_init;
+    iLQRAlignedVec<iLQRState> w_init;
     w_init.reserve(8);
     for (std::size_t k = 0; k < 8; ++k) {
-        DdpState w = DdpState::Zero();
-        w(DDP_IDX_V) = 0.05;
-        w(DDP_IDX_DELTA) = 0.03;
+        iLQRState w = iLQRState::Zero();
+        w(ILQR_IDX_V) = 0.05;
+        w(ILQR_IDX_DELTA) = 0.03;
         w_init.push_back(w);
     }
     const MsIlqrResult result =

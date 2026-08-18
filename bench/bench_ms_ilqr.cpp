@@ -5,9 +5,9 @@
 #include <limits>
 #include <vector>
 
-#include "core/DDP/bicycle_dynamics.h"
-#include "core/DDP/ddp_cost.h"
-#include "core/DDP/ms_ilqr.h"
+#include "core/iLQR/bicycle_dynamics.h"
+#include "core/iLQR/ilqr_cost.h"
+#include "core/iLQR/ms_ilqr.h"
 
 namespace apa_post_processor {
 namespace {
@@ -35,16 +35,16 @@ class MsIlqrBenchAccess : public MsIlqrSolver {
 // 计时场景数据：缓变 S 形参考位姿、一致性名义轨迹与小量级非零控制，
 // 打靶节点按 n_s=25 规则布设（含末点），与生产配置同构
 struct BenchProblem {
-    DdpReference reference;
-    DdpAlignedVec<DdpState> states;
-    DdpAlignedVec<DdpControl> controls;
-    DdpCostMultiplierState multipliers;
-    DdpCostInput input;
+    iLQRReference reference;
+    iLQRAlignedVec<iLQRState> states;
+    iLQRAlignedVec<iLQRControl> controls;
+    iLQRCostMultiplierState multipliers;
+    iLQRCostInput input;
 };
 
 BenchProblem MakeBenchProblem() {
     BenchProblem problem;
-    problem.multipliers = DdpCostMultiplierState::MakeZero(kNumSteps);
+    problem.multipliers = iLQRCostMultiplierState::MakeZero(kNumSteps);
     problem.input.tracking_weight = 10.0;
     problem.input.anneal_exempt_mask = nullptr;
     problem.reference.ds = 0.05;
@@ -52,13 +52,13 @@ BenchProblem MakeBenchProblem() {
     problem.reference.poses.reserve(kNumSteps + 1);
     problem.reference.shooting_nodes.reserve(kNumSteps / 25 + 2);
     const BicycleDynamics dynamics(kWheelbase);
-    DdpState state;
+    iLQRState state;
     state << 0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0, 0.0;
     problem.states.reserve(kNumSteps + 1);
     problem.controls.reserve(kNumSteps);
     problem.states.push_back(state);
     for (std::size_t k = 0; k < kNumSteps; ++k) {
-        DdpControl control;
+        iLQRControl control;
         control << 0.02 * (k % 3 == 0 ? 1.0 : -0.6),
             0.01 * (k % 4 == 0 ? 1.0 : -0.5);
         problem.controls.push_back(control);
@@ -69,9 +69,9 @@ BenchProblem MakeBenchProblem() {
         }
     }
     for (const auto& node_state : problem.states) {
-        problem.reference.poses.emplace_back(node_state(DDP_IDX_X) + 0.02,
-                                             node_state(DDP_IDX_Y) - 0.01,
-                                             node_state(DDP_IDX_THETA) + 0.01);
+        problem.reference.poses.emplace_back(node_state(ILQR_IDX_X) + 0.02,
+                                             node_state(ILQR_IDX_Y) - 0.01,
+                                             node_state(ILQR_IDX_THETA) + 0.01);
     }
     problem.reference.shooting_nodes.push_back(kNumSteps);
     return problem;
@@ -90,7 +90,7 @@ void PrepareSolver(MsIlqrBenchAccess* solver, const BenchProblem& problem) {
 // 单轮缺陷感知回推（N=399，含逐步 box-QP，活动集沿回推顺序热启动）
 void BM_MsIlqrBackwardPass(benchmark::State& state) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const BenchProblem problem = MakeBenchProblem();
     MsIlqrBenchAccess solver(MsIlqrConfig{}, &dynamics, &evaluator);
     PrepareSolver(&solver, problem);
@@ -108,7 +108,7 @@ BENCHMARK(BM_MsIlqrBackwardPass);
 // 单次线性 rollout（方向传播 + EC₁/EC₂ 汇总，每轮迭代恰好一次）
 void BM_MsIlqrLinearRollout(benchmark::State& state) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const BenchProblem problem = MakeBenchProblem();
     MsIlqrBenchAccess solver(MsIlqrConfig{}, &dynamics, &evaluator);
     PrepareSolver(&solver, problem);
@@ -124,7 +124,7 @@ BENCHMARK(BM_MsIlqrLinearRollout);
 // 线搜索逐候选 α 调用）
 void BM_MsIlqrNonlinearRollout(benchmark::State& state) {
     const BicycleDynamics dynamics(kWheelbase);
-    const DdpCostEvaluator evaluator(DdpCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
     const BenchProblem problem = MakeBenchProblem();
     MsIlqrBenchAccess solver(MsIlqrConfig{}, &dynamics, &evaluator);
     PrepareSolver(&solver, problem);

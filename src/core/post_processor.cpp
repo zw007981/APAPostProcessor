@@ -10,7 +10,7 @@
 #include "../util/topology_cleaner.h"
 #include "ALM/alm_steer_padding.h"
 #include "ALM/alm_trajectory_sampler.h"
-#include "DDP/ddp_solver.h"
+#include "iLQR/ilqr_solver.h"
 #include "NMPC/vehicle_circle_geometry.h"
 #include "collision_check.h"
 
@@ -318,10 +318,10 @@ NMPCConfig PostProcessor::applyRetryConfig(
     return config;
 }
 
-void LoadDdpConfigOverrides(const nlohmann::json& details, DdpConfig* config) {
+void LoadiLQRConfigOverrides(const nlohmann::json& details, iLQRConfig* config) {
     if (config == nullptr) {
         throw std::invalid_argument(
-            "LoadDdpConfigOverrides received null config!!!");
+            "LoadiLQRConfigOverrides received null config!!!");
     }
     // 参考构建节：状态幅值边界（v_max/a_max/delta_max/omega_max）的唯一
     // 权威来源，加载完成后统一同步进 cost/post_stage 的同源字段
@@ -664,21 +664,21 @@ bool PostProcessor::PreferControlCandidate(const PostProcessorResult& melt,
     return control.final_length < melt.final_length;
 }
 
-PostProcessorResult PostProcessor::optimizeDdp(
-    const Path& init_path, const DdpConfig& ddp_config) const {
-    PostProcessorResult result = optimizeDdpDualCandidate(init_path, ddp_config);
+PostProcessorResult PostProcessor::optimizeiLQR(
+    const Path& init_path, const iLQRConfig& ilqr_config) const {
+    PostProcessorResult result = optimizeiLQRDualCandidate(init_path, ilqr_config);
     // RS 短接失败回退：短接是一次**组合式不连续**的同伦类重选——
     // 转弯半径微变就可能选中完全不同的拼接对，产出几何上合法但
     // 求解器启动不了的参考，因此它天然不具备单调性。不能靠调参避开
     // 这个风险（那只是在现有数据集上过拟合），而是用失败重试把它堆回
     // 单调：短接不成则以未短接参考重跑一遍，保证不会比关闭短接更差
-    if (ddp_config.rs_shortcut.cap_ratio > 0.0 && !result.success) {
-        DdpConfig no_shortcut_config = ddp_config;
+    if (ilqr_config.rs_shortcut.cap_ratio > 0.0 && !result.success) {
+        iLQRConfig no_shortcut_config = ilqr_config;
         no_shortcut_config.rs_shortcut.cap_ratio = 0.0;
         PostProcessorResult fallback =
-            optimizeDdpDualCandidate(init_path, no_shortcut_config);
+            optimizeiLQRDualCandidate(init_path, no_shortcut_config);
         LOG_FMT_INFO(
-            "DDP RS shortcut retry: shortcut failed, no-shortcut success={}",
+            "iLQR RS shortcut retry: shortcut failed, no-shortcut success={}",
             fallback.success);
         // 耗时如实合并：返回结果是两遍完整链路的产物
         fallback.total_time_ms += result.total_time_ms;
@@ -687,25 +687,25 @@ PostProcessorResult PostProcessor::optimizeDdp(
     return result;
 }
 
-PostProcessorResult PostProcessor::optimizeDdpDualCandidate(
-    const Path& init_path, const DdpConfig& ddp_config) const {
+PostProcessorResult PostProcessor::optimizeiLQRDualCandidate(
+    const Path& init_path, const iLQRConfig& ilqr_config) const {
     // 默认单遍（现状语义）；启用双候选后同一输入跑两遍完整链路择优
-    if (!ddp_config.dual_candidate_select) {
-        return optimizeDdpSinglePass(init_path, ddp_config);
+    if (!ilqr_config.dual_candidate_select) {
+        return optimizeiLQRSinglePass(init_path, ilqr_config);
     }
     // RS 短接对两个候选是完全相同的纯函数（同输入路径、同 rs_shortcut
     // 配置、同幅值钳制），提升到编排层只算一次；下发配置的 cap_ratio
     // 置零，防止 SinglePass 内部重复短接（clampToVehicleParams 幂等，
     // SinglePass 内二次钳制无副作用）
     Path shared_input = init_path;
-    DdpConfig shared_config = ddp_config;
-    if (ddp_config.rs_shortcut.cap_ratio > 0.0) {
+    iLQRConfig shared_config = ilqr_config;
+    if (ilqr_config.rs_shortcut.cap_ratio > 0.0) {
         shared_config.clampToVehicleParams(vehicle_params_);
         Path shortcut = ShortcutShiftPoints(
             init_path, esdf_map_, footprint_model_, vehicle_params_.wheelbase,
             shared_config.reference.delta_max, shared_config.rs_shortcut);
         LOG_FMT_INFO(
-            "DDP RS shortcut: maneuvers {} -> {}, length {:.3f} -> {:.3f}",
+            "iLQR RS shortcut: maneuvers {} -> {}, length {:.3f} -> {:.3f}",
             init_path.numManeuvers(), shortcut.numManeuvers(),
             init_path.length(), shortcut.length());
         shared_input = std::move(shortcut);
@@ -713,14 +713,14 @@ PostProcessorResult PostProcessor::optimizeDdpDualCandidate(
     }
     // 候选一：配置原样（融化开）；候选二：退火率 ≈1（融化机制实际关闭，
     // 与调参矩阵的 nomelt_control 同一语义）
-    PostProcessorResult melt = optimizeDdpSinglePass(shared_input, shared_config);
-    DdpConfig control_config = shared_config;
+    PostProcessorResult melt = optimizeiLQRSinglePass(shared_input, shared_config);
+    iLQRConfig control_config = shared_config;
     control_config.solver.outer.anneal_gamma = 0.999;
     PostProcessorResult control =
-        optimizeDdpSinglePass(shared_input, control_config);
+        optimizeiLQRSinglePass(shared_input, control_config);
     const bool pick_control = PreferControlCandidate(melt, control);
     LOG_FMT_INFO(
-        "DDP dual candidate: melt(success={}, maneuvers={}, length={:.3f}) "
+        "iLQR dual candidate: melt(success={}, maneuvers={}, length={:.3f}) "
         "vs control(success={}, maneuvers={}, length={:.3f}) -> pick {}",
         melt.success, melt.final_maneuvers, melt.final_length, control.success,
         control.final_maneuvers, control.final_length,
@@ -731,21 +731,21 @@ PostProcessorResult PostProcessor::optimizeDdpDualCandidate(
     return chosen;
 }
 
-PostProcessorResult PostProcessor::optimizeDdpSinglePass(
-    const Path& init_path, const DdpConfig& ddp_config) const {
-    const DdpSolver solver(vehicle_params_, footprint_model_, esdf_map_);
-    const auto ddp_result = solver.optimizeSinglePass(init_path, ddp_config);
+PostProcessorResult PostProcessor::optimizeiLQRSinglePass(
+    const Path& init_path, const iLQRConfig& ilqr_config) const {
+    const iLQRSolver solver(vehicle_params_, footprint_model_, esdf_map_);
+    const auto ilqr_result = solver.optimizeSinglePass(init_path, ilqr_config);
 
     PostProcessorResult result;
-    result.algorithm = "ddp";
-    result.optimized_trajectory = ddp_result.optimized_trajectory;
-    result.optimized_path = ddp_result.optimized_path;
-    result.success = ddp_result.success;
-    result.message = ddp_result.message;
-    result.total_time_ms = ddp_result.total_time_ms;
-    result.final_maneuvers = ddp_result.final_maneuvers;
-    result.final_length = ddp_result.final_length;
-    result.output_level = ddp_result.output_level;
+    result.algorithm = "ilqr";
+    result.optimized_trajectory = ilqr_result.optimized_trajectory;
+    result.optimized_path = ilqr_result.optimized_path;
+    result.success = ilqr_result.success;
+    result.message = ilqr_result.message;
+    result.total_time_ms = ilqr_result.total_time_ms;
+    result.final_maneuvers = ilqr_result.final_maneuvers;
+    result.final_length = ilqr_result.final_length;
+    result.output_level = ilqr_result.output_level;
     return result;
 }
 }  // namespace apa_post_processor

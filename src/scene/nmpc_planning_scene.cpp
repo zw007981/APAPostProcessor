@@ -54,7 +54,7 @@ PostProcessorResult NMPCPlanningScene::optimize() {
             break;
         }
     }
-    // 统一从 optimized_trajectory 读取（与 ALM/DDP 共用基类 optimized_traj_）
+    // 统一从 optimized_trajectory 读取（与 ALM/iLQR 共用基类 optimized_traj_）
     optimized_traj_ = last_result_.optimized_trajectory;
     return last_result_;
 }
