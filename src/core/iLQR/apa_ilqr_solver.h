@@ -5,34 +5,12 @@
 
 #include "al_outer_loop.h"
 #include "bicycle_dynamics.h"
+#include "ilqr_config.h"
 #include "ilqr_cost.h"
 #include "ilqr_reference_builder.h"
 #include "ms_ilqr.h"
 
 namespace apa_post_processor {
-// 阶段一求解编排配置：聚合内层 MS-iLQR、外层 AL 与代价求值三层
-struct ApaILQRSolverConfig {
-    // 默认构造：固定 merit μ₀=100（自适应规则已证伪），内层判据收紧到
-    // 1e-9（防大 μ 量级误判）
-    ApaILQRSolverConfig() {
-        inner.merit_mu0 = 100.0;
-        inner.cost_change_tol = 1e-9;
-    }
-    // 内层配置
-    MsIlqrConfig inner;
-    // 外层配置
-    AlOuterLoopConfig outer;
-    // 目标值
-    iLQRCostConfig cost;
-    // 阶段二外层迭代上限：长视窗实测 10~11 轮收敛，取 16 留余量
-    int stage_two_max_outer_iterations{16};
-    // 门控罚权重初值取 10：弱启动时 μ 增长被误判"充分下降"而抑制
-    double gating_mu_initial{10.0};
-    // 门控罚权重上界
-    double gating_mu_max{1e6};
-    // 门控违反度容差
-    double gating_tol{1e-2};
-};
 enum class ApaILQRStatus {
     CONVERGED,
     MAX_OUTER_ITERATIONS,
@@ -163,7 +141,7 @@ struct ApaILQRStageTwoResult {
 class ApaILQRSolver {
    public:
     // 构造时注入动力学/代价求值层与配置，构造内层求解器与外层 AL 状态机
-    ApaILQRSolver(ApaILQRSolverConfig config, const BicycleDynamics* dynamics,
+    ApaILQRSolver(const iLQRConfig& config, const BicycleDynamics* dynamics,
                  const iLQRCostEvaluator* cost_evaluator);
     // 阶段一全局软化：任何出口均返回最后可用轨迹与求解报告
     ApaILQRStageOneResult solveStageOne(const iLQRReference& reference);
@@ -180,7 +158,7 @@ class ApaILQRSolver {
         const iLQRAlignedVec<iLQRControl>& warm_controls, double tracking_weight,
         const iLQRCostMultiplierState* dual_seed = nullptr);
     // 求解配置（只读）
-    const ApaILQRSolverConfig& config() const { return config_; }
+    const iLQRConfig& config() const { return config_; }
     // 内层 MS-iLQR 求解器（只读引用，供诊断消费；实例类型随配置开关）
     const MsIlqrSolverInterface& innerSolver() const { return *inner_solver_; }
 
@@ -245,7 +223,7 @@ class ApaILQRSolver {
 
    protected:
     // 配置
-    ApaILQRSolverConfig config_;
+    iLQRConfig config_;
     // 动力学模型（不持有所有权）
     const BicycleDynamics* dynamics_;
     // 代价求值层（不持有所有权）

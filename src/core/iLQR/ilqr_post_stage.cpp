@@ -8,7 +8,7 @@
 #include <utility>
 
 namespace apa_post_processor {
-iLQRPostStage::iLQRPostStage(iLQRPostStageConfig config,
+iLQRPostStage::iLQRPostStage(const iLQRConfig& config,
                            const iLQRReferenceBuilder* reference_builder,
                            ApaILQRSolver* solver,
                            const VehicleParams& vehicle_params)
@@ -20,17 +20,17 @@ iLQRPostStage::iLQRPostStage(iLQRPostStageConfig config,
     if (reference_builder_ == nullptr || solver_ == nullptr) {
         throw std::invalid_argument("iLQRPostStage: 参考构建器与求解器必须非空");
     }
-    if (!(config_.epsilon_v > 0.0) || !(config_.v_dwell > 0.0) ||
-        !(config_.shift_delay > 0.0) || !(config_.kappa_pad >= 1.0) ||
-        !(config_.omega_max > 0.0) || !(config_.eta_max > 0.0) ||
-        !(config_.seam_speed_tol > 0.0) || !(config_.dwell_omega_tol > 0.0) ||
-        !(config_.amplitude_check_tol > 0.0) ||
-        !(config_.amplitude_check_rel_tol > 0.0)) {
+    if (!(config_.post_epsilon_v > 0.0) || !(config_.post_v_dwell > 0.0) ||
+        !(config_.post_shift_delay > 0.0) || !(config_.post_kappa_pad >= 1.0) ||
+        !(config_.post_omega_max > 0.0) || !(config_.post_eta_max > 0.0) ||
+        !(config_.post_seam_speed_tol > 0.0) || !(config_.post_dwell_omega_tol > 0.0) ||
+        !(config_.post_amplitude_check_tol > 0.0) ||
+        !(config_.post_amplitude_check_rel_tol > 0.0)) {
         throw std::invalid_argument(
             "iLQRPostStage: 滞回/驻留/执行器/容差参数必须为正且 κ_pad>=1");
     }
-    if (!(config_.prune.min_arc_length > 0.0) ||
-        !(config_.prune.pivot_heading_threshold > 0.0)) {
+    if (!(config_.post_prune_min_arc_length > 0.0) ||
+        !(config_.post_prune_pivot_heading_threshold > 0.0)) {
         throw std::invalid_argument("iLQRPostStage: 融化/修剪判据阈值必须为正");
     }
     if (!(vehicle_params_.wheelbase > 0.0)) {
@@ -65,9 +65,9 @@ std::vector<iLQRSignRun> iLQRPostStage::analyzeSignRuns(
     for (std::size_t k = 0; k < states.size(); ++k) {
         const double v = states[k](ILQR_IDX_V);
         int commit = 0;
-        if (v >= config_.epsilon_v) {
+        if (v >= config_.post_epsilon_v) {
             commit = 1;
-        } else if (v <= -config_.epsilon_v) {
+        } else if (v <= -config_.post_epsilon_v) {
             commit = -1;
         }
         if (commit == 0) {
@@ -133,7 +133,7 @@ bool iLQRPostStage::pruneManeuvers(std::vector<Maneuver>* maneuvers) const {
     // 自有分类（Δθ 语义，与 MINCO 侧 detectMelting 同一物理含义）：极小
     for (std::size_t i = 1; i + 1 < maneuvers->size(); ++i) {
         auto& maneuver = (*maneuvers)[i];
-        if (maneuver.length() >= config_.prune.min_arc_length) {
+        if (maneuver.length() >= config_.post_prune_min_arc_length) {
             continue;
         }
         if (maneuver.points.size() < 2) {
@@ -141,7 +141,7 @@ bool iLQRPostStage::pruneManeuvers(std::vector<Maneuver>* maneuvers) const {
         }
         const double delta_theta = std::abs(WrapAngle(
             maneuver.points.back().theta - maneuver.points.front().theta));
-        if (delta_theta > config_.prune.pivot_heading_threshold) {
+        if (delta_theta > config_.post_prune_pivot_heading_threshold) {
             maneuver.direction = Direction::PIVOT;
         } else {
             maneuver.direction = Direction::UNKNOWN;
@@ -190,11 +190,11 @@ iLQRGatingPlanBuild iLQRPostStage::buildGatingPlan(
         // v/δ；接缝 j 即修剪后 maneuver j 与 j+1 的边界）
         const double delta_delta = measureSeamDeltaDelta(pruned_path, j);
         const double t_resteer =
-            ComputeResteerTime(delta_delta, config_.omega_max, config_.eta_max);
+            ComputeResteerTime(delta_delta, config_.post_omega_max, config_.post_eta_max);
         // 窗口半宽 m_j=⌈max(T_resteer,T_shift)/(2dt)⌉：静止窗口时长
         // 不小于重转向需求，优化器才能在窗内排出满足 ω/η 边界的摆动
         const auto half = static_cast<std::size_t>(std::ceil(
-            std::max(t_resteer, config_.shift_delay) / (2.0 * dt) - 1e-9));
+            std::max(t_resteer, config_.post_shift_delay) / (2.0 * dt) - 1e-9));
         // 窗口裁剪：不越界、不跨相邻接缝（右端不含下一接缝点）、与前一
         const std::size_t next_bound =
             (j + 1 < num_seams) ? plan.seam_indices[j + 1] - 1 : num_poses - 1;
@@ -204,11 +204,11 @@ iLQRGatingPlanBuild iLQRPostStage::buildGatingPlan(
             std::min(std::min(seam + half, num_poses - 1), next_bound);
         prev_window_end_plus_one = window_end + 1;
         for (std::size_t k = window_begin; k <= window_end; ++k) {
-            plan.dwell_v_cap[k] = config_.v_dwell;
+            plan.dwell_v_cap[k] = config_.post_v_dwell;
         }
         build.seams.push_back(iLQRSeamPlan{
             seam, window_begin, window_end, delta_delta, t_resteer,
-            config_.kappa_pad * std::max(t_resteer, config_.shift_delay)});
+            config_.post_kappa_pad * std::max(t_resteer, config_.post_shift_delay)});
     }
     return build;
 }
@@ -225,7 +225,7 @@ double iLQRPostStage::measureSeamDeltaDelta(
     const auto& right = maneuvers[seam_maneuver_index + 1].points;
     double delta_left = left.back().hasDelta() ? left.back().getDelta() : 0.0;
     for (std::size_t i = left.size() - 1; i-- > 0;) {
-        if (left[i].hasV() && std::abs(left[i].getV()) > config_.v_dwell &&
+        if (left[i].hasV() && std::abs(left[i].getV()) > config_.post_v_dwell &&
             left[i].hasDelta()) {
             delta_left = left[i].getDelta();
             break;
@@ -234,7 +234,7 @@ double iLQRPostStage::measureSeamDeltaDelta(
     double delta_right =
         right.front().hasDelta() ? right.front().getDelta() : 0.0;
     for (std::size_t i = 1; i < right.size(); ++i) {
-        if (right[i].hasV() && std::abs(right[i].getV()) > config_.v_dwell &&
+        if (right[i].hasV() && std::abs(right[i].getV()) > config_.post_v_dwell &&
             right[i].hasDelta()) {
             delta_right = right[i].getDelta();
             break;
@@ -318,7 +318,7 @@ void iLQRPostStage::buildStageTwoWarmStart(
         warm_states->push_back(state);
     }
     // 控制量由 a/ω 差分反解（半隐式链的近似逆），裁剪进控制盒
-    const auto& limits = solver_->config().inner;
+    const auto& limits = solver_->config();
     const double dt = stage_two_reference.dt;
     warm_controls->clear();
     warm_controls->reserve(num_poses - 1);
@@ -327,12 +327,13 @@ void iLQRPostStage::buildStageTwoWarmStart(
         control(ILQR_IDX_JERK) = std::clamp(
             ((*warm_states)[k + 1](ILQR_IDX_A) - (*warm_states)[k](ILQR_IDX_A)) /
                 dt,
-            -limits.jerk_max, limits.jerk_max);
+            -limits.inner_jerk_max, limits.inner_jerk_max);
         control(ILQR_IDX_ETA) =
             std::clamp(((*warm_states)[k + 1](ILQR_IDX_OMEGA) -
                         (*warm_states)[k](ILQR_IDX_OMEGA)) /
                            dt,
-                       -limits.steer_accel_max, limits.steer_accel_max);
+                       -limits.inner_steer_accel_max,
+                       limits.inner_steer_accel_max);
         warm_controls->push_back(control);
     }
 }
@@ -397,11 +398,11 @@ std::vector<iLQRSeamPlan> iLQRPostStage::buildStageOneSeamPlans(
             throw std::invalid_argument("iLQRPostStage: 接缝索引越界");
         }
         const double delta_delta =
-            MeasureSeamDeltaDeltaFromStates(states, seam, config_.v_dwell);
+            MeasureSeamDeltaDeltaFromStates(states, seam, config_.post_v_dwell);
         const double t_resteer =
-            ComputeResteerTime(delta_delta, config_.omega_max, config_.eta_max);
+            ComputeResteerTime(delta_delta, config_.post_omega_max, config_.post_eta_max);
         const auto half = static_cast<std::size_t>(std::ceil(
-            std::max(t_resteer, config_.shift_delay) / (2.0 * dt) - 1e-9));
+            std::max(t_resteer, config_.post_shift_delay) / (2.0 * dt) - 1e-9));
         const std::size_t next_bound = (j + 1 < seam_indices.size())
                                            ? seam_indices[j + 1] - 1
                                            : states.size() - 1;
@@ -412,7 +413,7 @@ std::vector<iLQRSeamPlan> iLQRPostStage::buildStageOneSeamPlans(
         prev_window_end_plus_one = window_end + 1;
         plans.push_back(iLQRSeamPlan{
             seam, window_begin, window_end, delta_delta, t_resteer,
-            config_.kappa_pad * std::max(t_resteer, config_.shift_delay)});
+            config_.post_kappa_pad * std::max(t_resteer, config_.post_shift_delay)});
     }
     return plans;
 }
@@ -460,11 +461,11 @@ Trajectory iLQRPostStage::insertDwells(
         report.seam_index = seam.seam_index;
         // Δδ_j 以阶段二最终轨迹重测（与窗口定宽的阶段一量测相互独立）
         report.delta_delta = MeasureSeamDeltaDeltaFromStates(
-            states, seam.seam_index, config_.v_dwell);
+            states, seam.seam_index, config_.post_v_dwell);
         report.t_resteer = ComputeResteerTime(
-            report.delta_delta, config_.omega_max, config_.eta_max);
+            report.delta_delta, config_.post_omega_max, config_.post_eta_max);
         report.t_dwell =
-            config_.kappa_pad * std::max(report.t_resteer, config_.shift_delay);
+            config_.post_kappa_pad * std::max(report.t_resteer, config_.post_shift_delay);
         report.seam_speed = std::abs(states[seam.seam_index](ILQR_IDX_V));
         double window_speed = 0.0;
         for (std::size_t k = seam.window_begin; k <= seam.window_end; ++k) {
@@ -509,7 +510,7 @@ Trajectory iLQRPostStage::assembleRetimedTrajectory(
     points.reserve(states.size() +
                    edits.size() *
                        (static_cast<std::size_t>(std::ceil(
-                            config_.kappa_pad * config_.shift_delay / dt)) +
+                            config_.post_kappa_pad * config_.post_shift_delay / dt)) +
                         1));
     std::size_t cursor = 0;
     double time_offset = 0.0;
@@ -652,35 +653,35 @@ bool iLQRPostStage::validateOutput(const Trajectory& output,
     double amp_omega = 0.0;
     for (const auto& x : states) {
         amp_va =
-            std::max(amp_va, std::abs(x(ILQR_IDX_V)) - solver_config.cost.v_max);
+            std::max(amp_va, std::abs(x(ILQR_IDX_V)) - solver_config.cost_v_max);
         amp_va =
-            std::max(amp_va, std::abs(x(ILQR_IDX_A)) - solver_config.cost.a_max);
-        if (std::abs(x(ILQR_IDX_V)) >= config_.v_dwell) {
+            std::max(amp_va, std::abs(x(ILQR_IDX_A)) - solver_config.cost_a_max);
+        if (std::abs(x(ILQR_IDX_V)) >= config_.post_v_dwell) {
             amp_delta =
                 std::max(amp_delta, std::abs(x(ILQR_IDX_DELTA)) /
-                                            solver_config.cost.delta_max -
+                                            solver_config.cost_delta_max -
                                         1.0);
         }
         amp_omega = std::max(
             amp_omega,
-            std::abs(x(ILQR_IDX_OMEGA)) / solver_config.cost.omega_max - 1.0);
+            std::abs(x(ILQR_IDX_OMEGA)) / solver_config.cost_omega_max - 1.0);
     }
-    record_gate("amplitude", amp_va, config_.amplitude_check_tol);
-    record_gate("amplitude_delta", amp_delta, config_.amplitude_check_rel_tol);
-    record_gate("amplitude_omega", amp_omega, config_.amplitude_check_rel_tol);
+    record_gate("amplitude", amp_va, config_.post_amplitude_check_tol);
+    record_gate("amplitude_delta", amp_delta, config_.post_amplitude_check_rel_tol);
+    record_gate("amplitude_omega", amp_omega, config_.post_amplitude_check_rel_tol);
     // ==================== 质量指标（全量记录，不作为回退触发条件）====
     double control_violation = 0.0;
     for (const auto& u : controls) {
         control_violation =
             std::max(control_violation,
-                     std::abs(u(ILQR_IDX_JERK)) - solver_config.inner.jerk_max);
+                     std::abs(u(ILQR_IDX_JERK)) - solver_config.inner_jerk_max);
         control_violation = std::max(
             control_violation,
-            std::abs(u(ILQR_IDX_ETA)) - solver_config.inner.steer_accel_max);
+            std::abs(u(ILQR_IDX_ETA)) - solver_config.inner_steer_accel_max);
     }
     record_metric("control_amplitude", control_violation,
-                  config_.control_overshoot_tol,
-                  control_violation <= config_.control_overshoot_tol);
+                  config_.post_control_overshoot_tol,
+                  control_violation <= config_.post_control_overshoot_tol);
     // 接缝与驻留完整性子项：阶段二收敛解由门控结构保证（接缝等式/
     double max_seam_speed = 0.0;
     double min_dwell_margin = 0.0;
@@ -699,20 +700,20 @@ bool iLQRPostStage::validateOutput(const Trajectory& output,
         first_seam = false;
     }
     const bool has_seam = !diagnostics->seams.empty();
-    record_metric("seam_zero_speed", max_seam_speed, config_.seam_speed_tol,
-                  max_seam_speed <= config_.seam_speed_tol);
+    record_metric("seam_zero_speed", max_seam_speed, config_.post_seam_speed_tol,
+                  max_seam_speed <= config_.post_seam_speed_tol);
     record_metric("dwell_duration", has_seam ? -min_dwell_margin : 0.0, 0.0,
                   !has_seam || min_dwell_margin >= 0.0);
     record_metric("dwell_window_speed", max_window_speed,
-                  config_.v_dwell + config_.seam_speed_tol,
-                  max_window_speed <= config_.v_dwell + config_.seam_speed_tol);
+                  config_.post_v_dwell + config_.post_seam_speed_tol,
+                  max_window_speed <= config_.post_v_dwell + config_.post_seam_speed_tol);
     record_metric("dwell_window_end_omega", max_window_end_omega,
-                  config_.dwell_omega_tol,
-                  max_window_end_omega <= config_.dwell_omega_tol);
+                  config_.post_dwell_omega_tol,
+                  max_window_end_omega <= config_.post_dwell_omega_tol);
     // maneuver 数不增（效果指标，记录供方案比较；曾作为合法性门存在
     // 逻辑倒挂——触发时回退目标的 maneuver 数只会更多）
     diagnostics->output_maneuver_count = output.countDirectionRuns(
-        config_.epsilon_v, config_.prune.min_arc_length);
+        config_.post_epsilon_v, config_.post_prune_min_arc_length);
     record_metric("maneuver_count",
                   static_cast<double>(diagnostics->output_maneuver_count),
                   static_cast<double>(diagnostics->input_maneuver_count),
@@ -775,8 +776,8 @@ iLQRPostStageResult iLQRPostStage::run(
     auto maneuvers = buildManeuvers(stage_one_result.states, runs);
     if (!pruneManeuvers(&maneuvers)) {
         makeFallback(&result, iLQRPostStageStatus::PIVOT_DETECTED, "pivot",
-                     config_.prune.pivot_heading_threshold,
-                     config_.prune.pivot_heading_threshold, original_path);
+                     config_.post_prune_pivot_heading_threshold,
+                     config_.post_prune_pivot_heading_threshold, original_path);
         return result;
     }
     // 阶段一降级候选（阶段一解 + 修剪 + 驻留插入）的统一构造与
@@ -813,13 +814,13 @@ iLQRPostStageResult iLQRPostStage::run(
     // 的驱动力来源，退火到地板后精化已无可释放的驱动力
     const double stage_one_final_weight =
         stage_one_result.report.history.empty()
-            ? solver_->config().cost.weight_ref_base
+            ? solver_->config().cost_weight_ref_base
             : stage_one_result.report.history.back().tracking_weight;
     // 权重耗尽门控：末轮权重已到地板时阶段二精化无驱动力，直接
     // 输出阶段一候选；候选未过合法性门仍须进入阶段二兜底
     const bool weight_skip =
-        config_.skip_stage_two_when_weight_exhausted &&
-        stage_one_final_weight <= config_.stage_two_min_tracking_weight;
+        config_.post_skip_stage_two_when_weight_exhausted &&
+        stage_one_final_weight <= config_.post_stage_two_min_tracking_weight;
     if (weight_skip) {
         auto candidate = build_stage_one_candidate();
         if (candidate.trajectory.has_value()) {
@@ -862,7 +863,7 @@ iLQRPostStageResult iLQRPostStage::run(
         // 跟踪权重地板（默认 0 = 不启用）：深退火调度下阶段一末轮权重
         // 可能远低于精化所需的保持量级，钳到地板避免门控失稳
         const double stage_two_weight = std::max(
-            stage_one_final_weight, config_.stage_two_min_tracking_weight);
+            stage_one_final_weight, config_.post_stage_two_min_tracking_weight);
         auto stage_two = solver_->solveStageTwo(
             stage_two_reference, gating.plan, warm_states, warm_controls,
             stage_two_weight, &stage_one_result.final_multipliers);

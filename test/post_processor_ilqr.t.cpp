@@ -42,7 +42,7 @@ VehicleFootprintModel MakeFootprintModel(const VehicleParams& params) {
 // 生产默认配置不受影响
 iLQRConfig MakeSyntheticiLQRConfig() {
     iLQRConfig config;
-    config.solver.outer.mu_min = 1.0;
+    config.outer_mu_min = 1.0;
     return config;
 }
 
@@ -155,20 +155,20 @@ TEST(PostProcessoriLQRTest, DoesNotMutateiLQRConfig) {
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     iLQRConfig ilqr_config;
-    ilqr_config.reference.v_max = 1.2;
-    ilqr_config.solver.cost.v_max = 9.9;  // 故意制造未同步状态
-    ilqr_config.solver.outer.mu_min = 1.0;
-    ilqr_config.solver.outer.max_outer_iterations = 3;
-    ilqr_config.esdf.weight_safe = 250.0;
-    ilqr_config.post_stage.kappa_pad = 1.1;
+    ilqr_config.reference_v_max = 1.2;
+    ilqr_config.cost_v_max = 9.9;  // 故意制造未同步状态
+    ilqr_config.outer_mu_min = 1.0;
+    ilqr_config.outer_max_outer_iterations = 3;
+    ilqr_config.esdf_weight_safe = 250.0;
+    ilqr_config.post_kappa_pad = 1.1;
     const auto path = BuildStraightPath(2.0);
     processor.optimizeiLQR(path, ilqr_config);
-    EXPECT_DOUBLE_EQ(ilqr_config.reference.v_max, 1.2);
-    EXPECT_DOUBLE_EQ(ilqr_config.solver.cost.v_max, 9.9);
-    EXPECT_DOUBLE_EQ(ilqr_config.solver.outer.mu_min, 1.0);
-    EXPECT_EQ(ilqr_config.solver.outer.max_outer_iterations, 3);
-    EXPECT_DOUBLE_EQ(ilqr_config.esdf.weight_safe, 250.0);
-    EXPECT_DOUBLE_EQ(ilqr_config.post_stage.kappa_pad, 1.1);
+    EXPECT_DOUBLE_EQ(ilqr_config.reference_v_max, 1.2);
+    EXPECT_DOUBLE_EQ(ilqr_config.cost_v_max, 9.9);
+    EXPECT_DOUBLE_EQ(ilqr_config.outer_mu_min, 1.0);
+    EXPECT_EQ(ilqr_config.outer_max_outer_iterations, 3);
+    EXPECT_DOUBLE_EQ(ilqr_config.esdf_weight_safe, 250.0);
+    EXPECT_DOUBLE_EQ(ilqr_config.post_kappa_pad, 1.1);
 }
 
 // 先跑一次 MINCO 路径，再跑 iLQR 路径，最后再跑 MINCO 路径：两次 MINCO 结果必须
@@ -269,13 +269,11 @@ TEST(PostProcessoriLQRTest, EndToEndGearShiftCompletes) {
         0.02);
 }
 
-// 短倒退换挡场景（倒退段仅 0.5 m）：实测阶段二门控重解内层未收敛
-// （ρ_reg 溢出），但阶段一解干净收敛——分级降级结构应输出阶段一降级
-// 候选（阶段一解 + 修剪 + 驻留插入，过同一合法性门）而非整体回退。
-// 钉住"降级不伪装"语义：显式成功但 message 如实反映降级级别与原因，
-// 输出轨迹过碰撞/终点双指标门，物理方向段数不增。
-// 若端到端调参后该场景阶段二转为收敛，本用例应改写为阶段二成功路径断言
-TEST(PostProcessoriLQRTest, ShortReversalOutputsStageOneCandidate) {
+// 短倒退换挡场景（倒退段仅 0.5 m）：虚拟控制默认开启后该场景阶段二
+// 转为收敛（此前默认关闭时阶段二门控重解内层未收敛、输出阶段一降级
+// 候选）。改写为阶段二成功路径断言：message 完整收敛、output_level
+// 完全成功，输出轨迹过碰撞/终点双指标门，物理方向段数不增。
+TEST(PostProcessoriLQRTest, ShortReversalConvergesToStageTwo) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
@@ -283,10 +281,8 @@ TEST(PostProcessoriLQRTest, ShortReversalOutputsStageOneCandidate) {
     const auto path = BuildShortReversalPath();
     const auto result = processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
     ASSERT_TRUE(result.success) << result.message;
-    EXPECT_NE(result.message.find("stage-one candidate"), std::string::npos)
-        << result.message;
-    EXPECT_NE(result.message.find("stage_two_convergence"), std::string::npos)
-        << result.message;
+    EXPECT_EQ(result.message, "iLQR converged") << result.message;
+    EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
     EXPECT_FALSE(result.optimized_path.empty());
     EXPECT_FALSE(result.optimized_trajectory.empty());
     EXPECT_TRUE(IsPathFinite(result.optimized_path));
@@ -392,13 +388,13 @@ TEST(PostProcessoriLQRTest, OutputLevelReflectsResultQuality) {
         ASSERT_TRUE(result.success);
         EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
     }
-    // 短倒退场景：阶段二不收敛，降级到阶段一候选
+    // 短倒退场景：虚拟控制默认开启后阶段二收敛，完全成功
     {
         const auto path = BuildShortReversalPath();
         const auto result =
             processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
         ASSERT_TRUE(result.success);
-        EXPECT_EQ(result.output_level, OutputLevel::kDegraded);
+        EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
     }
     // 空路径：直接失败
     {

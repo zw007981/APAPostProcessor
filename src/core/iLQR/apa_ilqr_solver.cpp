@@ -22,13 +22,13 @@ bool EscalationStuck(const EscalationState& s) {
     }
     return true;
 }
-ApaILQRSolver::ApaILQRSolver(ApaILQRSolverConfig config,
+ApaILQRSolver::ApaILQRSolver(const iLQRConfig& config,
                            const BicycleDynamics* dynamics,
                            const iLQRCostEvaluator* cost_evaluator)
-    : config_(std::move(config)),
+    : config_(config),
       dynamics_(dynamics),
       cost_evaluator_(cost_evaluator),
-      outer_loop_(config_.outer, config_.cost) {
+      outer_loop_(config_) {
     resetInnerSolver();
     if (dynamics_ == nullptr || cost_evaluator_ == nullptr) {
         throw std::invalid_argument("ApaILQRSolver: 动力学与代价求值层必须非空");
@@ -36,12 +36,12 @@ ApaILQRSolver::ApaILQRSolver(ApaILQRSolverConfig config,
 }
 
 void ApaILQRSolver::resetInnerSolver() {
-    if (config_.inner.use_virtual_control) {
+    if (config_.inner_use_virtual_control) {
         inner_solver_ = std::make_unique<MsIlqrSolverVirtualControl>(
-            config_.inner, dynamics_, cost_evaluator_);
+            config_, dynamics_, cost_evaluator_);
     } else {
-        inner_solver_ = std::make_unique<MsIlqrSolver>(
-            config_.inner, dynamics_, cost_evaluator_);
+        inner_solver_ = std::make_unique<MsIlqrSolver>(config_, dynamics_,
+                                                      cost_evaluator_);
     }
 }
 
@@ -60,21 +60,21 @@ MsIlqrResult ApaILQRSolver::solveInnerResilient(
     iLQRAlignedVec<iLQRState>* virtual_controls, double mu_round,
     ApaILQRReport* report) {
     const auto raise_merit_floor = [&]() {
-        if (config_.inner.merit_mu_al_ratio > 0.0) {
+        if (config_.inner_merit_mu_al_ratio > 0.0) {
             inner_solver_->raiseMeritMuFloor(
-                config_.inner.merit_mu_al_ratio *
+                config_.inner_merit_mu_al_ratio *
                 MeritAlHook(mu_round, outer->muAmplitude()));
         }
     };
     // 虚拟控制热启动：空数组让内层反解初始化（首轮 rollout 复现热启动
     // 轨迹、初始缺陷恒零），非空则逐轮续接
     const iLQRAlignedVec<iLQRState>* w_in =
-        config_.inner.use_virtual_control && virtual_controls != nullptr &&
+        config_.inner_use_virtual_control && virtual_controls != nullptr &&
                 !virtual_controls->empty()
             ? virtual_controls
             : nullptr;
     const auto write_back = [&]() {
-        if (config_.inner.use_virtual_control && virtual_controls != nullptr) {
+        if (config_.inner_use_virtual_control && virtual_controls != nullptr) {
             *virtual_controls = inner_solver_->virtualControls();
         }
     };
@@ -144,7 +144,7 @@ void ApaILQRSolver::runOuterLoop(
         }
         // 虚拟控制残余 ‖w‖∞（开关关闭时为 0）：增广问题收敛判据的附加项
         double w_inf = 0.0;
-        if (config_.inner.use_virtual_control) {
+        if (config_.inner_use_virtual_control) {
             for (const auto& w : inner_solver_->virtualControls()) {
                 w_inf = std::max(w_inf, w.cwiseAbs().maxCoeff());
             }
@@ -239,9 +239,9 @@ void ApaILQRSolver::runOuterLoop(
         if (anneal_exempt_mask == nullptr) {
             const EscalationState state{
                 check.terminal_ok, outer->wantedTerminalGrowth(),
-                outer->mu() >= config_.outer.mu_max,
+                outer->mu() >= config_.outer_mu_max,
                 check.inequality_ok, outer->wantedAmplitudeGrowth(),
-                multipliers->amplitude_mu.maxCoeff() >= config_.outer.mu_max,
+                multipliers->amplitude_mu.maxCoeff() >= config_.outer_mu_max,
                 gating_ok, gating_wanted,
                 gating_mu >= config_.gating_mu_max, has_gating,
                 inner_result.status == MsIlqrStatus::CONVERGED_COST ||
@@ -260,8 +260,8 @@ void ApaILQRSolver::runOuterLoop(
         warm_states = inner_solver_->states();
         for (auto& state : warm_states) {
             state(ILQR_IDX_DELTA) = std::min(
-                std::max(state(ILQR_IDX_DELTA), -config_.cost.delta_max),
-                config_.cost.delta_max);
+                std::max(state(ILQR_IDX_DELTA), -config_.cost_delta_max),
+                config_.cost_delta_max);
         }
         warm_controls = inner_solver_->controls();
     }
@@ -297,7 +297,7 @@ ApaILQRStageOneResult ApaILQRSolver::solveStageOne(
     iLQRAlignedVec<iLQRState> warm_virtual;
     runOuterLoop(reference, &outer_loop_, &multipliers, warm_start_states,
                  warm_start_controls, &warm_virtual,
-                 config_.outer.max_outer_iterations,
+                 config_.outer_max_outer_iterations,
                  /*tracking_weight=*/0.0, &exempt_mask,
                  /*gating_plan=*/nullptr, &result.report,
                  /*out_max_sign_violation=*/nullptr,
@@ -350,19 +350,23 @@ ApaILQRStageTwoResult ApaILQRSolver::solveStageTwo(
                 "ApaILQRSolver: 门控计划接缝查表存在游离条目");
         }
     }
-    AlOuterLoopConfig outer_config = config_.outer;
-    outer_config.amplitude_mu_per_element =
-        config_.outer.amplitude_mu_per_element_stage_two;
+    // 阶段二局部配置：逐元素门控按阶段二开关、对偶种子提升首轮 μ 下限
+    iLQRConfig stage_two_config = config_;
+    stage_two_config.outer_amplitude_mu_per_element =
+        config_.outer_amplitude_mu_per_element_stage_two;
     if (dual_seed != nullptr && dual_seed->terminal_mu.size() > 0) {
         const double seed_mu = dual_seed->terminal_mu.maxCoeff();
-        outer_config.first_round_mu = seed_mu;
-        outer_config.mu_min = std::max(outer_config.mu_min, seed_mu);
+        stage_two_config.outer_first_round_mu = seed_mu;
+        stage_two_config.outer_mu_min =
+            std::max(stage_two_config.outer_mu_min, seed_mu);
     }
-    AlOuterLoop outer(outer_config, config_.cost);
+    AlOuterLoop outer(stage_two_config);
     auto multipliers = iLQRCostMultiplierState::MakeStageTwoZero(
         num_steps, gating_plan.seam_indices.size());
-    multipliers.amplitude_mu.setConstant(outer_config.amplitude_mu_initial);
-    multipliers.terminal_mu.setConstant(outer_config.first_round_mu);
+    multipliers.amplitude_mu.setConstant(
+        stage_two_config.outer_amplitude_mu_initial);
+    multipliers.terminal_mu.setConstant(
+        stage_two_config.outer_first_round_mu);
     if (dual_seed != nullptr) {
         if (dual_seed->terminal_lambda.size() > 0) {
             multipliers.terminal_lambda = dual_seed->terminal_lambda;
@@ -464,10 +468,10 @@ bool ApaILQRSolver::updateGating(const GatingSnapshot& snapshot,
     const bool wanted =
         *prev_violation >= 0.0 &&
         snapshot.violation_norm >
-            config_.outer.mu_gate_kappa * *prev_violation;
+            config_.outer_mu_gate_kappa * *prev_violation;
     bool increased = false;
     if (wanted) {
-        *gating_mu = std::min(config_.outer.mu_growth_factor * *gating_mu,
+        *gating_mu = std::min(config_.outer_mu_growth_factor * *gating_mu,
                               config_.gating_mu_max);
         increased = true;
     }

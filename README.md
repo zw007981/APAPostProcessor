@@ -100,7 +100,7 @@ bench_apa_post_processor
 
 ## 2. MINCO
 
-详细设计文档见 [docs/MINCO.md](docs/MINCO.md)基于MINCO的方法优化 HybridA* 等方法生成的初始轨迹。在不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/MINCO.md](docs/MINCO.md)。基于 MINCO 框架在 θ-s 空间优化混合 A* 初始轨迹，输出平滑无碰撞路径。不同数据集上的优化效果如下表所示：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
@@ -135,53 +135,47 @@ bench_apa_post_processor
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→15.779m（−57.2%） | 6→4 | 462ms | 收敛 |
-| `data/mid_park/data3.json` | 24.582→22.024m（−10.4%） | 9→6 | 692ms | 阶段一降级输出 |
-| `data/rub_park/data1.json` | 12.988→11.999m（−7.6%） | 10→4 | 427ms | 阶段一降级输出 |
-| `data/rub_park/data7.json` | 18.744→16.273m（−13.2%） | 6→4 | 855ms | 阶段一降级输出 |
+| `data/long_park/data6.json` | 36.862→12.651m（−65.7%） | 6→4 | 227ms | 阶段二收敛 |
+| `data/mid_park/data3.json` | 24.582→25.110m（+2.1%） | 9→6 | 710ms | 阶段一降级输出 |
+| `data/rub_park/data1.json` | 12.988→10.528m（−18.9%） | 10→4 | 271ms | 阶段一降级输出 |
+| `data/rub_park/data7.json` | 18.744→14.096m（−24.8%） | 6→2 | 248ms | 阶段二收敛 |
 
 各场景优化前后对比（红色为原始 A\* 路径，绿色为 iLQR 优化轨迹，顺序与上表一致）：
 
-**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 57.2%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法的初始轨迹的几何特征：
+**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 65.7%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法轨迹的几何特征：
 
 ![ilqr_data6](fig/ilqr_data6.png)
 
-**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度缩短 10.4%：
+**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度反而增加 2.1%：
 
 ![ilqr_data3](fig/ilqr_data3.png)
 
-**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 7.6%：
+**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 18.9%：
 
 ![ilqr_data1](fig/ilqr_data1.png)
 
-**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 13.2%：
+**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→2，长度缩短 24.8%：
 
 ![ilqr_data7](fig/ilqr_data7.png)
 
-**虚拟控制初始化变体（ALTRO 机制，默认关闭）**：通过配置键
-`solver.inner.use_virtual_control=true` 启用 ALTRO 式虚拟控制初始化
-（首轮 rollout 缺陷恒零，见 docs/iLQR.md §1.3）。四数据集对比：长度
-普遍更短，但端点误差与耗时均增加，故不转正为默认方法：
+通过配置 `dual_candidate_select=true` 再次进行一轮额外的iLQR精修。四数据集全部阶段二收敛，路径优化效果为所有组合中最好：data3 由默认的 +2.1% 拉回 −37.1%、data1 由 −18.9% 加深到 −39.3%。但合计耗时约 3721 ms（默认约 1456 ms，约 2.6×）：
 
-| 数据集 | 默认长度 | 变体长度 | 变体端点误差 | 默认耗时 | 变体耗时 |
-| --- | --- | --- | --- | --- | --- |
-| data6 | 15.779m | 12.546m（−20.5%） | 5.2e-3 m / 0.077° | 462ms | 611ms |
-| data3 | 22.024m | 15.477m（−29.7%） | 5.8e-4 m / 0.023° | 692ms | 894ms |
-| data1 | 11.999m | 7.884m（−34.3%） | 1.5e-2 m / 0.346° | 427ms | 392ms |
-| data7 | 16.273m | 13.632m（−16.2%） | 6.9e-3 m / 0.051° | 855ms | 591ms |
+| 数据集 | 初始路径 | 默认（相对初始） | 开启精修（相对初始） | 默认maneuver | 开启maneuver | 默认耗时 | 开启耗时 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| data6 | 36.862m | 12.651m（−65.7%） | 12.651m（−65.7%） | 6→4 | 6→4 | 227ms | 831ms |
+| data3 | 24.582m | 25.110m（+2.1%） | 15.474m（−37.1%） | 9→6 | 9→6 | 710ms | 1334ms |
+| data1 | 12.988m | 10.528m（−18.9%） | 7.887m（−39.3%） | 10→4 | 10→4 | 271ms | 608ms |
+| data7 | 18.744m | 14.096m（−24.8%） | 13.680m（−27.0%） | 6→2 | 6→2 | 248ms | 947ms |
 
-路径长度大幅缩短，但是终点误差比默认方法大了 1~2 个数量级；此外合计耗时 2488 ms（默认 2436 ms，约 +2%）。
+但是车端耗时敏感，故默认关闭，效果如下图所示：
 
-变体优化前后对比（红色为原始 A\* 路径，绿色为变体优化轨迹，文件名
-后缀 `_vc` 与默认版对照）：
+![ilqr_data6_dual](fig/ilqr_data6_dual.png)
 
-![ilqr_data6_vc](fig/ilqr_data6_vc.png)
+![ilqr_data3_dual](fig/ilqr_data3_dual.png)
 
-![ilqr_data3_vc](fig/ilqr_data3_vc.png)
+![ilqr_data1_dual](fig/ilqr_data1_dual.png)
 
-![ilqr_data1_vc](fig/ilqr_data1_vc.png)
-
-![ilqr_data7_vc](fig/ilqr_data7_vc.png)
+![ilqr_data7_dual](fig/ilqr_data7_dual.png)
 
 ---
 

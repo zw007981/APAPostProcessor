@@ -9,57 +9,11 @@
 
 #include "bicycle_dynamics.h"
 #include "box_qp.h"
+#include "ilqr_config.h"
 #include "ilqr_cost.h"
 #include "ilqr_reference_builder.h"
 
 namespace apa_post_processor {
-// MS-iLQR 内层配置：控制盒、迭代/收敛、LM 正则化、线搜索与 merit 罚参数
-struct MsIlqrConfig {
-    // 跃度上限 (m/s³)
-    double jerk_max{1.5};
-    // 转角加加速度上限 (rad/s²)
-    double steer_accel_max{1.0};
-    // 迭代上限
-    int max_iterations{50};
-    // 代价变化容差
-    double cost_change_tol{1e-6};
-    // 梯度范数容差
-    double gradient_tol{1e-8};
-    // 收敛的可行性守卫：缺陷 ‖d‖∞ 必须降到本容差内才允许判收敛（防大 μ
-    // 下尺度盲误判）
-    double convergence_defect_tol{1e-3};
-    // 正则化初值
-    double reg_initial{1e-4};
-    // 正则化下界
-    double reg_min{1e-9};
-    // 正则化上界
-    double reg_max{1e9};
-    // 正则化增大倍率
-    double reg_increase{10.0};
-    // 正则化缩小倍率
-    double reg_decrease{0.5};
-    // Armijo γ
-    double armijo_gamma{0.1};
-    // 回溯衰减 β
-    double backtrack_beta{0.5};
-    // 回溯次数上限
-    int max_backtracks{50};
-    // merit μ₀
-    double merit_mu0{10.0};
-    // merit-AL 量级挂钩比率 c：保持缺陷修复与代价下降的交换比恒定（0=关闭）
-    double merit_mu_al_ratio{0.0};
-    // merit μ 上限
-    double merit_mu_max{1e9};
-    // 前向 rollout 定义域守卫：地图外扩 margin
-    // 米，越界候选直接判失败回溯（0=关闭）
-    double domain_guard_margin{2.0};
-    // true=ALTRO 式虚拟控制增广（不可行状态轨迹初始化）：动力学
-    // 改写为 x⁺=f(x,u)+w，初始 w 反解自初值轨迹使首轮 rollout 恰好
-    // 复现初值、初始缺陷恒零；默认 false 保持打靶缺陷注入路径
-    bool use_virtual_control{false};
-    // 虚拟控制二次软代价权重 R_inf：½·R_inf·‖w‖²·dt 驱动 w→0
-    double virtual_control_weight{1e4};
-};
 // 内层求解状态：失败语义（正则化溢出/迭代超限）经状态码上报外层，
 // 供回退逻辑消费；仅输入契约违例抛异常
 enum class MsIlqrStatus {
@@ -150,7 +104,7 @@ template <bool UseVirtualControl>
 class MsIlqrSolverT : public MsIlqrSolverInterface {
    public:
     // 构造时校验配置与控制盒/线搜索/正则化参数合法性
-    MsIlqrSolverT(MsIlqrConfig config, const BicycleDynamics* dynamics,
+    MsIlqrSolverT(const iLQRConfig& config, const BicycleDynamics* dynamics,
                   const iLQRCostEvaluator* cost_evaluator);
     // µ_m 与 ρ_reg 跨 solve
     // 调用保持（外层轮次间自然热启动），计数器与历史每次清空
@@ -189,7 +143,8 @@ class MsIlqrSolverT : public MsIlqrSolverInterface {
         if (!std::isfinite(floor)) {
             return;
         }
-        merit_mu_ = std::min(std::max(merit_mu_, floor), config_.merit_mu_max);
+        merit_mu_ = std::min(std::max(merit_mu_, floor),
+                             config_.inner_merit_mu_max);
     }
     // 当前 LM 正则化 ρ_reg
     double rhoReg() const override { return rho_reg_; }
@@ -263,7 +218,7 @@ class MsIlqrSolverT : public MsIlqrSolverInterface {
 
    protected:
     // 配置
-    MsIlqrConfig config_;
+    iLQRConfig config_;
     // 动力学模型（不持有所有权）
     const BicycleDynamics* dynamics_;
     // 代价求值层（不持有所有权）

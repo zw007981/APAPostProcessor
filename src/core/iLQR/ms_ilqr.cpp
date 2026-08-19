@@ -10,57 +10,57 @@
 namespace apa_post_processor {
 template <bool UseVirtualControl>
 MsIlqrSolverT<UseVirtualControl>::MsIlqrSolverT(
-    MsIlqrConfig config, const BicycleDynamics* dynamics,
+    const iLQRConfig& config, const BicycleDynamics* dynamics,
     const iLQRCostEvaluator* cost_evaluator)
     : config_(config), dynamics_(dynamics), cost_evaluator_(cost_evaluator) {
     if (dynamics_ == nullptr || cost_evaluator_ == nullptr) {
         throw std::invalid_argument("MsIlqrSolver: 动力学与代价求值层必须非空");
     }
-    if (!(config_.jerk_max > 0.0) || !(config_.steer_accel_max > 0.0) ||
-        !std::isfinite(config_.jerk_max) ||
-        !std::isfinite(config_.steer_accel_max)) {
+    if (!(config_.inner_jerk_max > 0.0) || !(config_.inner_steer_accel_max > 0.0) ||
+        !std::isfinite(config_.inner_jerk_max) ||
+        !std::isfinite(config_.inner_steer_accel_max)) {
         throw std::invalid_argument("MsIlqrSolver: 控制盒幅值必须为正有限");
     }
-    if (config_.max_iterations <= 0 || !(config_.cost_change_tol > 0.0) ||
-        !(config_.gradient_tol > 0.0)) {
+    if (config_.inner_max_iterations <= 0 || !(config_.inner_cost_change_tol > 0.0) ||
+        !(config_.inner_gradient_tol > 0.0)) {
         throw std::invalid_argument("MsIlqrSolver: 迭代上限与收敛容差必须为正");
     }
-    if (!(config_.reg_min > 0.0) || !(config_.reg_max >= config_.reg_min) ||
-        !(config_.reg_initial >= config_.reg_min &&
-          config_.reg_initial <= config_.reg_max) ||
-        !(config_.reg_increase > 1.0) ||
-        !(config_.reg_decrease > 0.0 && config_.reg_decrease < 1.0)) {
+    if (!(config_.inner_reg_min > 0.0) || !(config_.inner_reg_max >= config_.inner_reg_min) ||
+        !(config_.inner_reg_initial >= config_.inner_reg_min &&
+          config_.inner_reg_initial <= config_.inner_reg_max) ||
+        !(config_.inner_reg_increase > 1.0) ||
+        !(config_.inner_reg_decrease > 0.0 && config_.inner_reg_decrease < 1.0)) {
         throw std::invalid_argument(
             "MsIlqrSolver: 正则化参数必须满足 0<min<=initial<=max、inc>1、"
             "0<dec<1");
     }
-    if (!(config_.armijo_gamma > 0.0 && config_.armijo_gamma < 1.0) ||
-        !(config_.backtrack_beta > 0.0 && config_.backtrack_beta < 1.0) ||
-        config_.max_backtracks <= 0) {
+    if (!(config_.inner_armijo_gamma > 0.0 && config_.inner_armijo_gamma < 1.0) ||
+        !(config_.inner_backtrack_beta > 0.0 && config_.inner_backtrack_beta < 1.0) ||
+        config_.inner_max_backtracks <= 0) {
         throw std::invalid_argument(
             "MsIlqrSolver: 线搜索参数必须满足 0<γ<1、0<β<1、回溯上限为正");
     }
-    if (!(config_.convergence_defect_tol > 0.0)) {
+    if (!(config_.inner_convergence_defect_tol > 0.0)) {
         throw std::invalid_argument("MsIlqrSolver: 收敛可行性容差必须为正");
     }
-    if (!(config_.merit_mu0 > 0.0) || !(config_.merit_mu_al_ratio >= 0.0) ||
-        !std::isfinite(config_.merit_mu_al_ratio)) {
+    if (!(config_.inner_merit_mu0 > 0.0) || !(config_.inner_merit_mu_al_ratio >= 0.0) ||
+        !std::isfinite(config_.inner_merit_mu_al_ratio)) {
         throw std::invalid_argument("MsIlqrSolver: merit 参数非法");
     }
     // µ_m 上限必须不小于 µ₀（否则地板与上限冲突、语义不自洽）
-    if (!(config_.merit_mu_max >= config_.merit_mu0) ||
-        !std::isfinite(config_.merit_mu_max)) {
+    if (!(config_.inner_merit_mu_max >= config_.inner_merit_mu0) ||
+        !std::isfinite(config_.inner_merit_mu_max)) {
         throw std::invalid_argument(
             "MsIlqrSolver: merit_mu_max 必须为有限值且不小于 merit_mu0");
     }
     // 定义域守卫 margin：0 = 关闭；启用时必须为非负有限值
-    if (!(config_.domain_guard_margin >= 0.0) ||
-        !std::isfinite(config_.domain_guard_margin)) {
+    if (!(config_.inner_domain_guard_margin >= 0.0) ||
+        !std::isfinite(config_.inner_domain_guard_margin)) {
         throw std::invalid_argument(
             "MsIlqrSolver: domain_guard_margin 必须为非负有限值");
     }
-    rho_reg_ = config_.reg_initial;
-    merit_mu_ = config_.merit_mu0;
+    rho_reg_ = config_.inner_reg_initial;
+    merit_mu_ = config_.inner_merit_mu0;
 }
 
 template <bool UseVirtualControl>
@@ -113,7 +113,7 @@ MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
     MsIlqrResult result;
     result.initial_cost = total_cost_;
     result.initial_defect_norm = defect_norm_;
-    for (int iter = 1; iter <= config_.max_iterations; ++iter) {
+    for (int iter = 1; iter <= config_.inner_max_iterations; ++iter) {
         const double cost_prev = total_cost_;
         double accepted_alpha = 0.0;
         double accepted_cost = 0.0;
@@ -173,11 +173,11 @@ MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
         // 收敛出口的可行性守卫：两个尺度盲判据达标时，打靶缺陷还必须
         const double rel_change = std::abs(cost_prev - total_cost_) /
                                   std::max(std::abs(cost_prev), 1e-12);
-        if (rel_change < config_.cost_change_tol && convergenceAllowed()) {
+        if (rel_change < config_.inner_cost_change_tol && convergenceAllowed()) {
             result.status = MsIlqrStatus::CONVERGED_COST;
             break;
         }
-        if (max_qu_norm_ < config_.gradient_tol && convergenceAllowed()) {
+        if (max_qu_norm_ < config_.inner_gradient_tol && convergenceAllowed()) {
             result.status = MsIlqrStatus::CONVERGED_GRADIENT;
             break;
         }
@@ -226,7 +226,7 @@ void MsIlqrSolverT<UseVirtualControl>::prepareWorkspace(std::size_t num_steps) {
         has_clamped_history_ = false;
     }
     gain_K_.resize(num_steps);
-    history_.reserve(static_cast<std::size_t>(config_.max_iterations));
+    history_.reserve(static_cast<std::size_t>(config_.inner_max_iterations));
 }
 
 template <bool UseVirtualControl>
@@ -289,7 +289,7 @@ void MsIlqrSolverT<UseVirtualControl>::evaluateNominal(const iLQRReference& refe
         // （q_w 梯度 / EC 一、二阶项）同源，保证线搜索自洽
         double w_cost = 0.0;
         for (std::size_t k = 0; k < num_steps_; ++k) {
-            w_cost += 0.5 * config_.virtual_control_weight * step_dt_[k] *
+            w_cost += 0.5 * config_.inner_virtual_control_weight * step_dt_[k] *
                       virtual_controls_[k].squaredNorm();
         }
         total_cost_ += w_cost;
@@ -414,7 +414,7 @@ bool MsIlqrSolverT<UseVirtualControl>::backwardPass() {
         Eigen::Matrix<double, ILQR_STATE_DIM, ILQR_CONTROL_DIM> t_u;
         if constexpr (UseVirtualControl) {
             const double w_weight_dt =
-                config_.virtual_control_weight * step_dt_[k];
+                config_.inner_virtual_control_weight * step_dt_[k];
             const iLQRState q_w =
                 w_weight_dt * virtual_controls_[k] + z;
             iLQRStateHessian w_hessian = value_hessian;
@@ -450,9 +450,9 @@ bool MsIlqrSolverT<UseVirtualControl>::backwardPass() {
             problem.gradient = q_u;
         }
         problem.lower =
-            iLQRControl(-config_.jerk_max, -config_.steer_accel_max) -
+            iLQRControl(-config_.inner_jerk_max, -config_.inner_steer_accel_max) -
             controls_[k];
-        problem.upper = iLQRControl(config_.jerk_max, config_.steer_accel_max) -
+        problem.upper = iLQRControl(config_.inner_jerk_max, config_.inner_steer_accel_max) -
                         controls_[k];
         problem.initial = feedforward_[k];
         if (k + 1 < num_steps_) {
@@ -554,7 +554,7 @@ void MsIlqrSolverT<UseVirtualControl>::linearRollout() {
         // 虚拟控制软代价对 EC 的闭式贡献（名义 w 的一阶/二阶项）
         if constexpr (UseVirtualControl) {
             const double w_weight_dt =
-                config_.virtual_control_weight * step_dt_[k];
+                config_.inner_virtual_control_weight * step_dt_[k];
             ec1_ += w_weight_dt * virtual_controls_[k].dot(dw_lin_[k]);
             ec2_ += w_weight_dt * dw_lin_[k].squaredNorm();
         }
@@ -572,7 +572,7 @@ bool MsIlqrSolverT<UseVirtualControl>::convergenceAllowed() const {
     for (const auto& defect : defects_) {
         defect_inf = std::max(defect_inf, defect.cwiseAbs().maxCoeff());
     }
-    return defect_inf <= config_.convergence_defect_tol;
+    return defect_inf <= config_.inner_convergence_defect_tol;
 }
 
 template <bool UseVirtualControl>
@@ -602,10 +602,10 @@ double MsIlqrSolverT<UseVirtualControl>::nonlinearRollout(double alpha,
     // 新缺陷 d' = (1-α)·d̄ 精确成立（与状态更新公式逐位一致）
     cand_defect_norm_ = (1.0 - alpha) * defect_norm_;
     // L8.3 定义域守卫：AL 幅值约束只覆盖 v/a/δ/ω、Box-QP 只约束控制，
-    if (config_.domain_guard_margin > 0.0 &&
+    if (config_.inner_domain_guard_margin > 0.0 &&
         cost_evaluator_->esdfConstraint() != nullptr) {
         const ESDFMap& map = cost_evaluator_->esdfConstraint()->esdfMap();
-        const double margin = config_.domain_guard_margin;
+        const double margin = config_.inner_domain_guard_margin;
         const double min_x = map.getOrigin().x - margin;
         const double min_y = map.getOrigin().y - margin;
         const double max_x =
@@ -636,7 +636,7 @@ double MsIlqrSolverT<UseVirtualControl>::nonlinearRollout(double alpha,
         // 候选增广代价并入 w 软代价（与名义侧同源）
         double w_cost = 0.0;
         for (std::size_t k = 0; k < num_steps_; ++k) {
-            w_cost += 0.5 * config_.virtual_control_weight * step_dt_[k] *
+            w_cost += 0.5 * config_.inner_virtual_control_weight * step_dt_[k] *
                       cand_virtual_controls_[k].squaredNorm();
         }
         cand_cost_ += w_cost;
@@ -650,13 +650,13 @@ bool MsIlqrSolverT<UseVirtualControl>::lineSearch(const iLQRReference& reference
                               const iLQRCostInput& cost_input, double merit_prev,
                               double* accepted_alpha, double* accepted_cost) {
     double alpha = 1.0;
-    for (int trial = 0; trial < config_.max_backtracks; ++trial) {
+    for (int trial = 0; trial < config_.inner_max_backtracks; ++trial) {
         // EC(α) 闭式量先算好，才能把 merit 接受阈值折算为代价早停
         // 阈值传给 rollout（次序换位不改变数值：所用成员均不随试错变）
         const double expected =
             expectedChange(alpha) - alpha * merit_mu_ * defect_norm_;
         const double merit_threshold =
-            merit_prev + config_.armijo_gamma * expected;
+            merit_prev + config_.inner_armijo_gamma * expected;
         const double cand_cost =
             nonlinearRollout(alpha, reference, multipliers, cost_input,
                              merit_threshold);
@@ -677,7 +677,7 @@ bool MsIlqrSolverT<UseVirtualControl>::lineSearch(const iLQRReference& reference
             *accepted_cost = cand_cost_;
             return true;
         }
-        alpha *= config_.backtrack_beta;
+        alpha *= config_.inner_backtrack_beta;
     }
     return false;
 }
@@ -702,16 +702,16 @@ void MsIlqrSolverT<UseVirtualControl>::acceptCandidate(double alpha) {
 
 template <bool UseVirtualControl>
 bool MsIlqrSolverT<UseVirtualControl>::increaseReg() {
-    if (rho_reg_ >= config_.reg_max) {
+    if (rho_reg_ >= config_.inner_reg_max) {
         return false;
     }
-    rho_reg_ = std::min(rho_reg_ * config_.reg_increase, config_.reg_max);
+    rho_reg_ = std::min(rho_reg_ * config_.inner_reg_increase, config_.inner_reg_max);
     return true;
 }
 
 template <bool UseVirtualControl>
 void MsIlqrSolverT<UseVirtualControl>::decreaseReg() {
-    rho_reg_ = std::max(rho_reg_ * config_.reg_decrease, config_.reg_min);
+    rho_reg_ = std::max(rho_reg_ * config_.inner_reg_decrease, config_.inner_reg_min);
 }
 
 template <bool UseVirtualControl>

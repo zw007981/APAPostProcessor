@@ -50,12 +50,12 @@ ESDFMap MakeMapWithWall(double y, double x_from, double x_to) {
     return ESDFMap(grid_map);
 }
 
-iLQRRsShortcutConfig MakeConfig(double cap_ratio) {
-    iLQRRsShortcutConfig config;
-    config.cap_ratio = cap_ratio;
-    config.collision_margin = 0.02;
-    config.max_length_growth = 1.0;
-    config.sample_dist = 0.05;
+iLQRConfig MakeConfig(double cap_ratio) {
+    iLQRConfig config;
+    config.rs_cap_ratio = cap_ratio;
+    config.rs_collision_margin = 0.02;
+    config.rs_max_length_growth = 1.0;
+    config.rs_sample_dist = 0.05;
     return config;
 }
 
@@ -172,20 +172,20 @@ TEST(iLQRRsShortcutTest, CollidingShortcutIsRejected) {
     const Path input = BuildUTurnPath();
     const ESDFMap map = MakeMapWithWall(10.0, -9.0, 12.0);
     const VehicleFootprintModel footprint = MakeFootprint();
-    const iLQRRsShortcutConfig config = MakeConfig(0.9);
+    const iLQRConfig config = MakeConfig(0.9);
     // 前提校验：原路径本身无碰撞，否则输出侧的断言没有意义
     ASSERT_LE(ComputeMaxCollisionDepth(input, map, footprint),
-              config.collision_margin);
+              config.rs_collision_margin);
     // 参照：空旷环境下确实存在一条更短的穿中间区短接
     const Path free_space_output = ShortcutShiftPoints(
         input, MakeEmptyMap(), footprint, kWheelbase, kDeltaMax, config);
     ASSERT_LT(free_space_output.length(), input.length());
     ASSERT_GT(ComputeMaxCollisionDepth(free_space_output, map, footprint),
-              config.collision_margin);
+              config.rs_collision_margin);
     const Path output = ShortcutShiftPoints(input, map, footprint, kWheelbase,
                                             kDeltaMax, config);
     EXPECT_LE(ComputeMaxCollisionDepth(output, map, footprint),
-              config.collision_margin);
+              config.rs_collision_margin);
 }
 
 // 测试长度增长守卫：把增长上限设为 0（禁止任何变长）后，只有确实更短
@@ -194,8 +194,8 @@ TEST(iLQRRsShortcutTest, LengthGrowthGuardBoundsOutputLength) {
     const Path input = BuildDetourPath();
     const ESDFMap map = MakeEmptyMap();
     const VehicleFootprintModel footprint = MakeFootprint();
-    iLQRRsShortcutConfig config = MakeConfig(0.9);
-    config.max_length_growth = 0.0;
+    iLQRConfig config = MakeConfig(0.9);
+    config.rs_max_length_growth = 0.0;
     const Path output =
         ShortcutShiftPoints(input, map, footprint, kWheelbase, kDeltaMax, config);
     EXPECT_LE(output.length(), input.length() + 1e-9);
@@ -207,7 +207,7 @@ TEST(iLQRRsShortcutTest, DisabledConfigPassesPathThrough) {
     const Path input = BuildDetourPath();
     const ESDFMap map = MakeEmptyMap();
     const VehicleFootprintModel footprint = MakeFootprint();
-    iLQRRsShortcutConfig off = MakeConfig(0.0);
+    iLQRConfig off = MakeConfig(0.0);
     const Path passthrough =
         ShortcutShiftPoints(input, map, footprint, kWheelbase, kDeltaMax, off);
     EXPECT_EQ(passthrough.size(), input.size());
@@ -220,17 +220,17 @@ TEST(iLQRRsShortcutTest, InvalidConfigThrows) {
     const Path input = BuildDetourPath();
     const ESDFMap map = MakeEmptyMap();
     const VehicleFootprintModel footprint = MakeFootprint();
-    iLQRRsShortcutConfig bad_ratio = MakeConfig(1.5);
+    iLQRConfig bad_ratio = MakeConfig(1.5);
     EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, kWheelbase,
                                      kDeltaMax, bad_ratio),
                  std::invalid_argument);
-    iLQRRsShortcutConfig bad_margin = MakeConfig(0.9);
-    bad_margin.collision_margin = -0.1;
+    iLQRConfig bad_margin = MakeConfig(0.9);
+    bad_margin.rs_collision_margin = -0.1;
     EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, kWheelbase,
                                      kDeltaMax, bad_margin),
                  std::invalid_argument);
-    iLQRRsShortcutConfig bad_sample = MakeConfig(0.9);
-    bad_sample.sample_dist = 0.0;
+    iLQRConfig bad_sample = MakeConfig(0.9);
+    bad_sample.rs_sample_dist = 0.0;
     EXPECT_THROW(ShortcutShiftPoints(input, map, footprint, kWheelbase,
                                      kDeltaMax, bad_sample),
                  std::invalid_argument);
@@ -268,8 +268,8 @@ TEST(iLQRRsShortcutTest, ReconstructionPreservesTerminalPose) {
     AppendLine(&input, 0.0, 0.5, 0.0);
     input.finalize();
     ASSERT_EQ(input.numManeuvers(), 2u);
-    iLQRRsShortcutConfig config = MakeConfig(1.0);
-    config.max_length_growth = 1.0;
+    iLQRConfig config = MakeConfig(1.0);
+    config.rs_max_length_growth = 1.0;
     const ESDFMap map = MakeEmptyMap();
     const VehicleFootprintModel footprint = MakeFootprint();
     const Path output = ShortcutShiftPoints(input, map, footprint, kWheelbase,

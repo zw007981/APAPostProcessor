@@ -128,12 +128,12 @@ class iLQRCostEvaluatorTest : public ::testing::Test {
     }
 
     // 全零权重的配置（隔离出单一代价通道做精确手推校验）
-    static iLQRCostConfig MakeZeroWeightConfig() {
-        iLQRCostConfig config;
-        config.weight_jerk = 0.0;
-        config.weight_steer_accel = 0.0;
-        config.weight_ref_base = 0.0;
-        config.weight_theta = 0.0;
+    static iLQRConfig MakeZeroWeightConfig() {
+        iLQRConfig config;
+        config.cost_weight_jerk = 0.0;
+        config.cost_weight_steer_accel = 0.0;
+        config.cost_weight_ref_base = 0.0;
+        config.cost_weight_theta = 0.0;
         return config;
     }
 
@@ -145,17 +145,17 @@ class iLQRCostEvaluatorTest : public ::testing::Test {
 // 测试构造期配置校验：负权重、非有限权重、非正幅值边界
 // 均必须抛 std::invalid_argument。因为非法配置会静默污染全部下游求解。
 TEST_F(iLQRCostEvaluatorTest, ConstructorThrowsOnInvalidConfig) {
-    iLQRCostConfig config;
-    config.weight_jerk = -1.0;
+    iLQRConfig config;
+    config.cost_weight_jerk = -1.0;
     EXPECT_THROW(iLQRCostEvaluator(config, nullptr), std::invalid_argument);
-    config.weight_jerk = 1.0;
-    config.weight_theta = std::numeric_limits<double>::quiet_NaN();
+    config.cost_weight_jerk = 1.0;
+    config.cost_weight_theta = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(iLQRCostEvaluator(config, nullptr), std::invalid_argument);
-    config.weight_theta = 5.0;
-    config.v_max = 0.0;
+    config.cost_weight_theta = 5.0;
+    config.cost_v_max = 0.0;
     EXPECT_THROW(iLQRCostEvaluator(config, nullptr), std::invalid_argument);
-    config.v_max = 1.5;
-    config.delta_max = -0.5;
+    config.cost_v_max = 1.5;
+    config.cost_delta_max = -0.5;
     EXPECT_THROW(iLQRCostEvaluator(config, nullptr), std::invalid_argument);
 }
 
@@ -163,7 +163,7 @@ TEST_F(iLQRCostEvaluatorTest, ConstructorThrowsOnInvalidConfig) {
 // 豁免掩码尺寸≠N+1、参考位姿不足两个、dt 非正、退火权重非有限，
 // 均必须抛 std::invalid_argument——维度错配若静默放行会把导数写串位。
 TEST_F(iLQRCostEvaluatorTest, EvaluateThrowsOnDimensionMismatch) {
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const auto states = MakeStates();
     const auto controls = MakeControls();
     const auto multipliers = iLQRCostMultiplierState::MakeZero(kNumSteps);
@@ -215,11 +215,11 @@ TEST_F(iLQRCostEvaluatorTest, EvaluateThrowsOnDimensionMismatch) {
 // （代价按阶段解耦，∂total/∂x_k 即阶段 k 的 lx），Hessian 用"解析梯度
 // 再做中心差分"对拍，同时覆盖 lx/lu/lxx/luu/lux 全部五个输出。
 TEST_F(iLQRCostEvaluatorTest, QuadraticTermsMatchFiniteDifference) {
-    iLQRCostConfig config;
-    config.weight_jerk = 1.0;
-    config.weight_steer_accel = 2.0;
-    config.weight_ref_base = 10.0;
-    config.weight_theta = 5.0;
+    iLQRConfig config;
+    config.cost_weight_jerk = 1.0;
+    config.cost_weight_steer_accel = 2.0;
+    config.cost_weight_ref_base = 10.0;
+    config.cost_weight_theta = 5.0;
     const iLQRCostEvaluator evaluator(config, nullptr);
     const auto states = MakeStates();
     const auto controls = MakeControls();
@@ -432,7 +432,10 @@ TEST_F(iLQRCostEvaluatorTest, AmplitudeMultiplierMemoryActivatesBelowBound) {
 // GN Hessian 与精确 Hessian 一致（线性约束无二阶项），
 // 且两侧约束共用同一个状态行不会互相串扰。
 TEST_F(iLQRCostEvaluatorTest, DeltaLinearConstraintsShareDeltaRow) {
-    const iLQRCostEvaluator evaluator(MakeZeroWeightConfig(), nullptr);
+    // 显式恢复 δ_max=0.55（组件独立默认）：本测试锁定 δ 双侧线性约束公式
+    iLQRConfig config = MakeZeroWeightConfig();
+    config.cost_delta_max = 0.55;
+    const iLQRCostEvaluator evaluator(config, nullptr);
     const auto controls = MakeControls();
     // δ 正向越界：仅 δ−δ_max 分支激活
     auto states = MakeStates();
@@ -477,8 +480,8 @@ TEST_F(iLQRCostEvaluatorTest, DeltaLinearConstraintsShareDeltaRow) {
 // 代价与梯度必须连续无 2π 跳变（wrap 实现与初值提取/终端约束同源）。
 // 若 wrap 缺失，θ=−π+0.05 处的误差会被算成 ≈2π−0.051，代价差 5 个数量级。
 TEST_F(iLQRCostEvaluatorTest, TrackingAngleWrapAcrossPiSeam) {
-    iLQRCostConfig config = MakeZeroWeightConfig();
-    config.weight_theta = 8.0;
+    iLQRConfig config = MakeZeroWeightConfig();
+    config.cost_weight_theta = 8.0;
     const iLQRCostEvaluator evaluator(config, nullptr);
     auto reference = reference_;
     reference.poses[1] = Pose{0.05, 0.0, PI - 1e-3};
@@ -512,8 +515,8 @@ TEST_F(iLQRCostEvaluatorTest, TrackingAngleWrapAcrossPiSeam) {
 // 非豁免点按外部输入的 w_ref(r) 取值——首/末 maneuver 与锚点因此
 // 能在退火后期仍保持跟踪压力。
 TEST_F(iLQRCostEvaluatorTest, AnnealMaskExemptsPointsFromDecay) {
-    iLQRCostConfig config = MakeZeroWeightConfig();
-    config.weight_ref_base = 10.0;
+    iLQRConfig config = MakeZeroWeightConfig();
+    config.cost_weight_ref_base = 10.0;
     const iLQRCostEvaluator evaluator(config, nullptr);
     const auto states = MakeStates();
     const auto controls = MakeControls();
@@ -605,11 +608,11 @@ TEST_F(iLQRCostEvaluatorTest, TerminalAlEqualityMatchesHandDerived) {
 // 测试总代价与逐阶段分解的一致性：total_cost 必须等于各阶段
 // totalCost() 的累加（分解值是外层调度/日志的唯一数据源，不允许漂移）。
 TEST_F(iLQRCostEvaluatorTest, TotalCostEqualsStageSum) {
-    iLQRCostConfig config;
-    config.weight_jerk = 1.0;
-    config.weight_steer_accel = 2.0;
-    config.weight_ref_base = 10.0;
-    config.weight_theta = 5.0;
+    iLQRConfig config;
+    config.cost_weight_jerk = 1.0;
+    config.cost_weight_steer_accel = 2.0;
+    config.cost_weight_ref_base = 10.0;
+    config.cost_weight_theta = 5.0;
     const iLQRCostEvaluator evaluator(config, nullptr);
     const auto states = MakeStates();
     const auto controls = MakeControls();
@@ -640,8 +643,8 @@ TEST_F(iLQRCostEvaluatorTest, EsdfPenaltyAppliesOnSampledStagesOnly) {
     const ESDFMap esdf_map(grid_map);
     const VehicleParams veh_params(4.3, 1.8, 2.7, 0.6, 0.8);
     const VehicleFootprintModel footprint_model(veh_params, 233, 2, 1);
-    iLQREsdfConstraintConfig esdf_config;
-    esdf_config.stride = 2;
+    iLQRConfig esdf_config;
+    esdf_config.esdf_stride = 2;
     const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model,
                                             esdf_config);
     const iLQRCostEvaluator with_esdf(MakeZeroWeightConfig(), &esdf_constraint);
@@ -742,11 +745,11 @@ TEST_F(iLQRCostEvaluatorTest, EsdfScreenThresholdBelowCheapTotalSkipsEsdf) {
     const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
     // 非零权重配置：平滑/跟踪项给出正的廉价小计（全零权重时小计恒 0，
     // 任何正阈值都无法触发筛选，没有判别力）
-    iLQRCostConfig config;
-    config.weight_jerk = 1.0;
-    config.weight_steer_accel = 2.0;
-    config.weight_ref_base = 10.0;
-    config.weight_theta = 5.0;
+    iLQRConfig config;
+    config.cost_weight_jerk = 1.0;
+    config.cost_weight_steer_accel = 2.0;
+    config.cost_weight_ref_base = 10.0;
+    config.cost_weight_theta = 5.0;
     const iLQRCostEvaluator with_esdf(config, &esdf_constraint);
     const iLQRCostEvaluator without_esdf(config, nullptr);
     // 全部状态平行贴墙（ESDF 激活）
@@ -796,11 +799,11 @@ TEST_F(iLQRCostEvaluatorTest, CostDtScalingConventionIsPinned) {
     const VehicleParams veh_params(4.3, 1.8, 2.7, 0.6, 0.8);
     const VehicleFootprintModel footprint_model(veh_params, 233, 2, 1);
     const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
-    iLQRCostConfig config;
-    config.weight_jerk = 1.0;
-    config.weight_steer_accel = 2.0;
-    config.weight_ref_base = 10.0;
-    config.weight_theta = 5.0;
+    iLQRConfig config;
+    config.cost_weight_jerk = 1.0;
+    config.cost_weight_steer_accel = 2.0;
+    config.cost_weight_ref_base = 10.0;
+    config.cost_weight_theta = 5.0;
     const iLQRCostEvaluator evaluator(config, &esdf_constraint);
     // 全部状态平行贴墙（ESDF 激活），stage 0 速度越界（幅值 AL 激活）
     auto states = MakeStates();
@@ -857,7 +860,7 @@ TEST_F(iLQRCostEvaluatorTest, EsdfScaleMultipliesEsdfChannelLinearly) {
     const VehicleParams veh_params(4.3, 1.8, 2.7, 0.6, 0.8);
     const VehicleFootprintModel footprint_model(veh_params, 233, 2, 1);
     const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model,
-                                            iLQREsdfConstraintConfig{});
+                                            iLQRConfig{});
     const iLQRCostEvaluator evaluator(MakeZeroWeightConfig(), &esdf_constraint);
     // 全部状态平行贴墙，使 ESDF 惩罚在每个阶段都激活
     auto states = MakeStates();

@@ -21,59 +21,59 @@ static_assert(std::is_move_constructible_v<iLQRConfig>);
 // a_max=1.0、delta_max/omega_max 与车队车辆物理参数真值一致（0.47728 rad /
 // 0.4 rad/s——曾被放大为 0.55/0.5 导致输出对真实车辆不可执行的口径缺陷，
 // 现以车辆真值为默认并由 clampToVehicleParams 强制只准收紧）、j_max=1.5、
-// eta_max=1.0、margin_safe/margin_comf=0.02/0.10、stride=1、epsilon_v=0.02、
+// eta_max=1.0、margin_safe/margin_comf=0.02/0.20、stride=1、epsilon_v=0.02、
 // v_dwell=0.05、T_shift=0.4、kappa_pad=1.2），且编排层默认标定
 // （merit_mu0=100、cost_change_tol=1e-9）不被 iLQRConfig 构造破坏。
 TEST(iLQRConfigTest, DefaultsMatchDesignParameterTable) {
     const iLQRConfig config;
     // 参考构建：重采样间距/固定步长/打靶间隔与初值裁剪盒边界
-    EXPECT_DOUBLE_EQ(config.reference.sample_dist, 0.05);
-    EXPECT_DOUBLE_EQ(config.reference.dt, 0.1);
-    EXPECT_EQ(config.reference.shooting_interval, 25);
-    EXPECT_DOUBLE_EQ(config.reference.v_max, 1.5);
-    EXPECT_DOUBLE_EQ(config.reference.a_max, 1.0);
-    EXPECT_DOUBLE_EQ(config.reference.delta_max, 0.47728);
-    EXPECT_DOUBLE_EQ(config.reference.omega_max, 0.4);
+    EXPECT_DOUBLE_EQ(config.reference_sample_dist, 0.05);
+    EXPECT_DOUBLE_EQ(config.reference_dt, 0.1);
+    EXPECT_EQ(config.reference_shooting_interval, 25);
+    EXPECT_DOUBLE_EQ(config.reference_v_max, 1.5);
+    EXPECT_DOUBLE_EQ(config.reference_a_max, 1.0);
+    EXPECT_DOUBLE_EQ(config.reference_delta_max, 0.47728);
+    EXPECT_DOUBLE_EQ(config.reference_omega_max, 0.4);
     // 内层 MS-iLQR：控制盒与迭代上限；编排层标定值（merit 钉住/容差收紧）
-    EXPECT_DOUBLE_EQ(config.solver.inner.jerk_max, 1.5);
-    EXPECT_DOUBLE_EQ(config.solver.inner.steer_accel_max, 1.0);
-    EXPECT_EQ(config.solver.inner.max_iterations, 50);
-    EXPECT_DOUBLE_EQ(config.solver.inner.cost_change_tol, 1e-9);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu0, 100.0);
+    EXPECT_DOUBLE_EQ(config.inner_jerk_max, 1.5);
+    EXPECT_DOUBLE_EQ(config.inner_steer_accel_max, 1.0);
+    EXPECT_EQ(config.inner_max_iterations, 50);
+    EXPECT_DOUBLE_EQ(config.inner_cost_change_tol, 1e-9);
+    EXPECT_DOUBLE_EQ(config.inner_merit_mu0, 100.0);
     // 外层 AL：迭代上限/双指标/缺陷容差/罚权重调度/退火率
-    EXPECT_EQ(config.solver.outer.max_outer_iterations, 20);
-    EXPECT_DOUBLE_EQ(config.solver.outer.terminal_position_tol, 0.05);
-    EXPECT_DOUBLE_EQ(config.solver.outer.terminal_heading_tol_deg, 1.5);
-    EXPECT_DOUBLE_EQ(config.solver.outer.defect_tol, 1e-3);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_min, 1e2);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_max, 1e6);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_growth_factor, 10.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.anneal_gamma, 0.5);
+    EXPECT_EQ(config.outer_max_outer_iterations, 20);
+    EXPECT_DOUBLE_EQ(config.outer_terminal_position_tol, 0.05);
+    EXPECT_DOUBLE_EQ(config.outer_terminal_heading_tol_deg, 1.5);
+    EXPECT_DOUBLE_EQ(config.outer_defect_tol, 1e-3);
+    EXPECT_DOUBLE_EQ(config.outer_mu_min, 1e2);
+    EXPECT_DOUBLE_EQ(config.outer_mu_max, 1e6);
+    EXPECT_DOUBLE_EQ(config.outer_mu_growth_factor, 10.0);
+    EXPECT_DOUBLE_EQ(config.outer_anneal_gamma, 0.5);
     // 代价权重：平滑主项基准 w_j=1.0、w_eta=1.0、w_ref,0=10.0、w_theta=5.0
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_jerk, 1.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_steer_accel, 1.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_ref_base, 10.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_theta, 5.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_jerk, 1.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_steer_accel, 1.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_ref_base, 10.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_theta, 5.0);
     // 阶段二编排：外层上限 16（四数据集标定值：真实长视窗下 8 轮预算
     // 不足，data3/data7 在 10~11 轮收敛）、门控 mu 初值 10、门控容差 1e-2
-    EXPECT_EQ(config.solver.stage_two_max_outer_iterations, 16);
-    EXPECT_DOUBLE_EQ(config.solver.gating_mu_initial, 10.0);
-    EXPECT_DOUBLE_EQ(config.solver.gating_mu_max, 1e6);
-    EXPECT_DOUBLE_EQ(config.solver.gating_tol, 1e-2);
+    EXPECT_EQ(config.stage_two_max_outer_iterations, 16);
+    EXPECT_DOUBLE_EQ(config.gating_mu_initial, 10.0);
+    EXPECT_DOUBLE_EQ(config.gating_mu_max, 1e6);
+    EXPECT_DOUBLE_EQ(config.gating_tol, 1e-2);
     // ESDF 双 margin 惩罚
-    EXPECT_DOUBLE_EQ(config.esdf.margin_safe, 0.02);
-    EXPECT_DOUBLE_EQ(config.esdf.margin_comf, 0.10);
-    EXPECT_DOUBLE_EQ(config.esdf.weight_safe, 100.0);
-    EXPECT_DOUBLE_EQ(config.esdf.weight_comf, 1.0);
-    EXPECT_EQ(config.esdf.stride, 1);
+    EXPECT_DOUBLE_EQ(config.esdf_margin_safe, 0.02);
+    EXPECT_DOUBLE_EQ(config.esdf_margin_comf, 0.20);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_safe, 100.0);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_comf, 10.0);
+    EXPECT_EQ(config.esdf_stride, 1);
     // 后处理与阶段二门控精化
-    EXPECT_DOUBLE_EQ(config.post_stage.epsilon_v, 0.02);
-    EXPECT_DOUBLE_EQ(config.post_stage.v_dwell, 0.05);
-    EXPECT_DOUBLE_EQ(config.post_stage.shift_delay, 0.4);
-    EXPECT_DOUBLE_EQ(config.post_stage.kappa_pad, 1.2);
-    EXPECT_DOUBLE_EQ(config.post_stage.seam_speed_tol, 0.02);
-    EXPECT_DOUBLE_EQ(config.post_stage.amplitude_check_tol, 0.05);
-    EXPECT_DOUBLE_EQ(config.post_stage.control_overshoot_tol, 0.3);
+    EXPECT_DOUBLE_EQ(config.post_epsilon_v, 0.02);
+    EXPECT_DOUBLE_EQ(config.post_v_dwell, 0.05);
+    EXPECT_DOUBLE_EQ(config.post_shift_delay, 0.4);
+    EXPECT_DOUBLE_EQ(config.post_kappa_pad, 1.2);
+    EXPECT_DOUBLE_EQ(config.post_seam_speed_tol, 0.02);
+    EXPECT_DOUBLE_EQ(config.post_amplitude_check_tol, 0.05);
+    EXPECT_DOUBLE_EQ(config.post_control_overshoot_tol, 0.3);
 }
 
 // 测试场景：幅值边界按车辆物理参数钳制（只准收紧、不准放宽）。
@@ -86,29 +86,29 @@ TEST(iLQRConfigTest, ClampToVehicleParamsOnlyTightens) {
     const VehicleParams vehicle_params{5.0, 1.9, 3.0, 0.47728, 1.1};
     // 超出车辆物理上限的配置被钳回真值
     iLQRConfig inflated;
-    inflated.reference.delta_max = 0.55;  // > 0.47728
-    inflated.reference.omega_max = 0.5;   // > 0.4
-    inflated.reference.a_max = 2.0;       // > min(1.5, 3.0)
-    inflated.reference.v_max = 2.0;       // 无车辆字段，不钳制
+    inflated.reference_delta_max = 0.55;  // > 0.47728
+    inflated.reference_omega_max = 0.5;   // > 0.4
+    inflated.reference_a_max = 2.0;       // > min(1.5, 3.0)
+    inflated.reference_v_max = 2.0;       // 无车辆字段，不钳制
     inflated.clampToVehicleParams(vehicle_params);
     inflated.synchronizeAmplitudeBounds();
-    EXPECT_DOUBLE_EQ(inflated.reference.delta_max, 0.47728);
-    EXPECT_DOUBLE_EQ(inflated.reference.omega_max, 0.4);
-    EXPECT_DOUBLE_EQ(inflated.reference.a_max, 1.5);
-    EXPECT_DOUBLE_EQ(inflated.reference.v_max, 2.0);
+    EXPECT_DOUBLE_EQ(inflated.reference_delta_max, 0.47728);
+    EXPECT_DOUBLE_EQ(inflated.reference_omega_max, 0.4);
+    EXPECT_DOUBLE_EQ(inflated.reference_a_max, 1.5);
+    EXPECT_DOUBLE_EQ(inflated.reference_v_max, 2.0);
     // 同步后全部消费方跟随钳制值
-    EXPECT_DOUBLE_EQ(inflated.solver.cost.delta_max, 0.47728);
-    EXPECT_DOUBLE_EQ(inflated.solver.cost.omega_max, 0.4);
-    EXPECT_DOUBLE_EQ(inflated.post_stage.omega_max, 0.4);
+    EXPECT_DOUBLE_EQ(inflated.cost_delta_max, 0.47728);
+    EXPECT_DOUBLE_EQ(inflated.cost_omega_max, 0.4);
+    EXPECT_DOUBLE_EQ(inflated.post_omega_max, 0.4);
     // 已更紧的取值保持不变（只收紧、不放宽）
     iLQRConfig tight;
-    tight.reference.delta_max = 0.4;
-    tight.reference.omega_max = 0.3;
-    tight.reference.a_max = 0.8;
+    tight.reference_delta_max = 0.4;
+    tight.reference_omega_max = 0.3;
+    tight.reference_a_max = 0.8;
     tight.clampToVehicleParams(vehicle_params);
-    EXPECT_DOUBLE_EQ(tight.reference.delta_max, 0.4);
-    EXPECT_DOUBLE_EQ(tight.reference.omega_max, 0.3);
-    EXPECT_DOUBLE_EQ(tight.reference.a_max, 0.8);
+    EXPECT_DOUBLE_EQ(tight.reference_delta_max, 0.4);
+    EXPECT_DOUBLE_EQ(tight.reference_omega_max, 0.3);
+    EXPECT_DOUBLE_EQ(tight.reference_a_max, 0.8);
 }
 
 // 测试场景：默认构造与显式调用 synchronizeAmplitudeBounds。
@@ -118,25 +118,25 @@ TEST(iLQRConfigTest, ClampToVehicleParamsOnlyTightens) {
 // 消费方跟随更新（Config 双源缺口历史教训的前置防御）。
 TEST(iLQRConfigTest, AmplitudeBoundsSyncFromSingleSource) {
     iLQRConfig config;
-    EXPECT_DOUBLE_EQ(config.solver.cost.v_max, config.reference.v_max);
-    EXPECT_DOUBLE_EQ(config.solver.cost.a_max, config.reference.a_max);
-    EXPECT_DOUBLE_EQ(config.solver.cost.delta_max, config.reference.delta_max);
-    EXPECT_DOUBLE_EQ(config.solver.cost.omega_max, config.reference.omega_max);
-    EXPECT_DOUBLE_EQ(config.post_stage.omega_max, config.reference.omega_max);
-    EXPECT_DOUBLE_EQ(config.post_stage.eta_max,
-                     config.solver.inner.steer_accel_max);
-    config.reference.v_max = 2.0;
-    config.reference.a_max = 1.2;
-    config.reference.delta_max = 0.6;
-    config.reference.omega_max = 0.7;
-    config.solver.inner.steer_accel_max = 1.3;
+    EXPECT_DOUBLE_EQ(config.cost_v_max, config.reference_v_max);
+    EXPECT_DOUBLE_EQ(config.cost_a_max, config.reference_a_max);
+    EXPECT_DOUBLE_EQ(config.cost_delta_max, config.reference_delta_max);
+    EXPECT_DOUBLE_EQ(config.cost_omega_max, config.reference_omega_max);
+    EXPECT_DOUBLE_EQ(config.post_omega_max, config.reference_omega_max);
+    EXPECT_DOUBLE_EQ(config.post_eta_max,
+                     config.inner_steer_accel_max);
+    config.reference_v_max = 2.0;
+    config.reference_a_max = 1.2;
+    config.reference_delta_max = 0.6;
+    config.reference_omega_max = 0.7;
+    config.inner_steer_accel_max = 1.3;
     config.synchronizeAmplitudeBounds();
-    EXPECT_DOUBLE_EQ(config.solver.cost.v_max, 2.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.a_max, 1.2);
-    EXPECT_DOUBLE_EQ(config.solver.cost.delta_max, 0.6);
-    EXPECT_DOUBLE_EQ(config.solver.cost.omega_max, 0.7);
-    EXPECT_DOUBLE_EQ(config.post_stage.omega_max, 0.7);
-    EXPECT_DOUBLE_EQ(config.post_stage.eta_max, 1.3);
+    EXPECT_DOUBLE_EQ(config.cost_v_max, 2.0);
+    EXPECT_DOUBLE_EQ(config.cost_a_max, 1.2);
+    EXPECT_DOUBLE_EQ(config.cost_delta_max, 0.6);
+    EXPECT_DOUBLE_EQ(config.cost_omega_max, 0.7);
+    EXPECT_DOUBLE_EQ(config.post_omega_max, 0.7);
+    EXPECT_DOUBLE_EQ(config.post_eta_max, 1.3);
 }
 
 // 测试场景：JSON 显式给出全部可映射字段（区别于默认值）。
@@ -190,75 +190,75 @@ TEST(iLQRConfigTest, LoadFromJsonOverridesAllFields) {
     })json");
     iLQRConfig config;
     LoadiLQRConfigOverrides(details, &config);
-    EXPECT_DOUBLE_EQ(config.reference.sample_dist, 0.08);
-    EXPECT_DOUBLE_EQ(config.reference.dt, 0.2);
-    EXPECT_EQ(config.reference.shooting_interval, 10);
-    EXPECT_DOUBLE_EQ(config.reference.v_max, 2.0);
-    EXPECT_DOUBLE_EQ(config.reference.a_max, 1.2);
-    EXPECT_DOUBLE_EQ(config.reference.delta_max, 0.6);
-    EXPECT_DOUBLE_EQ(config.reference.omega_max, 0.7);
-    EXPECT_EQ(config.solver.stage_two_max_outer_iterations, 5);
-    EXPECT_DOUBLE_EQ(config.solver.gating_mu_initial, 20.0);
-    EXPECT_DOUBLE_EQ(config.solver.gating_mu_max, 1e5);
-    EXPECT_DOUBLE_EQ(config.solver.gating_tol, 0.05);
-    EXPECT_DOUBLE_EQ(config.solver.inner.jerk_max, 2.5);
-    EXPECT_DOUBLE_EQ(config.solver.inner.steer_accel_max, 1.3);
-    EXPECT_EQ(config.solver.inner.max_iterations, 30);
-    EXPECT_DOUBLE_EQ(config.solver.inner.cost_change_tol, 1e-8);
-    EXPECT_DOUBLE_EQ(config.solver.inner.gradient_tol, 1e-7);
-    EXPECT_DOUBLE_EQ(config.solver.inner.reg_initial, 1e-3);
-    EXPECT_DOUBLE_EQ(config.solver.inner.reg_min, 1e-8);
-    EXPECT_DOUBLE_EQ(config.solver.inner.reg_max, 1e8);
-    EXPECT_DOUBLE_EQ(config.solver.inner.reg_increase, 5.0);
-    EXPECT_DOUBLE_EQ(config.solver.inner.reg_decrease, 0.6);
-    EXPECT_DOUBLE_EQ(config.solver.inner.armijo_gamma, 0.2);
-    EXPECT_DOUBLE_EQ(config.solver.inner.backtrack_beta, 0.4);
-    EXPECT_EQ(config.solver.inner.max_backtracks, 40);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu0, 50.0);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu_max, 1e3);
-    EXPECT_DOUBLE_EQ(config.solver.inner.domain_guard_margin, 3.0);
-    EXPECT_DOUBLE_EQ(config.solver.inner.merit_mu_al_ratio, 1e-3);
-    EXPECT_DOUBLE_EQ(config.solver.inner.convergence_defect_tol, 2e-3);
-    EXPECT_EQ(config.solver.outer.max_outer_iterations, 15);
-    EXPECT_DOUBLE_EQ(config.solver.outer.terminal_position_tol, 0.08);
-    EXPECT_DOUBLE_EQ(config.solver.outer.terminal_heading_tol_deg, 2.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.inequality_tol, 0.05);
-    EXPECT_DOUBLE_EQ(config.solver.outer.defect_tol, 1e-4);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_min, 10.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_max, 1e5);
-    EXPECT_DOUBLE_EQ(config.solver.outer.first_round_mu, 2.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.amplitude_mu_initial, 3.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.epsilon_mu, 1e-3);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_gate_kappa, 0.8);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_growth_factor, 5.0);
-    EXPECT_DOUBLE_EQ(config.solver.outer.anneal_gamma, 0.6);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_jerk, 2.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_steer_accel, 3.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_ref_base, 20.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_theta, 8.0);
-    EXPECT_DOUBLE_EQ(config.esdf.margin_safe, 0.03);
-    EXPECT_DOUBLE_EQ(config.esdf.margin_comf, 0.15);
-    EXPECT_DOUBLE_EQ(config.esdf.weight_safe, 200.0);
-    EXPECT_DOUBLE_EQ(config.esdf.weight_comf, 2.0);
-    EXPECT_EQ(config.esdf.stride, 2);
-    EXPECT_DOUBLE_EQ(config.post_stage.epsilon_v, 0.03);
-    EXPECT_DOUBLE_EQ(config.post_stage.v_dwell, 0.08);
-    EXPECT_DOUBLE_EQ(config.post_stage.shift_delay, 0.5);
-    EXPECT_DOUBLE_EQ(config.post_stage.kappa_pad, 1.5);
-    EXPECT_DOUBLE_EQ(config.post_stage.seam_speed_tol, 0.03);
-    EXPECT_DOUBLE_EQ(config.post_stage.dwell_omega_tol, 0.2);
-    EXPECT_DOUBLE_EQ(config.post_stage.amplitude_check_tol, 0.08);
-    EXPECT_DOUBLE_EQ(config.post_stage.amplitude_check_rel_tol, 0.03);
-    EXPECT_DOUBLE_EQ(config.post_stage.control_overshoot_tol, 0.4);
-    EXPECT_DOUBLE_EQ(config.post_stage.stage_two_min_tracking_weight, 0.01);
+    EXPECT_DOUBLE_EQ(config.reference_sample_dist, 0.08);
+    EXPECT_DOUBLE_EQ(config.reference_dt, 0.2);
+    EXPECT_EQ(config.reference_shooting_interval, 10);
+    EXPECT_DOUBLE_EQ(config.reference_v_max, 2.0);
+    EXPECT_DOUBLE_EQ(config.reference_a_max, 1.2);
+    EXPECT_DOUBLE_EQ(config.reference_delta_max, 0.6);
+    EXPECT_DOUBLE_EQ(config.reference_omega_max, 0.7);
+    EXPECT_EQ(config.stage_two_max_outer_iterations, 5);
+    EXPECT_DOUBLE_EQ(config.gating_mu_initial, 20.0);
+    EXPECT_DOUBLE_EQ(config.gating_mu_max, 1e5);
+    EXPECT_DOUBLE_EQ(config.gating_tol, 0.05);
+    EXPECT_DOUBLE_EQ(config.inner_jerk_max, 2.5);
+    EXPECT_DOUBLE_EQ(config.inner_steer_accel_max, 1.3);
+    EXPECT_EQ(config.inner_max_iterations, 30);
+    EXPECT_DOUBLE_EQ(config.inner_cost_change_tol, 1e-8);
+    EXPECT_DOUBLE_EQ(config.inner_gradient_tol, 1e-7);
+    EXPECT_DOUBLE_EQ(config.inner_reg_initial, 1e-3);
+    EXPECT_DOUBLE_EQ(config.inner_reg_min, 1e-8);
+    EXPECT_DOUBLE_EQ(config.inner_reg_max, 1e8);
+    EXPECT_DOUBLE_EQ(config.inner_reg_increase, 5.0);
+    EXPECT_DOUBLE_EQ(config.inner_reg_decrease, 0.6);
+    EXPECT_DOUBLE_EQ(config.inner_armijo_gamma, 0.2);
+    EXPECT_DOUBLE_EQ(config.inner_backtrack_beta, 0.4);
+    EXPECT_EQ(config.inner_max_backtracks, 40);
+    EXPECT_DOUBLE_EQ(config.inner_merit_mu0, 50.0);
+    EXPECT_DOUBLE_EQ(config.inner_merit_mu_max, 1e3);
+    EXPECT_DOUBLE_EQ(config.inner_domain_guard_margin, 3.0);
+    EXPECT_DOUBLE_EQ(config.inner_merit_mu_al_ratio, 1e-3);
+    EXPECT_DOUBLE_EQ(config.inner_convergence_defect_tol, 2e-3);
+    EXPECT_EQ(config.outer_max_outer_iterations, 15);
+    EXPECT_DOUBLE_EQ(config.outer_terminal_position_tol, 0.08);
+    EXPECT_DOUBLE_EQ(config.outer_terminal_heading_tol_deg, 2.0);
+    EXPECT_DOUBLE_EQ(config.outer_inequality_tol, 0.05);
+    EXPECT_DOUBLE_EQ(config.outer_defect_tol, 1e-4);
+    EXPECT_DOUBLE_EQ(config.outer_mu_min, 10.0);
+    EXPECT_DOUBLE_EQ(config.outer_mu_max, 1e5);
+    EXPECT_DOUBLE_EQ(config.outer_first_round_mu, 2.0);
+    EXPECT_DOUBLE_EQ(config.outer_amplitude_mu_initial, 3.0);
+    EXPECT_DOUBLE_EQ(config.outer_epsilon_mu, 1e-3);
+    EXPECT_DOUBLE_EQ(config.outer_mu_gate_kappa, 0.8);
+    EXPECT_DOUBLE_EQ(config.outer_mu_growth_factor, 5.0);
+    EXPECT_DOUBLE_EQ(config.outer_anneal_gamma, 0.6);
+    EXPECT_DOUBLE_EQ(config.cost_weight_jerk, 2.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_steer_accel, 3.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_ref_base, 20.0);
+    EXPECT_DOUBLE_EQ(config.cost_weight_theta, 8.0);
+    EXPECT_DOUBLE_EQ(config.esdf_margin_safe, 0.03);
+    EXPECT_DOUBLE_EQ(config.esdf_margin_comf, 0.15);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_safe, 200.0);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_comf, 2.0);
+    EXPECT_EQ(config.esdf_stride, 2);
+    EXPECT_DOUBLE_EQ(config.post_epsilon_v, 0.03);
+    EXPECT_DOUBLE_EQ(config.post_v_dwell, 0.08);
+    EXPECT_DOUBLE_EQ(config.post_shift_delay, 0.5);
+    EXPECT_DOUBLE_EQ(config.post_kappa_pad, 1.5);
+    EXPECT_DOUBLE_EQ(config.post_seam_speed_tol, 0.03);
+    EXPECT_DOUBLE_EQ(config.post_dwell_omega_tol, 0.2);
+    EXPECT_DOUBLE_EQ(config.post_amplitude_check_tol, 0.08);
+    EXPECT_DOUBLE_EQ(config.post_amplitude_check_rel_tol, 0.03);
+    EXPECT_DOUBLE_EQ(config.post_control_overshoot_tol, 0.4);
+    EXPECT_DOUBLE_EQ(config.post_stage_two_min_tracking_weight, 0.01);
     EXPECT_TRUE(config.dual_candidate_select);
     // 幅值边界经 reference/inner 单一来源同步进全部消费方
-    EXPECT_DOUBLE_EQ(config.solver.cost.v_max, 2.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.a_max, 1.2);
-    EXPECT_DOUBLE_EQ(config.solver.cost.delta_max, 0.6);
-    EXPECT_DOUBLE_EQ(config.solver.cost.omega_max, 0.7);
-    EXPECT_DOUBLE_EQ(config.post_stage.omega_max, 0.7);
-    EXPECT_DOUBLE_EQ(config.post_stage.eta_max, 1.3);
+    EXPECT_DOUBLE_EQ(config.cost_v_max, 2.0);
+    EXPECT_DOUBLE_EQ(config.cost_a_max, 1.2);
+    EXPECT_DOUBLE_EQ(config.cost_delta_max, 0.6);
+    EXPECT_DOUBLE_EQ(config.cost_omega_max, 0.7);
+    EXPECT_DOUBLE_EQ(config.post_omega_max, 0.7);
+    EXPECT_DOUBLE_EQ(config.post_eta_max, 1.3);
 }
 
 // 测试场景：JSON 仅含 algorithm 路由字段（无任何 iLQR 专有节）。
@@ -269,29 +269,29 @@ TEST(iLQRConfigTest, LoadFromJsonKeepsDefaultsWhenAbsent) {
     iLQRConfig config;
     LoadiLQRConfigOverrides(details, &config);
     const iLQRConfig fresh;
-    EXPECT_DOUBLE_EQ(config.reference.sample_dist, fresh.reference.sample_dist);
-    EXPECT_DOUBLE_EQ(config.reference.dt, fresh.reference.dt);
-    EXPECT_EQ(config.reference.shooting_interval,
-              fresh.reference.shooting_interval);
-    EXPECT_DOUBLE_EQ(config.reference.v_max, fresh.reference.v_max);
-    EXPECT_DOUBLE_EQ(config.solver.inner.jerk_max, fresh.solver.inner.jerk_max);
-    EXPECT_EQ(config.solver.inner.max_iterations,
-              fresh.solver.inner.max_iterations);
-    EXPECT_EQ(config.solver.outer.max_outer_iterations,
-              fresh.solver.outer.max_outer_iterations);
-    EXPECT_DOUBLE_EQ(config.solver.outer.mu_min, fresh.solver.outer.mu_min);
-    EXPECT_DOUBLE_EQ(config.solver.outer.anneal_gamma,
-                     fresh.solver.outer.anneal_gamma);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_jerk,
-                     fresh.solver.cost.weight_jerk);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_ref_base,
-                     fresh.solver.cost.weight_ref_base);
-    EXPECT_DOUBLE_EQ(config.solver.cost.v_max, fresh.solver.cost.v_max);
-    EXPECT_DOUBLE_EQ(config.esdf.margin_safe, fresh.esdf.margin_safe);
-    EXPECT_EQ(config.esdf.stride, fresh.esdf.stride);
-    EXPECT_DOUBLE_EQ(config.post_stage.epsilon_v, fresh.post_stage.epsilon_v);
-    EXPECT_DOUBLE_EQ(config.post_stage.omega_max, fresh.post_stage.omega_max);
-    EXPECT_DOUBLE_EQ(config.post_stage.eta_max, fresh.post_stage.eta_max);
+    EXPECT_DOUBLE_EQ(config.reference_sample_dist, fresh.reference_sample_dist);
+    EXPECT_DOUBLE_EQ(config.reference_dt, fresh.reference_dt);
+    EXPECT_EQ(config.reference_shooting_interval,
+              fresh.reference_shooting_interval);
+    EXPECT_DOUBLE_EQ(config.reference_v_max, fresh.reference_v_max);
+    EXPECT_DOUBLE_EQ(config.inner_jerk_max, fresh.inner_jerk_max);
+    EXPECT_EQ(config.inner_max_iterations,
+              fresh.inner_max_iterations);
+    EXPECT_EQ(config.outer_max_outer_iterations,
+              fresh.outer_max_outer_iterations);
+    EXPECT_DOUBLE_EQ(config.outer_mu_min, fresh.outer_mu_min);
+    EXPECT_DOUBLE_EQ(config.outer_anneal_gamma,
+                     fresh.outer_anneal_gamma);
+    EXPECT_DOUBLE_EQ(config.cost_weight_jerk,
+                     fresh.cost_weight_jerk);
+    EXPECT_DOUBLE_EQ(config.cost_weight_ref_base,
+                     fresh.cost_weight_ref_base);
+    EXPECT_DOUBLE_EQ(config.cost_v_max, fresh.cost_v_max);
+    EXPECT_DOUBLE_EQ(config.esdf_margin_safe, fresh.esdf_margin_safe);
+    EXPECT_EQ(config.esdf_stride, fresh.esdf_stride);
+    EXPECT_DOUBLE_EQ(config.post_epsilon_v, fresh.post_epsilon_v);
+    EXPECT_DOUBLE_EQ(config.post_omega_max, fresh.post_omega_max);
+    EXPECT_DOUBLE_EQ(config.post_eta_max, fresh.post_eta_max);
 }
 
 // 测试场景：JSON 在 cost/post_stage 节写入同源幅值键（违反单一来源约定）。
@@ -310,12 +310,12 @@ TEST(iLQRConfigTest, LoadFromJsonIgnoresShadowedAmplitudeKeys) {
     })json");
     iLQRConfig config;
     LoadiLQRConfigOverrides(details, &config);
-    EXPECT_DOUBLE_EQ(config.solver.cost.v_max, 2.0);
-    EXPECT_DOUBLE_EQ(config.solver.cost.a_max, config.reference.a_max);
-    EXPECT_DOUBLE_EQ(config.solver.cost.delta_max, config.reference.delta_max);
-    EXPECT_DOUBLE_EQ(config.solver.cost.omega_max, 0.7);
-    EXPECT_DOUBLE_EQ(config.post_stage.omega_max, 0.7);
-    EXPECT_DOUBLE_EQ(config.post_stage.eta_max, 1.3);
+    EXPECT_DOUBLE_EQ(config.cost_v_max, 2.0);
+    EXPECT_DOUBLE_EQ(config.cost_a_max, config.reference_a_max);
+    EXPECT_DOUBLE_EQ(config.cost_delta_max, config.reference_delta_max);
+    EXPECT_DOUBLE_EQ(config.cost_omega_max, 0.7);
+    EXPECT_DOUBLE_EQ(config.post_omega_max, 0.7);
+    EXPECT_DOUBLE_EQ(config.post_eta_max, 1.3);
 }
 
 // 测试场景：空指针调用。
@@ -342,13 +342,13 @@ TEST(iLQRConfigTest, LoadFromJsonIgnoresUnknownFields) {
     })json");
     iLQRConfig config;
     LoadiLQRConfigOverrides(details, &config);
-    EXPECT_DOUBLE_EQ(config.reference.v_max, 2.0);
-    EXPECT_DOUBLE_EQ(config.esdf.weight_safe, 150.0);
+    EXPECT_DOUBLE_EQ(config.reference_v_max, 2.0);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_safe, 150.0);
     const iLQRConfig fresh;
-    EXPECT_DOUBLE_EQ(config.reference.dt, fresh.reference.dt);
-    EXPECT_DOUBLE_EQ(config.solver.cost.weight_jerk,
-                     fresh.solver.cost.weight_jerk);
-    EXPECT_DOUBLE_EQ(config.post_stage.epsilon_v, fresh.post_stage.epsilon_v);
+    EXPECT_DOUBLE_EQ(config.reference_dt, fresh.reference_dt);
+    EXPECT_DOUBLE_EQ(config.cost_weight_jerk,
+                     fresh.cost_weight_jerk);
+    EXPECT_DOUBLE_EQ(config.post_epsilon_v, fresh.post_epsilon_v);
 }
 
 // 测试场景：JSON 已知字段给错类型（如数值字段写成字符串）。

@@ -8,27 +8,27 @@
 namespace apa_post_processor {
 iLQREsdfConstraint::iLQREsdfConstraint(
     const ESDFMap& esdf_map, const VehicleFootprintModel& footprint_model,
-    iLQREsdfConstraintConfig config)
+    const iLQRConfig& config)
     : esdf_map_(esdf_map),
       config_(config),
       circle_local_centers_(vehicle_circle_geometry::ExtractLocalCircleCenters(
           footprint_model, CircleType::OUTER)),
       circle_radius_(footprint_model.getOuterRadius()) {
     // 配置错误会静默污染全部下游优化目标，必须在构造期显式拒绝
-    if (!std::isfinite(config_.margin_safe) || config_.margin_safe < 0.0) {
+    if (!std::isfinite(config_.esdf_margin_safe) || config_.esdf_margin_safe < 0.0) {
         throw std::invalid_argument("margin_safe 必须为非负有限值");
     }
-    if (!std::isfinite(config_.margin_comf) ||
-        config_.margin_comf <= config_.margin_safe) {
+    if (!std::isfinite(config_.esdf_margin_comf) ||
+        config_.esdf_margin_comf <= config_.esdf_margin_safe) {
         throw std::invalid_argument("margin_comf 必须大于 margin_safe");
     }
-    if (!std::isfinite(config_.weight_safe) || config_.weight_safe < 0.0) {
+    if (!std::isfinite(config_.esdf_weight_safe) || config_.esdf_weight_safe < 0.0) {
         throw std::invalid_argument("weight_safe 必须为非负有限值");
     }
-    if (!std::isfinite(config_.weight_comf) || config_.weight_comf < 0.0) {
+    if (!std::isfinite(config_.esdf_weight_comf) || config_.esdf_weight_comf < 0.0) {
         throw std::invalid_argument("weight_comf 必须为非负有限值");
     }
-    if (config_.stride < 1) {
+    if (config_.esdf_stride < 1) {
         throw std::invalid_argument("stride 必须 >= 1");
     }
     if (circle_local_centers_.empty()) {
@@ -56,20 +56,20 @@ iLQREsdfPoseCost iLQREsdfConstraint::evaluate(double x, double y,
         // 配置共同决定的安全值）；两个 margin 均不活跃的圆对代价/梯度/
         // Hessian 的贡献恒为零，梯度插值整体跳过，结果逐位不变
         const auto query = esdf_map_.getDistAndGradIfCloser(
-            cx, cy, circle_radius_ + config_.margin_comf);
+            cx, cy, circle_radius_ + config_.esdf_margin_comf);
         // 防御：ESDF 查询返回非有限值（当前实现整数距离场下不可达，属
         // 保守侵入兜底，梯度取零与逐圆全量路径的防御分支一致）
         if (!std::isfinite(query.dist)) {
-            const double c_safe = circle_radius_ + config_.margin_safe;
-            const double c_comf = circle_radius_ + config_.margin_comf;
+            const double c_safe = circle_radius_ + config_.esdf_margin_safe;
+            const double c_comf = circle_radius_ + config_.esdf_margin_comf;
             result.cost +=
-                config_.weight_safe * c_safe * c_safe * c_safe;
+                config_.esdf_weight_safe * c_safe * c_safe * c_safe;
             result.cost +=
-                config_.weight_comf * c_comf * c_comf * c_comf;
+                config_.esdf_weight_comf * c_comf * c_comf * c_comf;
             continue;
         }
-        const double c_safe = circle_radius_ + config_.margin_safe - query.dist;
-        const double c_comf = circle_radius_ + config_.margin_comf - query.dist;
+        const double c_safe = circle_radius_ + config_.esdf_margin_safe - query.dist;
+        const double c_comf = circle_radius_ + config_.esdf_margin_comf - query.dist;
         if (c_safe <= 0.0 && c_comf <= 0.0) {
             continue;
         }
@@ -83,18 +83,18 @@ iLQREsdfPoseCost iLQREsdfConstraint::evaluate(double x, double y,
             -(grad.x() * dcx_dtheta + grad.y() * dcy_dtheta));
         if (c_safe > 0.0) {
             result.cost +=
-                config_.weight_safe * c_safe * c_safe * c_safe;
-            grad3 += (3.0 * config_.weight_safe * c_safe * c_safe) *
+                config_.esdf_weight_safe * c_safe * c_safe * c_safe;
+            grad3 += (3.0 * config_.esdf_weight_safe * c_safe * c_safe) *
                      circle_grad;
-            hess3 += (6.0 * config_.weight_safe * c_safe) *
+            hess3 += (6.0 * config_.esdf_weight_safe * c_safe) *
                      (circle_grad * circle_grad.transpose());
         }
         if (c_comf > 0.0) {
             result.cost +=
-                config_.weight_comf * c_comf * c_comf * c_comf;
-            grad3 += (3.0 * config_.weight_comf * c_comf * c_comf) *
+                config_.esdf_weight_comf * c_comf * c_comf * c_comf;
+            grad3 += (3.0 * config_.esdf_weight_comf * c_comf * c_comf) *
                      circle_grad;
-            hess3 += (6.0 * config_.weight_comf * c_comf) *
+            hess3 += (6.0 * config_.esdf_weight_comf * c_comf) *
                      (circle_grad * circle_grad.transpose());
         }
     }
@@ -118,12 +118,12 @@ iLQREsdfCircleConstraint iLQREsdfConstraint::evaluateCircle(
     iLQREsdfCircleConstraint result;
     // 防御：ESDF 查询返回非有限值（当前实现整数距离场下不可达，属
     if (!std::isfinite(dist)) {
-        result.c_safe = circle_radius_ + config_.margin_safe;
-        result.c_comf = circle_radius_ + config_.margin_comf;
+        result.c_safe = circle_radius_ + config_.esdf_margin_safe;
+        result.c_comf = circle_radius_ + config_.esdf_margin_comf;
         return result;
     }
-    result.c_safe = circle_radius_ + config_.margin_safe - dist;
-    result.c_comf = circle_radius_ + config_.margin_comf - dist;
+    result.c_safe = circle_radius_ + config_.esdf_margin_safe - dist;
+    result.c_comf = circle_radius_ + config_.esdf_margin_comf - dist;
     // 圆心随 θ 旋转的几何链式法则：dP/dθ = dR/dθ·p_local；
     // ∂C/∂(x,y,θ) = −∇d 经圆心位置的链式反传
     const double dcx_dtheta = -sin_theta * lx - cos_theta * ly;

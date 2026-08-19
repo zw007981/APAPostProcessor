@@ -93,14 +93,14 @@ class AlOuterLoopTestAccess : public AlOuterLoop {
 // 第 r 轮为 γ^r 并被上限封顶，且首轮必为 1（冷启动数值行为不受影响）；
 // 增长率/上限小于 1（等于随轮次削弱避障，与机制意图相反）必须拒绝
 TEST(AlOuterLoopTest, EsdfScaleFollowsRoundScheduleAndClampsAtMax) {
-    AlOuterLoopTestAccess default_loop(AlOuterLoopConfig{}, iLQRCostConfig{});
+    AlOuterLoopTestAccess default_loop(iLQRConfig{});
     EXPECT_DOUBLE_EQ(default_loop.esdfScale(), 1.0);
     default_loop.round_ = 12;
     EXPECT_DOUBLE_EQ(default_loop.esdfScale(), 1.0);
-    AlOuterLoopConfig config;
-    config.esdf_scale_growth = 2.0;
-    config.esdf_scale_max = 16.0;
-    AlOuterLoopTestAccess loop(config, iLQRCostConfig{});
+    iLQRConfig config;
+    config.outer_esdf_scale_growth = 2.0;
+    config.outer_esdf_scale_max = 16.0;
+    AlOuterLoopTestAccess loop(config);
     // 首轮恒为 1：γ⁰ = 1，冷启动轮次与关闭态完全一致
     EXPECT_DOUBLE_EQ(loop.esdfScale(), 1.0);
     loop.round_ = 3;
@@ -111,16 +111,16 @@ TEST(AlOuterLoopTest, EsdfScaleFollowsRoundScheduleAndClampsAtMax) {
     loop.round_ = 30;
     EXPECT_DOUBLE_EQ(loop.esdfScale(), 16.0);
     for (const double growth : {0.5, -1.0}) {
-        AlOuterLoopConfig bad = config;
-        bad.esdf_scale_growth = growth;
-        EXPECT_THROW(AlOuterLoop(bad, iLQRCostConfig{}), std::invalid_argument);
+        iLQRConfig bad = config;
+        bad.outer_esdf_scale_growth = growth;
+        EXPECT_THROW(AlOuterLoop{bad}, std::invalid_argument);
     }
-    AlOuterLoopConfig bad_max = config;
-    bad_max.esdf_scale_max = 0.5;
-    EXPECT_THROW(AlOuterLoop(bad_max, iLQRCostConfig{}), std::invalid_argument);
-    AlOuterLoopConfig nonfinite = config;
-    nonfinite.esdf_scale_growth = std::numeric_limits<double>::infinity();
-    EXPECT_THROW(AlOuterLoop(nonfinite, iLQRCostConfig{}),
+    iLQRConfig bad_max = config;
+    bad_max.outer_esdf_scale_max = 0.5;
+    EXPECT_THROW(AlOuterLoop{bad_max}, std::invalid_argument);
+    iLQRConfig nonfinite = config;
+    nonfinite.outer_esdf_scale_growth = std::numeric_limits<double>::infinity();
+    EXPECT_THROW(AlOuterLoop{nonfinite},
                  std::invalid_argument);
 }
 
@@ -129,22 +129,22 @@ TEST(AlOuterLoopTest, EsdfScaleFollowsRoundScheduleAndClampsAtMax) {
 // 线性形态尺度为 δ_max；未登记的约束索引必须显式抛出（扩展约束
 // 维度时漏补尺度会静默按错误尺度归一化，属调用方逻辑错误）
 TEST(AlOuterLoopTest, AmplitudeScalePinnedAndRejectsUnknownIndex) {
-    const iLQRCostConfig cost;
+    const iLQRConfig cost;
     EXPECT_DOUBLE_EQ(
         AlOuterLoopTestAccess::AmplitudeScale(cost, ILQR_AMP_V),
-        2.0 * cost.v_max * cost.v_max);
+        2.0 * cost.cost_v_max * cost.cost_v_max);
     EXPECT_DOUBLE_EQ(
         AlOuterLoopTestAccess::AmplitudeScale(cost, ILQR_AMP_A),
-        2.0 * cost.a_max * cost.a_max);
+        2.0 * cost.cost_a_max * cost.cost_a_max);
     EXPECT_DOUBLE_EQ(
         AlOuterLoopTestAccess::AmplitudeScale(cost, ILQR_AMP_OMEGA),
-        2.0 * cost.omega_max * cost.omega_max);
+        2.0 * cost.cost_omega_max * cost.cost_omega_max);
     EXPECT_DOUBLE_EQ(
         AlOuterLoopTestAccess::AmplitudeScale(cost, ILQR_AMP_DELTA_POS),
-        cost.delta_max);
+        cost.cost_delta_max);
     EXPECT_DOUBLE_EQ(
         AlOuterLoopTestAccess::AmplitudeScale(cost, ILQR_AMP_DELTA_NEG),
-        cost.delta_max);
+        cost.cost_delta_max);
     EXPECT_THROW(AlOuterLoopTestAccess::AmplitudeScale(cost, -1),
                  std::logic_error);
     EXPECT_THROW(AlOuterLoopTestAccess::AmplitudeScale(
@@ -159,8 +159,8 @@ TEST(AlOuterLoopTest, AmplitudeScalePinnedAndRejectsUnknownIndex) {
 // 翻转点相对线性形态有 O(tol²)≈0.02% 的固有错位（平方项精确值的
 // 一阶近似），本测试的翻转检查点取 1.019/1.023 避开该错位带
 TEST(AlOuterLoopTest, InequalityTolIsUniformlyStrictAcrossQuantities) {
-    const iLQRCostConfig cost_config;
-    AlOuterLoop loop(AlOuterLoopConfig{}, cost_config);
+    const iLQRConfig cost_config;
+    AlOuterLoop loop(iLQRConfig{});
     auto poses = MakeLinePoses(2, 0.05);
     const auto reference = MakeReference(poses, {});
     const auto defects = MakeZeroDefects(2);
@@ -173,74 +173,74 @@ TEST(AlOuterLoopTest, InequalityTolIsUniformlyStrictAcrossQuantities) {
         return loop.checkTermination(loop.measure(reference, states, defects))
             .inequality_ok;
     };
-    const double omega_max = cost_config.omega_max;
-    const double delta_max = cost_config.delta_max;
+    const double omega_max = cost_config.cost_omega_max;
+    const double delta_max = cost_config.cost_delta_max;
     // 1.019× 上限：四个物理量全部通过
-    EXPECT_TRUE(measure_with(1.019 * cost_config.v_max, 0.0, 0.0, 0.0));
-    EXPECT_TRUE(measure_with(0.0, 1.019 * cost_config.a_max, 0.0, 0.0));
+    EXPECT_TRUE(measure_with(1.019 * cost_config.cost_v_max, 0.0, 0.0, 0.0));
+    EXPECT_TRUE(measure_with(0.0, 1.019 * cost_config.cost_a_max, 0.0, 0.0));
     EXPECT_TRUE(measure_with(0.0, 0.0, 1.019 * omega_max, 0.0));
     EXPECT_TRUE(measure_with(0.0, 0.0, 0.0, 1.019 * delta_max));
     // 1.023× 上限：四个物理量全部不通过（翻转点一致）
-    EXPECT_FALSE(measure_with(1.023 * cost_config.v_max, 0.0, 0.0, 0.0));
-    EXPECT_FALSE(measure_with(0.0, 1.023 * cost_config.a_max, 0.0, 0.0));
+    EXPECT_FALSE(measure_with(1.023 * cost_config.cost_v_max, 0.0, 0.0, 0.0));
+    EXPECT_FALSE(measure_with(0.0, 1.023 * cost_config.cost_a_max, 0.0, 0.0));
     EXPECT_FALSE(measure_with(0.0, 0.0, 1.023 * omega_max, 0.0));
     EXPECT_FALSE(measure_with(0.0, 0.0, 0.0, 1.023 * delta_max));
 }
 
 // 测试非法配置逐项被构造校验拒绝：迭代上限/容差/clip 区间/门控/退火
 // 参数必须为正且自洽，错误配置会静默污染全部外层调度，必须显式抛出
-TEST(AlOuterLoopConfigTest, InvalidConfigThrows) {
-    const iLQRCostConfig cost_config;
+TEST(iLQRConfigTest, InvalidConfigThrows) {
+    const iLQRConfig cost_config;
     // 合法基线：不应抛出
-    EXPECT_NO_THROW(AlOuterLoop(AlOuterLoopConfig{}, cost_config));
+    EXPECT_NO_THROW(AlOuterLoop(iLQRConfig{}));
     // 逐项变异：每项独立断言抛出 std::invalid_argument
-    AlOuterLoopConfig config;
-    config.max_outer_iterations = 0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.terminal_position_tol = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.terminal_heading_tol_deg = -1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.inequality_tol = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.defect_tol = -1e-3;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.mu_min = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.mu_min = 1e6;
-    config.mu_max = 1e2;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.first_round_mu = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.amplitude_mu_initial = -1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.epsilon_mu = -1e-4;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.mu_gate_kappa = 1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.mu_growth_factor = 1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.anneal_gamma = 0.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
-    config = AlOuterLoopConfig{};
-    config.anneal_gamma = 1.0;
-    EXPECT_THROW(AlOuterLoop(config, cost_config), std::invalid_argument);
+    iLQRConfig config;
+    config.outer_max_outer_iterations = 0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_terminal_position_tol = 0.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_terminal_heading_tol_deg = -1.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_inequality_tol = 0.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_defect_tol = -1e-3;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_mu_min = 0.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_mu_min = 1e6;
+    config.outer_mu_max = 1e2;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_first_round_mu = 0.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_amplitude_mu_initial = -1.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_epsilon_mu = -1e-4;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_mu_gate_kappa = 1.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_mu_growth_factor = 1.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_anneal_gamma = 0.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
+    config = iLQRConfig{};
+    config.outer_anneal_gamma = 1.0;
+    EXPECT_THROW(AlOuterLoop{config}, std::invalid_argument);
     // 代价配置提供幅值边界，同样必须为正有限
-    iLQRCostConfig bad_cost;
-    bad_cost.v_max = 0.0;
-    EXPECT_THROW(AlOuterLoop(AlOuterLoopConfig{}, bad_cost),
+    iLQRConfig bad_cost;
+    bad_cost.cost_v_max = 0.0;
+    EXPECT_THROW(AlOuterLoop{bad_cost},
                  std::invalid_argument);
 }
 
@@ -248,10 +248,10 @@ TEST(AlOuterLoopConfigTest, InvalidConfigThrows) {
 // 取 first_round_mu 弱启动、幅值罚权重取 amplitude_mu_initial 强启动
 // （物理边界越界从第 0 轮即被压回），尺寸布局与代价求值层契约一致
 TEST(AlOuterLoopTest, InitialMultipliersUseZeroLambdaAndFirstRoundMu) {
-    AlOuterLoopConfig config;
-    config.first_round_mu = 2.5;
-    config.amplitude_mu_initial = 300.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    iLQRConfig config;
+    config.outer_first_round_mu = 2.5;
+    config.outer_amplitude_mu_initial = 300.0;
+    AlOuterLoop loop(config);
     const std::size_t num_steps = 7;
     const auto multipliers = loop.makeInitialMultipliers(num_steps);
     ASSERT_EQ(
@@ -273,14 +273,19 @@ TEST(AlOuterLoopTest, InitialMultipliersUseZeroLambdaAndFirstRoundMu) {
 // wrap（跨 ±π 折回）、聚合量（最大违反度/双指标/联合范数/缺陷无穷范数）
 // 必须与代价求值层同一组约定，否则乘子更新与终止判据失配
 TEST(AlOuterLoopTest, MeasureComputesExactResidualsAndAggregates) {
-    AlOuterLoop loop(AlOuterLoopConfig{}, iLQRCostConfig{});
+    // 显式恢复组件独立默认幅值（ω_max=0.5/δ_max=0.55）：本测试锁定量测
+    // 公式与归一化尺度，与统一后的 iLQRConfig 默认（0.4/0.47728）解耦
+    iLQRConfig config;
+    config.cost_omega_max = 0.5;
+    config.cost_delta_max = 0.55;
+    AlOuterLoop loop(config);
     // 4 位姿（N=3）：终点目标 (0.15, 0, 0.1)
     auto poses = MakeLinePoses(4, 0.05);
     poses[3].theta = 0.1;
     const auto reference = MakeReference(poses, {});
     iLQRAlignedVec<iLQRState> states;
     states.reserve(4);
-    const double delta_max = iLQRCostConfig{}.delta_max;
+    const double delta_max = config.cost_delta_max;
     // k=0：v 超限 0.1 → g_v = 1.6²−1.5² = 0.31
     states.push_back(MakeState(0.0, 0.0, 0.0, 1.6, 0.0, 0.0, 0.0));
     // k=1：a 超限 → g_a = 1.2²−1.0² = 0.44；δ=0.7 → g_δ⁺=0.7−δ_max、
@@ -346,7 +351,7 @@ TEST(AlOuterLoopTest, MeasureComputesExactResidualsAndAggregates) {
 // 测试量测输入校验：状态/缺陷数量与参考位姿不一致时显式抛出，
 // 禁止静默产出错位的乘子更新
 TEST(AlOuterLoopTest, MeasureRejectsInconsistentSizes) {
-    AlOuterLoop loop(AlOuterLoopConfig{}, iLQRCostConfig{});
+    AlOuterLoop loop(iLQRConfig{});
     const auto reference = MakeReference(MakeLinePoses(4, 0.05), {});
     iLQRAlignedVec<iLQRState> states;
     states.push_back(iLQRState::Zero());
@@ -362,7 +367,7 @@ TEST(AlOuterLoopTest, MeasureRejectsInconsistentSizes) {
 // 语义），中间 maneuver 点 false 参与退火；maneuver 共享边界点归属相邻
 // 两段，按首/末段区间覆盖判定
 TEST(AlOuterLoopTest, AnnealExemptMaskCoversFirstAndLastManeuverOnly) {
-    AlOuterLoop loop(AlOuterLoopConfig{}, iLQRCostConfig{});
+    AlOuterLoop loop(iLQRConfig{});
     const auto reference =
         MakeReference(MakeLinePoses(31, 0.05),
                       {MakeManeuver(1, 0, 10), MakeManeuver(-1, 10, 20),
@@ -383,7 +388,7 @@ TEST(AlOuterLoopTest, AnnealExemptMaskCoversFirstAndLastManeuverOnly) {
 // 测试单 maneuver 路径整体豁免（无可融化的中间段，跟踪权重全程不衰减）；
 // 无 maneuver 元数据的参考（合成用例）不豁免任何点
 TEST(AlOuterLoopTest, AnnealExemptMaskSingleManeuverAllExempt) {
-    AlOuterLoop loop(AlOuterLoopConfig{}, iLQRCostConfig{});
+    AlOuterLoop loop(iLQRConfig{});
     const auto single =
         MakeReference(MakeLinePoses(31, 0.05), {MakeManeuver(1, 0, 30)});
     const auto mask_single = loop.makeAnnealExemptMask(single);
@@ -402,11 +407,11 @@ TEST(AlOuterLoopTest, AnnealExemptMaskSingleManeuverAllExempt) {
 // 测试跟踪权重退火调度：w_ref(r) = w_ref,0·γ^r，随 update 推进轮次逐轮
 // 几何衰减（豁免点不衰减由掩码保证，不在本用例范围）
 TEST(AlOuterLoopTest, TrackingWeightAnnealsGeometricallyWithRound) {
-    AlOuterLoopConfig config;
-    config.anneal_gamma = 0.5;
-    iLQRCostConfig cost_config;
-    cost_config.weight_ref_base = 10.0;
-    AlOuterLoop loop(config, cost_config);
+    iLQRConfig config;
+    config.outer_anneal_gamma = 0.5;
+    iLQRConfig cost_config;
+    cost_config.cost_weight_ref_base = 10.0;
+    AlOuterLoop loop(config);
     EXPECT_DOUBLE_EQ(loop.trackingWeight(), 10.0);
     const std::size_t num_steps = 1;
     auto multipliers = loop.makeInitialMultipliers(num_steps);
@@ -422,10 +427,10 @@ TEST(AlOuterLoopTest, TrackingWeightAnnealsGeometricallyWithRound) {
 // μ_max) 替换临时权重，乘子更新即以标定的 μ⁰ 执行；覆盖正常值/下界
 // clip/上界 clip/残差趋零防退化四种情形
 TEST(AlOuterLoopTest, FirstUpdateCalibratesAdaptiveMu) {
-    const iLQRCostConfig cost_config;
+    const iLQRConfig cost_config;
     // 正常值：J_s′=50、‖c‖²=0.01 → μ⁰ = 5000 ∈ [1e2, 1e6]
     {
-        AlOuterLoop loop(AlOuterLoopConfig{}, cost_config);
+        AlOuterLoop loop(iLQRConfig{});
         auto multipliers = loop.makeInitialMultipliers(1);
         loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
         EXPECT_DOUBLE_EQ(loop.calibratedMu(), 5000.0);
@@ -438,7 +443,7 @@ TEST(AlOuterLoopTest, FirstUpdateCalibratesAdaptiveMu) {
     }
     // 下界 clip：J_s′ 过小 → μ⁰ = μ_min = 100
     {
-        AlOuterLoop loop(AlOuterLoopConfig{}, cost_config);
+        AlOuterLoop loop(iLQRConfig{});
         auto multipliers = loop.makeInitialMultipliers(1);
         loop.update(MakeTerminalOnlySnapshot(0.1), 0.5, &multipliers);
         EXPECT_DOUBLE_EQ(loop.calibratedMu(), 100.0);
@@ -446,7 +451,7 @@ TEST(AlOuterLoopTest, FirstUpdateCalibratesAdaptiveMu) {
     }
     // 上界 clip：J_s′ 过大 → μ⁰ = μ_max = 1e6，增长后仍钉在 μ_max
     {
-        AlOuterLoop loop(AlOuterLoopConfig{}, cost_config);
+        AlOuterLoop loop(iLQRConfig{});
         auto multipliers = loop.makeInitialMultipliers(1);
         loop.update(MakeTerminalOnlySnapshot(0.1), 1e9, &multipliers);
         EXPECT_DOUBLE_EQ(loop.calibratedMu(), 1e6);
@@ -454,7 +459,7 @@ TEST(AlOuterLoopTest, FirstUpdateCalibratesAdaptiveMu) {
     }
     // 残差趋零：max(‖c‖², ε_μ) 防分母退化
     {
-        AlOuterLoop loop(AlOuterLoopConfig{}, cost_config);
+        AlOuterLoop loop(iLQRConfig{});
         auto multipliers = loop.makeInitialMultipliers(1);
         loop.update(MakeTerminalOnlySnapshot(0.0), 50.0, &multipliers);
         EXPECT_DOUBLE_EQ(loop.calibratedMu(), 50.0 / 1e-4);
@@ -465,11 +470,11 @@ TEST(AlOuterLoopTest, FirstUpdateCalibratesAdaptiveMu) {
 // λ ← max(0, λ+μg)（投影恒非负；g<0 且 λ=0 时保持不激活，λ>0 时随
 // 持续可行逐步回落到零）
 TEST(AlOuterLoopTest, MultiplierUpdatesFollowAltroRules) {
-    AlOuterLoopConfig config;
+    iLQRConfig config;
     // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
-    config.amplitude_mu_per_element = false;
-    config.amplitude_mu_initial = 1000.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    config.outer_amplitude_mu_per_element = false;
+    config.outer_amplitude_mu_initial = 1000.0;
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     AlConstraintSnapshot snapshot;
     snapshot.amplitude_g = Eigen::VectorXd::Zero(ILQR_AMPLITUDE_CONSTRAINT_DIM);
@@ -493,7 +498,7 @@ TEST(AlOuterLoopTest, MultiplierUpdatesFollowAltroRules) {
     EXPECT_DOUBLE_EQ(multipliers.amplitude_lambda(ILQR_AMP_A), 0.0);
     // 次轮：构造使已激活约束持续可行的快照——g_v 转负且幅值足以把 λ 压回
     // 零（投影钳制）；另一约束 λ 部分回落后仍保持非负
-    AlOuterLoop loop2(config, iLQRCostConfig{});
+    AlOuterLoop loop2(config);
     auto multipliers2 = loop2.makeInitialMultipliers(2);
     multipliers2.amplitude_lambda(ILQR_AMP_V) = 100.0;
     multipliers2.amplitude_lambda(ILQR_AMP_A) = 1.0;
@@ -518,12 +523,12 @@ TEST(AlOuterLoopTest, MultiplierUpdatesFollowAltroRules) {
 // 起仅当本轮违反度 > κ·上轮时才 μ ← min(φμ, μ_max)；充分下降轮次 μ
 // 不增长（计数器断言），避免盲目指数增长导致内层 Riccati 病态
 TEST(AlOuterLoopTest, MuGrowthIsGatedBySufficientDecrease) {
-    AlOuterLoopConfig config;
+    iLQRConfig config;
     // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
-    config.amplitude_mu_per_element = false;
-    config.mu_gate_kappa = 0.9;
-    config.amplitude_mu_initial = 1000.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    config.outer_amplitude_mu_per_element = false;
+    config.outer_mu_gate_kappa = 0.9;
+    config.outer_amplitude_mu_initial = 1000.0;
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     // 首轮：标定 μ⁰ = 200/1.0 = 200，标定轮不增长，计数 0
     loop.update(MakeTerminalOnlySnapshot(1.0), 200.0, &multipliers);
@@ -552,11 +557,11 @@ TEST(AlOuterLoopTest, MuGrowthIsGatedBySufficientDecrease) {
 // 时 μ_term 不动）——单点顽固的物理边界违反不得把终端罚权重一并
 // 推入病态，反之亦然
 TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
-    AlOuterLoopConfig config;
+    iLQRConfig config;
     // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
-    config.amplitude_mu_per_element = false;
-    config.amplitude_mu_initial = 1000.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    config.outer_amplitude_mu_per_element = false;
+    config.outer_amplitude_mu_initial = 1000.0;
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     // 首轮：标定（μ_term = 100/0.25 = 400），记录基线违反度
     AlConstraintSnapshot snapshot;
@@ -599,11 +604,11 @@ TEST(AlOuterLoopTest, MuGrowthGatesAreIndependentPerGroup) {
 // 反映本轮门控是否要求该组升级（阶段二提前退出判据消费）；标定轮不
 // 请求、充分下降轮清零、reset 后清零
 TEST(AlOuterLoopTest, GrowthRequestFlagsMatchGateDecisions) {
-    AlOuterLoopConfig config;
+    iLQRConfig config;
     // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
-    config.amplitude_mu_per_element = false;
-    config.amplitude_mu_initial = 1000.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    config.outer_amplitude_mu_per_element = false;
+    config.outer_amplitude_mu_initial = 1000.0;
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     // 首轮标定：只标定不增长，两组请求均为 false
     loop.update(MakeTerminalOnlySnapshot(1.0), 200.0, &multipliers);
@@ -625,10 +630,10 @@ TEST(AlOuterLoopTest, GrowthRequestFlagsMatchGateDecisions) {
 // 测试 μ 增长的 μ_max 封顶：接近上界时 min(φμ, μ_max) 钉在边界，
 // 罚权重不越过病态阈值
 TEST(AlOuterLoopTest, MuGrowthClippedAtMuMax) {
-    AlOuterLoopConfig config;
+    iLQRConfig config;
     // 显式锁定标量广播模式（生产默认已改逐元素，本用例覆盖标量语义）
-    config.amplitude_mu_per_element = false;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    config.outer_amplitude_mu_per_element = false;
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     // 标定 μ⁰ = clip(5e6/0.01, 1e2, 1e6) = 1e6（上界 clip），标定轮不增长
     loop.update(MakeTerminalOnlySnapshot(0.1), 5e6, &multipliers);
@@ -645,11 +650,11 @@ TEST(AlOuterLoopTest, MuGrowthClippedAtMuMax) {
 // 仅本元素违反未充分下降才提升（逐元素封顶全局 μ_max）；λ 更新按逐
 // 元素 μ_j 累积；muAmplitude 返回全元素最大值（病态条件驱动量）
 TEST(AlOuterLoopTest, PerElementGatingGrowsOnlyViolatingElements) {
-    AlOuterLoopConfig config;
-    config.amplitude_mu_per_element = true;
-    config.amplitude_mu_initial = 1.0;
-    config.mu_max = 100.0;  // 封顶验证：逐元素上限统一为全局 μ_max
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    iLQRConfig config;
+    config.outer_amplitude_mu_per_element = true;
+    config.outer_amplitude_mu_initial = 1.0;
+    config.outer_mu_max = 100.0;  // 封顶验证：逐元素上限统一为全局 μ_max
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     AlConstraintSnapshot snapshot;
     snapshot.amplitude_g =
@@ -686,12 +691,12 @@ TEST(AlOuterLoopTest, PerElementGatingGrowsOnlyViolatingElements) {
 // 测试联合终止判据：终点双指标 + 状态不等式违反度 + 缺陷范数三类
 // 分项任一不达标即不收敛；边界取等视为达标（≤ 语义）
 TEST(AlOuterLoopTest, TerminationCheckCombinesAllCriteria) {
-    AlOuterLoopConfig config;
-    config.terminal_position_tol = 0.05;
-    config.terminal_heading_tol_deg = 1.5;
-    config.inequality_tol = 1e-2;
-    config.defect_tol = 1e-3;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    iLQRConfig config;
+    config.outer_terminal_position_tol = 0.05;
+    config.outer_terminal_heading_tol_deg = 1.5;
+    config.outer_inequality_tol = 1e-2;
+    config.outer_defect_tol = 1e-3;
+    AlOuterLoop loop(config);
     AlConstraintSnapshot ok;
     const auto check_ok = loop.checkTermination(ok);
     EXPECT_TRUE(check_ok.terminal_ok);
@@ -729,18 +734,18 @@ TEST(AlOuterLoopTest, TerminationCheckCombinesAllCriteria) {
 // 测试调度状态复位：同一实例多次求解复用时，reset 清空轮次/违反度
 // 历史/计数器/标定标志，下一次 update 重新执行首轮标定与无条件增长
 TEST(AlOuterLoopTest, ResetRestoresInitialSchedulingState) {
-    AlOuterLoopConfig config;
-    config.first_round_mu = 1.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    iLQRConfig config;
+    config.outer_first_round_mu = 1.0;
+    AlOuterLoop loop(config);
     auto multipliers = loop.makeInitialMultipliers(1);
     loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers);
     ASSERT_EQ(loop.round(), 1);
     ASSERT_EQ(loop.mu_increase_count(), 0);
-    ASSERT_NE(loop.mu(), config.first_round_mu);
+    ASSERT_NE(loop.mu(), config.outer_first_round_mu);
     loop.reset();
     EXPECT_EQ(loop.round(), 0);
     EXPECT_EQ(loop.mu_increase_count(), 0);
-    EXPECT_DOUBLE_EQ(loop.mu(), config.first_round_mu);
+    EXPECT_DOUBLE_EQ(loop.mu(), config.outer_first_round_mu);
     // 复位后首轮重新标定（calibratedMu 随之刷新；标定轮不增长）
     loop.update(MakeTerminalOnlySnapshot(0.1), 200.0, &multipliers);
     EXPECT_DOUBLE_EQ(loop.calibratedMu(), 20000.0);
@@ -751,7 +756,7 @@ TEST(AlOuterLoopTest, ResetRestoresInitialSchedulingState) {
 // 测试乘子尺寸契约：update 对尺寸不符的乘子状态显式抛出，
 // 禁止错位更新污染下一轮内层
 TEST(AlOuterLoopTest, UpdateRejectsMismatchedMultiplierSizes) {
-    AlOuterLoop loop(AlOuterLoopConfig{}, iLQRCostConfig{});
+    AlOuterLoop loop(iLQRConfig{});
     auto multipliers = loop.makeInitialMultipliers(1);
     multipliers.amplitude_lambda.resize(3);
     EXPECT_THROW(loop.update(MakeTerminalOnlySnapshot(0.1), 50.0, &multipliers),
@@ -762,9 +767,9 @@ TEST(AlOuterLoopTest, UpdateRejectsMismatchedMultiplierSizes) {
 // 乘子按 5 元素周期布局，尺寸或起算值错位会静默改变全部约束的硬化速度。
 // 预期行为：每个分量都等于配置的幅值初始罚权重
 TEST(AlOuterLoopTest, MakeInitialMultipliersBroadcastsAmplitudeMu) {
-    AlOuterLoopConfig config;
-    config.amplitude_mu_initial = 7.0;
-    AlOuterLoop loop(config, iLQRCostConfig{});
+    iLQRConfig config;
+    config.outer_amplitude_mu_initial = 7.0;
+    AlOuterLoop loop(config);
     const auto multipliers = loop.makeInitialMultipliers(3);
     ASSERT_EQ(multipliers.amplitude_mu.size(),
               3 * ILQR_AMPLITUDE_CONSTRAINT_DIM);

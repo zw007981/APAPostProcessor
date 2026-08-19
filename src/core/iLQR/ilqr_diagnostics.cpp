@@ -71,7 +71,7 @@ double iLQRDiagnostics::MeasureIntrusion(
 }
 
 void iLQRDiagnostics::LogWorstAmplitudeViolation(
-    const iLQRAlignedVec<iLQRState>& states, const iLQRCostConfig& cost) {
+    const iLQRAlignedVec<iLQRState>& states, const iLQRConfig& config) {
     double worst_violation = 0.0;
     std::size_t worst_index = 0;
     std::string worst_name;
@@ -79,12 +79,12 @@ void iLQRDiagnostics::LogWorstAmplitudeViolation(
     for (std::size_t k = 0; k < states.size(); ++k) {
         const auto& x = states[k];
         const std::array<std::pair<const char*, double>, 5> checks{{
-            {"v", x(ILQR_IDX_V) * x(ILQR_IDX_V) - cost.v_max * cost.v_max},
-            {"a", x(ILQR_IDX_A) * x(ILQR_IDX_A) - cost.a_max * cost.a_max},
+            {"v", x(ILQR_IDX_V) * x(ILQR_IDX_V) - config.cost_v_max * config.cost_v_max},
+            {"a", x(ILQR_IDX_A) * x(ILQR_IDX_A) - config.cost_a_max * config.cost_a_max},
             {"omega", x(ILQR_IDX_OMEGA) * x(ILQR_IDX_OMEGA) -
-                          cost.omega_max * cost.omega_max},
-            {"delta+", x(ILQR_IDX_DELTA) - cost.delta_max},
-            {"delta-", -x(ILQR_IDX_DELTA) - cost.delta_max},
+                          config.cost_omega_max * config.cost_omega_max},
+            {"delta+", x(ILQR_IDX_DELTA) - config.cost_delta_max},
+            {"delta-", -x(ILQR_IDX_DELTA) - config.cost_delta_max},
         }};
         for (const auto& [name, g] : checks) {
             if (g > worst_violation) {
@@ -146,7 +146,7 @@ void iLQRDiagnostics::LogStageOneReport(
                 round.max_amplitude_violation, round.defect_norm_inf,
                 static_cast<int>(round.inner_status), round.inner_iterations);
         }
-        LogWorstAmplitudeViolation(stage_one.states, config.solver.cost);
+        LogWorstAmplitudeViolation(stage_one.states, config);
     }
 }
 

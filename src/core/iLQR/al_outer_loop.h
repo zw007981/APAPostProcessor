@@ -7,47 +7,11 @@
 #include <stdexcept>
 #include <vector>
 
+#include "ilqr_config.h"
 #include "ilqr_cost.h"
 #include "ilqr_reference_builder.h"
 
 namespace apa_post_processor {
-// AL 外层调度参数：乘子更新、退火、终止判据（默认值见设计文档 2.5 节）
-struct AlOuterLoopConfig {
-    // 外层迭代上限
-    int max_outer_iterations{20};
-    // 终点位置容差 (m)
-    double terminal_position_tol{0.05};
-    // 终点朝向容差 (deg)
-    double terminal_heading_tol_deg{1.5};
-    // 归一化不等式的工程容差 0.021：对齐 δ 线性形态 0.01 rad 判决口径
-    double inequality_tol{0.021};
-    // 打靶缺陷容差
-    double defect_tol{1e-3};
-    // 罚权重下界
-    double mu_min{1e2};
-    // 罚权重上界
-    double mu_max{1e6};
-    // 首轮罚权重（弱启动；首轮收敛后即被 μ⁰ 标定替换）
-    double first_round_mu{1.0};
-    // 幅值不等式初始罚权重
-    double amplitude_mu_initial{1.0};
-    // true=阶段一逐元素门控：仅对顽固违反元素加压，其余保持轻量
-    bool amplitude_mu_per_element{true};
-    // 阶段二逐元素门控开关
-    bool amplitude_mu_per_element_stage_two{false};
-    // μ⁰ 标定小量 ε_μ
-    double epsilon_mu{1e-4};
-    // 充分下降门控 κ：本轮违反度 > κ·上轮才升 μ
-    double mu_gate_kappa{0.9};
-    // 罚权重增长倍率 φ
-    double mu_growth_factor{10.0};
-    // 退火率 γ
-    double anneal_gamma{0.5};
-    // ESDF 逐轮量级调度：与 AL 罚权重同步增长，避免软代价被逐轮增长的 μ 淹没
-    double esdf_scale_growth{1.0};
-    // ESDF 逐轮因子上限
-    double esdf_scale_max{1.0};
-};
 // 约束残差快照：λ 更新消费原始残差，聚合违反度一律归一化（两类量纲不可混用）
 struct AlConstraintSnapshot {
     // 原始物理量纲，供 λ 更新
@@ -82,7 +46,7 @@ struct AlTerminationCheck {
 class AlOuterLoop {
    public:
     // 构造时校验调度参数合法性（容差/罚权重区间/增长退火参数）
-    AlOuterLoop(AlOuterLoopConfig config, iLQRCostConfig cost_config);
+    AlOuterLoop(const iLQRConfig& config);
     // 当前外层轮次（从 0 起）
     int round() const { return round_; }
     // 当前轮次的几何跟踪权重 w_ref(r) = w_ref,0·γ^r
@@ -125,18 +89,18 @@ class AlOuterLoop {
     }
     // 归一化尺度：v²/a²/ω² 除以 2×上限²，δ 除以上限——同 inequality_tol
     // 对各量一视同仁
-    static constexpr double AmplitudeScale(const iLQRCostConfig& cost,
+    static constexpr double AmplitudeScale(const iLQRConfig& config,
                                            int constraint_index) {
         switch (constraint_index) {
             case ILQR_AMP_V:
-                return 2.0 * cost.v_max * cost.v_max;
+                return 2.0 * config.cost_v_max * config.cost_v_max;
             case ILQR_AMP_A:
-                return 2.0 * cost.a_max * cost.a_max;
+                return 2.0 * config.cost_a_max * config.cost_a_max;
             case ILQR_AMP_OMEGA:
-                return 2.0 * cost.omega_max * cost.omega_max;
+                return 2.0 * config.cost_omega_max * config.cost_omega_max;
             case ILQR_AMP_DELTA_POS:
             case ILQR_AMP_DELTA_NEG:
-                return cost.delta_max;
+                return config.cost_delta_max;
             default:
                 throw std::logic_error(
                     "AlOuterLoop: 未登记的幅值约束索引（扩展约束维度时"
@@ -146,9 +110,7 @@ class AlOuterLoop {
 
    protected:
     // 配置
-    AlOuterLoopConfig config_;
-    // 代价配置
-    iLQRCostConfig cost_config_;
+    iLQRConfig config_;
     std::array<double, ILQR_AMPLITUDE_CONSTRAINT_DIM> amplitude_scales_{};
     // 当前外层轮次
     int round_{0};

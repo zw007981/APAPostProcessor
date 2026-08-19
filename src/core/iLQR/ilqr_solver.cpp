@@ -41,11 +41,11 @@ iLQRSolverResult iLQRSolver::optimizeSinglePass(
             // 0) RS
             // 换挡点短接（默认关闭）：唯一能突破"换挡点由前端钉死"的几何前处理
             Path solver_input = init_path;
-            if (config.rs_shortcut.cap_ratio > 0.0) {
+            if (config.rs_cap_ratio > 0.0) {
                 const Path shortcut = ShortcutShiftPoints(
                     solver_input, esdf_map_, footprint_model_,
-                    vehicle_params_.wheelbase, config.reference.delta_max,
-                    config.rs_shortcut);
+                    vehicle_params_.wheelbase, config.reference_delta_max,
+                    config);
                 LOG_FMT_INFO(
                     "iLQR RS shortcut: maneuvers {} -> {}, length {:.3f} -> "
                     "{:.3f}",
@@ -55,27 +55,27 @@ iLQRSolverResult iLQRSolver::optimizeSinglePass(
             }
 
             // 1) 前端参考构建：等弧长重采样 + 初值提取 + 打靶节点布设
-            const iLQRReferenceBuilder reference_builder(config.reference,
+            const iLQRReferenceBuilder reference_builder(config,
                                                         vehicle_params_);
             iLQRReference reference = reference_builder.build(solver_input);
 
             // 2) 求解组件装配：ESDF 约束按配置缓存（外圆圆心提取有非平凡开销）
             const bool esdf_config_changed =
                 !esdf_cache_ ||
-                last_esdf_config_.margin_safe != config.esdf.margin_safe ||
-                last_esdf_config_.margin_comf != config.esdf.margin_comf ||
-                last_esdf_config_.weight_safe != config.esdf.weight_safe ||
-                last_esdf_config_.weight_comf != config.esdf.weight_comf ||
-                last_esdf_config_.stride != config.esdf.stride;
+                last_esdf_config_.esdf_margin_safe != config.esdf_margin_safe ||
+                last_esdf_config_.esdf_margin_comf != config.esdf_margin_comf ||
+                last_esdf_config_.esdf_weight_safe != config.esdf_weight_safe ||
+                last_esdf_config_.esdf_weight_comf != config.esdf_weight_comf ||
+                last_esdf_config_.esdf_stride != config.esdf_stride;
             if (esdf_config_changed) {
                 esdf_cache_ = std::make_unique<iLQREsdfConstraint>(
-                    esdf_map_, footprint_model_, config.esdf);
-                last_esdf_config_ = config.esdf;
+                    esdf_map_, footprint_model_, config);
+                last_esdf_config_ = config;
             }
             const BicycleDynamics dynamics(vehicle_params_.wheelbase);
-            const iLQRCostEvaluator cost_evaluator(config.solver.cost,
+            const iLQRCostEvaluator cost_evaluator(config,
                                                   esdf_cache_.get());
-            ApaILQRSolver solver(config.solver, &dynamics, &cost_evaluator);
+            ApaILQRSolver solver(config, &dynamics, &cost_evaluator);
 
             // 3) 阶段一全局软化求解（任何出口均带最后可用轨迹，anytime 性质）
             ApaILQRStageOneResult stage_one = solver.solveStageOne(reference);
@@ -85,8 +85,8 @@ iLQRSolverResult iLQRSolver::optimizeSinglePass(
             // 4) 后处理与阶段二门控精化：游程分析/修剪/重解/驻留/校验
             const auto& goal_pt = init_path.back();
             const TrajectoryPoint goal(goal_pt.x, goal_pt.y, goal_pt.theta);
-            iLQRPostStage post_stage(config.post_stage, &reference_builder,
-                                    &solver, vehicle_params_);
+            iLQRPostStage post_stage(config, &reference_builder, &solver,
+                                    vehicle_params_);
             auto post = post_stage.run(init_path, reference, stage_one, goal,
                                        esdf_map_, footprint_model_);
             iLQRDiagnostics::LogPostStageReport(post, stage_one, esdf_map_);

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -10,6 +12,7 @@
 #include "core/iLQR/ilqr_reference_builder.h"
 #include "core/iLQR/esdf_constraint.h"
 #include "core/NMPC/vehicle_circle_geometry.h"
+#include "core/post_processor.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
 #include "util/constants.h"
@@ -53,7 +56,7 @@ Path BuildXPolyline(const std::vector<double>& segments) {
 // 由 Path 构建阶段一前端数据（默认构建配置：0.05 m 重采样、dt=0.1 s、
 // 打靶间隔 25 步、盒约束边界同参数表）
 iLQRReference BuildReference(const Path& path) {
-    return iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+    return iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
         .build(path);
 }
 
@@ -62,9 +65,12 @@ iLQRReference BuildReference(const Path& path) {
 // 数个量级的罚权重，AL 首轮过冲瞬变会把内层直接淹死；合成场景把 clip
 // 下限调低到 1.0（真实数据集 J_s′/‖c‖² 量级在 1e2 以上、不触及下限，
 // 生产默认配置不受此覆写影响）
-ApaILQRSolverConfig MakeSyntheticConfig() {
-    ApaILQRSolverConfig config;
-    config.outer.mu_min = 1.0;
+iLQRConfig MakeSyntheticConfig() {
+    iLQRConfig config;
+    config.outer_mu_min = 1.0;
+    // 组件机制测试显式隔离：这些用例验证的是 AL/门控/阶段二机制本身，
+    // 与 ALTRO 虚拟控制正交，统一关闭避免默认值变更改变机制语义
+    config.inner_use_virtual_control = false;
     return config;
 }
 
@@ -72,9 +78,9 @@ ApaILQRSolverConfig MakeSyntheticConfig() {
 // 无地图开阔场景），返回完整求解输出
 ApaILQRStageOneResult SolveStageOne(
     const iLQRReference& reference, const iLQREsdfConstraint* esdf_constraint,
-    const ApaILQRSolverConfig& config = MakeSyntheticConfig()) {
+    const iLQRConfig& config = MakeSyntheticConfig()) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator cost_evaluator(config.cost, esdf_constraint);
+    const iLQRCostEvaluator cost_evaluator(config, esdf_constraint);
     ApaILQRSolver solver(config, &dynamics, &cost_evaluator);
     return solver.solveStageOne(reference);
 }
@@ -154,9 +160,9 @@ double MaxCollisionDepth(const iLQRAlignedVec<iLQRState>& states,
 // 测试编排器输入校验：参考位姿不足两个、初值尺寸不符、动力学/求值层
 // 为空指针等契约违例必须显式抛出，禁止带着畸形问题进入求解循环
 TEST(ApaILQRSolverTest, InvalidInputThrows) {
-    const ApaILQRSolverConfig config;
+    const iLQRConfig config;
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator cost_evaluator(config.cost, nullptr);
+    const iLQRCostEvaluator cost_evaluator(config, nullptr);
     // 空指针构造拒绝
     EXPECT_THROW(ApaILQRSolver(config, nullptr, &cost_evaluator),
                  std::invalid_argument);
@@ -265,11 +271,14 @@ TEST(ApaILQRSolverTest, UsefulManeuverSurvivesGlobalSoftening) {
         << " ineq=" << result.report.max_amplitude_violation
         << " defect=" << result.report.defect_norm_inf;
     EXPECT_TRUE(IsTrajectoryFinite(result));
-    // 换向保留：min v 显著为负，带滞回符号游程为 3（前进→倒退→前进）
+    // 换向保留：min v 显著为负、带滞回符号游程 ≥3（前进→倒退→前进，倒退段
+    // 承载终点对齐语义，属不可融化部分）。具体游程数随 ESDF 舒适权重微变：
+    // w_comf=1 时实测 3，w_comf=10 时实测 4（更强避障惩罚下多出一段短机动），
+    // 故断言不变式而非精确拓扑
     const double min_v = MinVelocity(result.states);
     const int sign_runs = CountVelocitySignRuns(result.states, 0.02);
     EXPECT_LT(min_v, -0.1) << "min_v = " << min_v;
-    EXPECT_EQ(sign_runs, 3) << "min_v = " << min_v;
+    EXPECT_GE(sign_runs, 3) << "min_v = " << min_v;
     // 碰撞抽检（质量门 0.02 m）与 ESDF 生效证据（前向峰值被墙压回）
     const double max_depth =
         MaxCollisionDepth(result.states, esdf_map, footprint_model);
@@ -316,8 +325,8 @@ TEST(ApaILQRSolverTest, StageOneWarmStartReconvergesQuickly) {
     const auto cold = SolveStageOne(reference, nullptr);
     ASSERT_EQ(cold.report.status, ApaILQRStatus::CONVERGED);
     const BicycleDynamics dynamics(kWheelbase);
-    const ApaILQRSolverConfig config = MakeSyntheticConfig();
-    const iLQRCostEvaluator evaluator(config.cost, nullptr);
+    const iLQRConfig config = MakeSyntheticConfig();
+    const iLQRCostEvaluator evaluator(config, nullptr);
     ApaILQRSolver warm_solver(config, &dynamics, &evaluator);
     const auto warm =
         warm_solver.solveStageOne(reference, cold.states, cold.controls);
@@ -348,7 +357,7 @@ TEST(ApaILQRSolverTest, InnerMaxIterationsIsNotFatal) {
     const Path path = BuildXPolyline({0.0, 3.0});
     const iLQRReference reference = BuildReference(path);
     auto config = MakeSyntheticConfig();
-    config.inner.max_iterations = 1;
+    config.inner_max_iterations = 1;
     const auto result = SolveStageOne(reference, nullptr, config);
     // 外层持续推进：状态码只能是收敛或外层耗尽，绝不为内层失败
     EXPECT_TRUE(result.report.status == ApaILQRStatus::CONVERGED ||
@@ -407,11 +416,11 @@ TEST(ApaILQRSolverTest, InnerOverflowTriggersColdRestartOnce) {
         state.setZero();
     }
     auto config = MakeSyntheticConfig();
-    config.cost.weight_ref_base = 1e6;
-    config.inner.armijo_gamma = 0.9;
-    config.inner.max_backtracks = 1;
-    config.inner.reg_initial = 1e-3;
-    config.inner.reg_max = 1e-3;
+    config.cost_weight_ref_base = 1e6;
+    config.inner_armijo_gamma = 0.9;
+    config.inner_max_backtracks = 1;
+    config.inner_reg_initial = 1e-3;
+    config.inner_reg_max = 1e-3;
     const auto result = SolveStageOne(reference, nullptr, config);
     EXPECT_EQ(result.report.status, ApaILQRStatus::INNER_SOLVER_FAILED);
     EXPECT_EQ(result.report.inner_restarts, 1);
@@ -440,7 +449,14 @@ TEST(ApaILQRSolverTest, InfeasibleTerminalHeadingFailsWithDiagnostics) {
     }
     path.finalize();
     const iLQRReference reference = BuildReference(path);
-    const auto result = SolveStageOne(reference, nullptr);
+    // 显式恢复组件独立默认幅值（δ_max=0.55/ω_max=0.5）：本测试锁定
+    // 「几何不可行 → 外层迭代后失败且 head_err 大」的出口语义；统一后的
+    // iLQRConfig 默认（0.4/0.47728）会让内层第 0 轮直接病态失败、
+    // head_err 停留在初始值 0，偏离本测试意图
+    iLQRConfig config = MakeSyntheticConfig();
+    config.cost_delta_max = 0.55;
+    config.cost_omega_max = 0.5;
+    const auto result = SolveStageOne(reference, nullptr, config);
     EXPECT_TRUE(result.report.status == ApaILQRStatus::MAX_OUTER_ITERATIONS ||
                 result.report.status == ApaILQRStatus::INNER_SOLVER_FAILED)
         << "status=" << static_cast<int>(result.report.status)
@@ -460,10 +476,13 @@ TEST(ApaILQRSolverTest, InfeasibleTerminalHeadingFailsWithDiagnostics) {
               << std::endl;
 }
 
-// 真实数据集冒烟：data/mid_park/data3.json 端到端跑通阶段一
-// （前端构建 → AL 外层 + MS-iLQR 内层全链路），解通过碰撞抽检
-// （外圆 ESDF 间隙 ≥ −0.02 m 质量门），轨迹完整有限且联合判据收敛。
-// 注意：本用例为重型端到端测试（N=492、8 轮外层 × 数十次内层迭代
+// 真实数据集冒烟：data/mid_park/data3.json 镜像生产路径跑通阶段一
+// （RS 换挡点短接 → 前端构建 → AL 外层 + MS-iLQR 内层全链路），解通过
+// 碰撞抽检（外圆 ESDF 间隙 ≥ −0.02 m 质量门），轨迹完整有限且联合判据
+// 收敛。输入与配置均与生产一致：加载 data/ilqr_config.json 覆盖项并按
+// 车辆真值钳制幅值边界；生产权重（w_comf=10）下原始路径直解会内层病态
+// 失败，必须先做 RS 短接（9→6 段、长度 24.582→21.131m）才可解。
+// 注意：本用例为重型端到端测试（N≈460、十余轮外层 × 数十次内层迭代
 // 含 ESDF 求值），Debug 构建下约 50 s；如需快速反馈可用
 // --gtest_filter 排除
 TEST(ApaILQRSolverTest, RealDatasetStageOneSmoke) {
@@ -477,14 +496,31 @@ TEST(ApaILQRSolverTest, RealDatasetStageOneSmoke) {
     const GridMap grid_map = GridMap::FromProto(request.environment());
     const ESDFMap esdf_map(grid_map);
     const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 2);
-    const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
+    // 生产配置：加载 data/ilqr_config.json 覆盖项后按车辆真值收紧幅值边界
+    // （与 iLQRSolver::optimizeSinglePass 的装配步骤一致）
+    nlohmann::json details;
+    ASSERT_EQ(DataLoader::LoadJsonFile("data/ilqr_config.json", details),
+              LoadResult::SUCCESS);
+    iLQRConfig config;
+    LoadiLQRConfigOverrides(details, &config);
+    config.clampToVehicleParams(vehicle_params);
+    // RS 换挡点短接（镜像生产步骤 0）：data3 原始路径在生产权重下阶段一
+    // 直解会内层病态失败（INNER_SOLVER_FAILED），短接后的初始轨迹才可解
+    Path solver_input = init_path;
+    if (config.rs_cap_ratio > 0.0) {
+        solver_input = ShortcutShiftPoints(
+            init_path, esdf_map, footprint_model, vehicle_params.wheelbase,
+            config.reference_delta_max, config);
+    }
     // 参考构建与求解使用数据集自带的车辆参数（轴距进入动力学反解）
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, vehicle_params)
-            .build(init_path);
-    const ApaILQRSolverConfig config;
+        iLQRReferenceBuilder(config, vehicle_params)
+            .build(solver_input);
+    const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model,
+                                             config);
     const BicycleDynamics dynamics(vehicle_params.wheelbase);
-    const iLQRCostEvaluator cost_evaluator(config.cost, &esdf_constraint);
+    const iLQRCostEvaluator cost_evaluator(config,
+                                           &esdf_constraint);
     ApaILQRSolver solver(config, &dynamics, &cost_evaluator);
     const auto result = solver.solveStageOne(reference);
     EXPECT_EQ(result.report.status, ApaILQRStatus::CONVERGED)
@@ -526,13 +562,13 @@ TEST(ApaILQRSolverTest, ProbeKappaRound0Iterations) {
     const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 2);
     const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, vehicle_params)
+        iLQRReferenceBuilder(iLQRConfig{}, vehicle_params)
             .build(init_path);
     for (const double eta_box : {1.0, 0.26}) {
-        ApaILQRSolverConfig config;
-        config.inner.steer_accel_max = eta_box;
+        iLQRConfig config;
+        config.inner_steer_accel_max = eta_box;
         const BicycleDynamics dynamics(vehicle_params.wheelbase);
-        const iLQRCostEvaluator cost_evaluator(config.cost, &esdf_constraint);
+        const iLQRCostEvaluator cost_evaluator(config, &esdf_constraint);
         ApaILQRSolver solver(config, &dynamics, &cost_evaluator);
         const auto result = solver.solveStageOne(reference);
         std::printf("=== eta_box=%.2f status=%d outer=%d\n", eta_box,

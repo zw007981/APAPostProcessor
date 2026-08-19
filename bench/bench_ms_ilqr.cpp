@@ -90,9 +90,9 @@ void PrepareSolver(MsIlqrBenchAccess* solver, const BenchProblem& problem) {
 // 单轮缺陷感知回推（N=399，含逐步 box-QP，活动集沿回推顺序热启动）
 void BM_MsIlqrBackwardPass(benchmark::State& state) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const BenchProblem problem = MakeBenchProblem();
-    MsIlqrBenchAccess solver(MsIlqrConfig{}, &dynamics, &evaluator);
+    MsIlqrBenchAccess solver(iLQRConfig{}, &dynamics, &evaluator);
     PrepareSolver(&solver, problem);
     for (auto _ : state) {
         bool success = solver.backwardPass();
@@ -108,9 +108,9 @@ BENCHMARK(BM_MsIlqrBackwardPass);
 // 单次线性 rollout（方向传播 + EC₁/EC₂ 汇总，每轮迭代恰好一次）
 void BM_MsIlqrLinearRollout(benchmark::State& state) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const BenchProblem problem = MakeBenchProblem();
-    MsIlqrBenchAccess solver(MsIlqrConfig{}, &dynamics, &evaluator);
+    MsIlqrBenchAccess solver(iLQRConfig{}, &dynamics, &evaluator);
     PrepareSolver(&solver, problem);
     bool success = solver.backwardPass();
     benchmark::DoNotOptimize(success);
@@ -124,9 +124,9 @@ BENCHMARK(BM_MsIlqrLinearRollout);
 // 线搜索逐候选 α 调用）
 void BM_MsIlqrNonlinearRollout(benchmark::State& state) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const BenchProblem problem = MakeBenchProblem();
-    MsIlqrBenchAccess solver(MsIlqrConfig{}, &dynamics, &evaluator);
+    MsIlqrBenchAccess solver(iLQRConfig{}, &dynamics, &evaluator);
     PrepareSolver(&solver, problem);
     bool success = solver.backwardPass();
     benchmark::DoNotOptimize(success);

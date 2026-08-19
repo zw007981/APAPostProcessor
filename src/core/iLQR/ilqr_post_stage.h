@@ -12,52 +12,10 @@
 #include "../../vehicle/vehicle_footprint_model.h"
 #include "../../vehicle/vehicle_params.h"
 #include "apa_ilqr_solver.h"
+#include "ilqr_config.h"
 #include "ilqr_reference_builder.h"
 
 namespace apa_post_processor {
-// PIVOT 判据用朝向变化 Δθ（与 MINCO 同语义），不用前轮转角差 Δδ
-struct iLQRPruneConfig {
-    // 剔除弧长阈值 (m)
-    double min_arc_length{0.05};
-    // PIVOT 朝向变化阈值 (rad)
-    double pivot_heading_threshold{0.1};
-};
-struct iLQRPostStageConfig {
-    // 符号游程滞回 (m/s)
-    double epsilon_v{0.02};
-    // 融化/修剪判据
-    iLQRPruneConfig prune{};
-    // 驻留窗速度帽 (m/s)
-    double v_dwell{0.05};
-    // 换挡延迟下限 (s)
-    double shift_delay{0.4};
-    // 驻留时长安全余量
-    double kappa_pad{1.2};
-    // 转角速率上限 (rad/s)，必须与求解配置同源
-    double omega_max{0.5};
-    // 转角加加速度上限 (rad/s²)
-    double eta_max{1.0};
-    // 接缝 |v| 质量指标（记录不否决）
-    double seam_speed_tol{0.02};
-    // 驻留窗端点 |ω| 容差：标定为 omega_max+amplitude_check_tol，作为发散探针
-    // 真实弯曲参考上优化器以低速滚动出窗完成摆动，本项退化为记录不否决
-    double dwell_omega_tol{0.55};
-    // v/a 绝对容差（合法性门）
-    double amplitude_check_tol{0.05};
-    // δ/ω 相对容差 2.1%：与 AL 终止判据 inequality_tol 同包络
-    // 旧值 0.2% 比 AL 结构交付严一个数量级，属标定错误
-    double amplitude_check_rel_tol{0.021};
-    // j/η 盒过冲探针（记录不否决）
-    double control_overshoot_tol{0.3};
-    // 阶段二跟踪权重地板：深退火时防精化因跟踪过弱脱离热启动邻域
-    double stage_two_min_tracking_weight{0.0};
-    // true=阶段一末轮跟踪权重已退火到地板时跳过阶段二：深退火
-    // 收尾后精化驱动力耗尽，阶段二无收益或负收益；默认 false
-    bool skip_stage_two_when_weight_exhausted{false};
-    // 校验配置
-    TrajectoryValidationConfig validation{};
-    iLQRPostStageConfig() { validation.max_terminal_heading_error_deg = 1.5; }
-};
 // 带滞回符号游程：档位由 sign(v) 恢复（Reeds-Shepp 观点的最终兑现）
 struct iLQRSignRun {
     // 运动方向符号
@@ -184,7 +142,7 @@ struct iLQRPostStageResult {
 class iLQRPostStage {
    public:
     // 构造时校验滞回/驻留/执行器/修剪参数合法性，注入参考构建器与求解器
-    iLQRPostStage(iLQRPostStageConfig config,
+    iLQRPostStage(const iLQRConfig& config,
                  const iLQRReferenceBuilder* reference_builder,
                  ApaILQRSolver* solver, const VehicleParams& vehicle_params);
     // 主入口：候选一（阶段二）→ 候选二（阶段一降级）→ 原始 A*
@@ -259,7 +217,7 @@ class iLQRPostStage {
 
    protected:
     // 配置
-    iLQRPostStageConfig config_;
+    iLQRConfig config_;
     // 参考构建器（不持有所有权，必须非空）
     const iLQRReferenceBuilder* reference_builder_;
     // 求解编排器（不持有所有权，必须非空）

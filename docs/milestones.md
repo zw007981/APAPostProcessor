@@ -24,15 +24,15 @@
 
 ## 当前 Milestone（默认编号指针）
 
-**当前默认编号：011**
+**当前默认编号：013**
 
 Dev Agent / Review Agent 在人工没有于对话中显式指定 Milestone 编号时，一律以此处登记的编号作为默认的 `{N}`，不需要人工在每一次开场白里手动写明或来回改写编号。人工只需要在切换到不同 Milestone 时更新这一行数字（这是整个流程里唯一需要手动改编号的地方）；如需临时处理非当前编号的 Milestone（如战术改动、复审旧 Milestone），仍可在对话中显式指定，显式指定优先于此处的默认值。
 
 ## Milestone 列表
 
-> 当前列表对应 **DDP（MS-iLQR + AL）后处理算法路径**的开发计划（设计文档：
-> [docs/DDP.md](DDP.md)，领域模型：[docs/architecture.md](architecture.md) 3.8 节，
-> 接口规划：[docs/interfaces.md](interfaces.md)「待实现：DDP 模块核心接口」一节）。
+> 当前列表对应 **iLQR（MS-iLQR + AL）后处理算法路径**的开发计划（设计文档：
+> [docs/iLQR.md](iLQR.md)，领域模型：[docs/architecture.md](architecture.md) 3.8 节，
+> 接口规划：[docs/interfaces.md](interfaces.md)「待实现：iLQR 模块核心接口」一节）。
 > 依赖关系：001/002/003 互相独立可任意顺序开发；004 依赖 002；005 依赖 002/003/004；
 > 006 依赖 001/005；007 依赖 006；008 依赖 007；009 依赖 008；010 依赖 009；011 依赖 010。
 >
@@ -41,20 +41,28 @@ Dev Agent / Review Agent 在人工没有于对话中显式指定 Milestone 编�
 > 重构后处理与通过性校验口径（怀疑数值优化有效、损失发生在后处理/校验环节），
 > 011 再在正确的口径上做方案层与参数层的系统优化。**011 必须在 010 收口后开始**——
 > 否则效果会被错误的校验口径吃掉，得出全部错误的调参结论。
+>
+> 012 由一次独立复测触发，是 011 的**前置修正**而非续作：复测发现 011 记录的四数据集
+> 基线在当前 HEAD 上不可复现（实测「1 成功 + 3 回退」），因此 011 之上的调参结论
+> 都缺少可信对照组。012 先把基线复现与验收口径收口（Q0），再攻 data6 阶段一的
+> 打靶缺陷死锁与 data3/data7 的两处链路缺陷。**011 与 012 的关系需人工裁决**
+> （见 [milestone-012/spec.md](milestones/milestone-012/spec.md) 第 9 节）。
 
 | 编号 | 名称 | 状态 | 详情 |
 |---|---|---|---|
-| 001 | DDP 预处理与参考轨迹构建（重采样/初值/打靶节点） | 已完成 | [milestone-001](milestones/milestone-001/spec.md) |
+| 001 | iLQR 预处理与参考轨迹构建（重采样/初值/打靶节点） | 已完成 | [milestone-001](milestones/milestone-001/spec.md) |
 | 002 | 七维自行车动力学与解析雅可比 | 已完成 | [milestone-002](milestones/milestone-002/spec.md) |
 | 003 | Box-QP 投影牛顿求解器 | 已完成 | [milestone-003](milestones/milestone-003/spec.md) |
 | 004 | 代价与约束求值层（AL 增广 + ESDF 惩罚） | 已完成 | [milestone-004](milestones/milestone-004/spec.md) |
 | 005 | MS-iLQR 内层求解器（缺陷感知回推/rollout/merit 线搜索） | 已完成 | [milestone-005](milestones/milestone-005/spec.md) |
 | 006 | AL 外层循环与阶段一全局软化求解 | 已完成 | [milestone-006](milestones/milestone-006/spec.md) |
 | 007 | 后处理与阶段二门控精化（修剪/驻留/校验/回退） | 已完成 | [milestone-007](milestones/milestone-007/spec.md) |
-| 008 | PostProcessor 与场景层接入（optimizeDdp/DDPPlanningScene/配置路由） | 已完成 | [milestone-008](milestones/milestone-008/spec.md) |
+| 008 | PostProcessor 与场景层接入（optimizeiLQR/ILQRPlanningScene/配置路由） | 已完成 | [milestone-008](milestones/milestone-008/spec.md) |
 | 009 | 四数据集调参与端到端验收 | 已完成 | [milestone-009](milestones/milestone-009/spec.md) |
-| 010 | DDP 后处理链路与通过性校验口径审计与重构 | 已完成 | [milestone-010](milestones/milestone-010/spec.md) |
-| 011 | DDP 换挡数系统性优化（方案层 + 参数层） | 评审中 | [milestone-011](milestones/milestone-011/spec.md) |
+| 010 | iLQR 后处理链路与通过性校验口径审计与重构 | 已完成 | [milestone-010](milestones/milestone-010/spec.md) |
+| 011 | iLQR 换挡数系统性优化（方案层 + 参数层） | 已完成 | [milestone-011](milestones/milestone-011/spec.md) |
+| 012 | iLQR 阶段一收敛失效根因攻坚（data6 死锁 + 基线不可复现） | 评审中 | [milestone-012](milestones/milestone-012/spec.md) |
+| 013 | 合法前提下 maneuver 段数削减攻坚（自由时间/ESDF AL 组/δ→κ 候选） | 开发中 | [milestone-013](milestones/milestone-013/spec.md) |
 
 ## 规模化：可选的阶段归档（大多数项目不需要）
 

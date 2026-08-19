@@ -28,7 +28,7 @@ class iLQRDiagnostics {
     // 定位最大幅值违反：区分 v/a/ω/δ 五种约束中哪种在哪个节点最严重，
     // 输出诊断日志（未收敛外层轮次的最后一公里归因）
     static void LogWorstAmplitudeViolation(
-        const iLQRAlignedVec<iLQRState>& states, const iLQRCostConfig& cost);
+        const iLQRAlignedVec<iLQRState>& states, const iLQRConfig& config);
 
     // 阶段一求解报告（含收敛/未收敛双路径的诊断差异）
     static void LogStageOneReport(const ApaILQRStageOneResult& stage_one,

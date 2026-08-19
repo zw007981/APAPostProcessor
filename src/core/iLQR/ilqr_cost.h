@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "bicycle_dynamics.h"
+#include "ilqr_config.h"
 #include "ilqr_reference_builder.h"
 #include "esdf_constraint.h"
 
@@ -34,24 +35,6 @@ struct iLQRGatingPlan {
     std::vector<int> seam_lookup;
     // 驻留速度帽 g=|v|−cap ≤ 0
     std::vector<double> dwell_v_cap;
-};
-struct iLQRCostConfig {
-    // 跃度权重
-    double weight_jerk{1.0};
-    // 转角加加速度权重
-    double weight_steer_accel{1.0};
-    // 跟踪位置权重基准值
-    double weight_ref_base{10.0};
-    // 跟踪朝向权重
-    double weight_theta{5.0};
-    // 速度上限 (m/s)
-    double v_max{1.5};
-    // 加速度上限 (m/s²)
-    double a_max{1.0};
-    // 转角速率上限 (rad/s)
-    double omega_max{0.5};
-    // 前轮转角上限 (rad)
-    double delta_max{0.55};
 };
 // AL 乘子状态：外层 AL 维护，本层只消费
 struct iLQRCostMultiplierState {
@@ -130,7 +113,7 @@ struct iLQRCostEvaluation {
 class iLQRCostEvaluator {
    public:
     // esdf_constraint 可为 nullptr（无地图场景）
-    iLQRCostEvaluator(iLQRCostConfig config,
+    iLQRCostEvaluator(const iLQRConfig& config,
                      const iLQREsdfConstraint* esdf_constraint);
     // 全轨迹求值；screen_cost_threshold 供线搜索早停：廉价小计
     // （不含 ESDF，恒 ≤ 完整代价）超阈即跳过 ESDF 求值提前返回，
@@ -190,7 +173,7 @@ class iLQRCostEvaluator {
 
    protected:
     // 配置
-    iLQRCostConfig config_;
+    iLQRConfig config_;
     // ESDF 双 margin 惩罚（不持有所有权，可为空）
     const iLQREsdfConstraint* esdf_constraint_;
 };

@@ -53,15 +53,18 @@ Path BuildXPolyline(const std::vector<double>& segments) {
 
 // 由 Path 构建前端数据（默认构建配置：0.05 m 重采样、dt=0.1 s、打靶间隔 25 步）
 iLQRReference BuildReference(const Path& path) {
-    return iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+    return iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
         .build(path);
 }
 
 // 合成小尺度场景的求解配置：μ_min 降到 1.0 防小代价量级下 μ⁰ 标定被下限
 // clip 到过强罚权重（与既有编排器单测同一约定，生产默认不受影响）
-ApaILQRSolverConfig MakeSyntheticConfig() {
-    ApaILQRSolverConfig config;
-    config.outer.mu_min = 1.0;
+iLQRConfig MakeSyntheticConfig() {
+    iLQRConfig config;
+    config.outer_mu_min = 1.0;
+    // 组件机制测试显式隔离：这些用例验证的是 AL/门控/阶段二机制本身，
+    // 与 ALTRO 虚拟控制正交，统一关闭避免默认值变更改变机制语义
+    config.inner_use_virtual_control = false;
     return config;
 }
 
@@ -106,13 +109,19 @@ iLQRAlignedVec<iLQRState> MakeStates(const std::vector<ProfileEntry>& profile) {
 struct PostStageFixture {
     PostStageFixture()
         : dynamics(kWheelbase),
-          cost_evaluator(solver_config.cost, nullptr),
+          cost_evaluator(solver_config, nullptr),
           solver(solver_config, &dynamics, &cost_evaluator),
-          reference_builder(iLQRReferenceBuilderConfig{}, MakeVehicleParams()),
+          reference_builder(iLQRConfig{}, MakeVehicleParams()),
           post_stage(post_config, &reference_builder, &solver,
                      MakeVehicleParams()) {}
-    ApaILQRSolverConfig solver_config = MakeSyntheticConfig();
-    iLQRPostStageConfig post_config;
+    iLQRConfig solver_config = MakeSyntheticConfig();
+    // 显式恢复 ω_max=0.5（组件独立默认）：驻留/转向需求测试锁定
+    // T_resteer 公式与窗宽，与统一后的 iLQRConfig 默认（0.4）解耦
+    iLQRConfig post_config = [] {
+        iLQRConfig config;
+        config.post_omega_max = 0.5;
+        return config;
+    }();
     BicycleDynamics dynamics;
     iLQRCostEvaluator cost_evaluator;
     ApaILQRSolver solver;
@@ -288,9 +297,9 @@ TEST(iLQRTopologyPruneTest, FirstAndLastManeuverProtected) {
     ASSERT_EQ(maneuvers.size(), 3);
     // 判据确认：首末段弧长均低于剔除阈值（验证保护语义而非判据失效）
     EXPECT_LT(maneuvers.front().length(),
-              fixture.post_config.prune.min_arc_length);
+              fixture.post_config.post_prune_min_arc_length);
     EXPECT_LT(maneuvers.back().length(),
-              fixture.post_config.prune.min_arc_length);
+              fixture.post_config.post_prune_min_arc_length);
     EXPECT_TRUE(fixture.post_stage.pruneManeuvers(&maneuvers));
     const Path pruned = ReconstructPath(maneuvers);
     ASSERT_EQ(pruned.numManeuvers(), 3);
@@ -443,7 +452,7 @@ TEST(iLQRGatingPlanTest, DwellWindowWidthScalesWithSteerDemand) {
     const std::size_t seam0 = ref2.cusp_indices[0];
     EXPECT_GT(build.plan.dwell_v_cap[seam0], 0.0);
     EXPECT_DOUBLE_EQ(build.plan.dwell_v_cap[seam0],
-                     fixture.post_config.v_dwell);
+                     fixture.post_config.post_v_dwell);
     EXPECT_DOUBLE_EQ(build.plan.dwell_v_cap[0], 0.0);
 }
 
@@ -477,7 +486,7 @@ iLQRGatingPlan MakeTinyPlan() {
 // 项恒为零——逐阶段 cost_gating 为 0，总代价与无门控扩展时逐位一致
 TEST(iLQRGatingCostTest, StageOneInputProducesZeroGatingCost) {
     const iLQRReference reference = MakeTinyReference();
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const auto multipliers = iLQRCostMultiplierState::MakeZero(2);
     iLQRCostInput input;
     input.tracking_weight = 1.0;
@@ -502,7 +511,7 @@ TEST(iLQRGatingCostTest, StageOneInputProducesZeroGatingCost) {
 // 没有乘子、或只有乘子没有计划，都是配置错误，必须显式抛 std::logic_error
 TEST(iLQRGatingCostTest, PartialGatingConfigThrows) {
     const iLQRReference reference = MakeTinyReference();
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const iLQRGatingPlan plan = MakeTinyPlan();
     const iLQRAlignedVec<iLQRState> states(3, iLQRState::Zero());
     const iLQRAlignedVec<iLQRControl> controls(2, iLQRControl::Zero());
@@ -535,7 +544,7 @@ TEST(iLQRGatingCostTest, PartialGatingConfigThrows) {
 // （梯度把 v 向下推），负 v 自由
 TEST(iLQRGatingCostTest, SignGatePenaltyDirectionBothSigns) {
     const iLQRReference reference = MakeTinyReference();
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     iLQRGatingPlan plan = MakeTinyPlan();
     plan.seam_indices.clear();
     plan.seam_lookup = {-1, -1, -1};
@@ -575,7 +584,7 @@ TEST(iLQRGatingCostTest, SignGatePenaltyDirectionBothSigns) {
 // g=|v|−cap 形式（活动区梯度模恒为 1、对符号中性，二阶导在活动区精确）
 TEST(iLQRGatingCostTest, SeamEqualityAndDwellGateValues) {
     const iLQRReference reference = MakeTinyReference();
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     iLQRGatingPlan plan = MakeTinyPlan();
     plan.sign_gate = {0, 0, 0};  // 关闭符号门，隔离被测项
     iLQRCostInput input;
@@ -613,7 +622,7 @@ TEST(iLQRGatingCostTest, SeamEqualityAndDwellGateValues) {
 // GN 形 Hessian 此处无丢弃项，可直接与解析值逐位对拍
 TEST(iLQRGatingCostTest, GatingDerivativesMatchFiniteDifference) {
     const iLQRReference reference = MakeTinyReference();
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const iLQRGatingPlan plan = MakeTinyPlan();
     iLQRCostInput input;
     input.tracking_weight = 0.0;
@@ -708,11 +717,11 @@ TEST(iLQRStageTwoWarmStartTest, InterpolatesStatesAndClampsControls) {
     EXPECT_NEAR(warm_states[15](ILQR_IDX_OMEGA), 0.25, 1e-9);
     // 控制量差分反解并裁剪进盒：j=±3.0→±j_max、η=±2.5→±η_max，
     // 未受阶跃影响的控制量为 0
-    const auto& limits = fixture.solver_config.inner;
-    EXPECT_DOUBLE_EQ(warm_controls[9](ILQR_IDX_JERK), limits.jerk_max);
-    EXPECT_DOUBLE_EQ(warm_controls[10](ILQR_IDX_JERK), -limits.jerk_max);
-    EXPECT_DOUBLE_EQ(warm_controls[14](ILQR_IDX_ETA), limits.steer_accel_max);
-    EXPECT_DOUBLE_EQ(warm_controls[15](ILQR_IDX_ETA), -limits.steer_accel_max);
+    const auto& limits = fixture.solver_config;
+    EXPECT_DOUBLE_EQ(warm_controls[9](ILQR_IDX_JERK), limits.inner_jerk_max);
+    EXPECT_DOUBLE_EQ(warm_controls[10](ILQR_IDX_JERK), -limits.inner_jerk_max);
+    EXPECT_DOUBLE_EQ(warm_controls[14](ILQR_IDX_ETA), limits.inner_steer_accel_max);
+    EXPECT_DOUBLE_EQ(warm_controls[15](ILQR_IDX_ETA), -limits.inner_steer_accel_max);
     EXPECT_DOUBLE_EQ(warm_controls[0](ILQR_IDX_JERK), 0.0);
     EXPECT_DOUBLE_EQ(warm_controls[0](ILQR_IDX_ETA), 0.0);
 }
@@ -801,7 +810,7 @@ TEST(iLQRStageTwoSolveTest, StageTwoEnforcesSignSeamAndDwellGates) {
     // 跟踪权重冻结在阶段一末轮退火值（与生产后处理同一约定）
     const double stage_one_final_weight =
         stage_one.report.history.empty()
-            ? fixture.solver_config.cost.weight_ref_base
+            ? fixture.solver_config.cost_weight_ref_base
             : stage_one.report.history.back().tracking_weight;
     const auto stage_two = fixture.solver.solveStageTwo(
         reference, plan, stage_one.states, stage_one.controls,
@@ -845,9 +854,9 @@ class GatingUpdateAccessor : public ApaILQRSolver {
 // 并同步写回三组门控乘子；λ 更新遵循 Hestenes-Powell（不等式投影非负、
 // 等式符号自由）
 TEST(iLQRStageTwoGatingMuTest, SufficientDecreaseDoesNotGrowMu) {
-    const ApaILQRSolverConfig config = MakeSyntheticConfig();
+    const iLQRConfig config = MakeSyntheticConfig();
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(config.cost, nullptr);
+    const iLQRCostEvaluator evaluator(config, nullptr);
     GatingUpdateAccessor solver(config, &dynamics, &evaluator);
     auto multipliers = iLQRCostMultiplierState::MakeStageTwoZero(1, 1);
     // 快照：节点 0 符号门违反 0.2、接缝等式残差 0.1
@@ -904,9 +913,9 @@ TEST(iLQRStageTwoSolveTest, DualSeedWarmStartConvergesNoSlowerThanCold) {
         stage_one.report.history.back().tracking_weight;
     // 两个独立求解器实例：内层 μ_m/ρ_reg 跨 solve 调用保持，对照实验
     // 必须各自独立，避免第一次求解的内层状态污染第二次
-    const ApaILQRSolverConfig config = MakeSyntheticConfig();
+    const iLQRConfig config = MakeSyntheticConfig();
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(config.cost, nullptr);
+    const iLQRCostEvaluator evaluator(config, nullptr);
     ApaILQRSolver warm_solver(config, &dynamics, &evaluator);
     ApaILQRSolver cold_solver(config, &dynamics, &evaluator);
     const auto warm = warm_solver.solveStageTwo(
@@ -1197,8 +1206,8 @@ TEST(iLQRPostStageTest, StageTwoTrackingWeightFloorApplies) {
     const double stage_one_final_weight =
         stage_one.report.history.back().tracking_weight;
     // 地板取阶段一末轮值的 4 倍（明确高于末轮值）
-    iLQRPostStageConfig floored_config;
-    floored_config.stage_two_min_tracking_weight = 4.0 * stage_one_final_weight;
+    iLQRConfig floored_config;
+    floored_config.post_stage_two_min_tracking_weight = 4.0 * stage_one_final_weight;
     iLQRPostStage floored_post_stage(floored_config, &fixture.reference_builder,
                                     &fixture.solver, MakeVehicleParams());
     GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
@@ -1232,9 +1241,9 @@ TEST(iLQRPostStageTest, SkipStageTwoWhenWeightExhausted) {
     goal.x = 1.85;
     goal.y = 0.0;
     goal.theta = 0.0;
-    iLQRPostStageConfig skip_config;
-    skip_config.skip_stage_two_when_weight_exhausted = true;
-    skip_config.stage_two_min_tracking_weight = 1e9;
+    iLQRConfig skip_config;
+    skip_config.post_skip_stage_two_when_weight_exhausted = true;
+    skip_config.post_stage_two_min_tracking_weight = 1e9;
     iLQRPostStage skip_post_stage(skip_config, &fixture.reference_builder,
                                  &fixture.solver, MakeVehicleParams());
     const auto skipped = skip_post_stage.run(path, reference, stage_one, goal,
@@ -1261,8 +1270,10 @@ TEST(iLQRPostStageTest, WeightNotExhaustedRunsStageTwo) {
     goal.x = 1.85;
     goal.y = 0.0;
     goal.theta = 0.0;
-    iLQRPostStageConfig keep_config;
-    keep_config.skip_stage_two_when_weight_exhausted = true;
+    iLQRConfig keep_config;
+    keep_config.post_skip_stage_two_when_weight_exhausted = true;
+    // 与夹具求解器（MakeSyntheticConfig，虚拟控制关闭）保持同一语义
+    keep_config.inner_use_virtual_control = false;
     iLQRPostStage keep_stage(keep_config, &fixture.reference_builder,
                             &fixture.solver, MakeVehicleParams());
     const auto kept = keep_stage.run(path, reference, stage_one, goal,
@@ -1289,9 +1300,9 @@ TEST(iLQRPostStageTest, WeightExhaustedDoesNotSkipIllegalStageOne) {
     goal.x = 5.0;
     goal.y = 0.0;
     goal.theta = 0.0;
-    iLQRPostStageConfig skip_config;
-    skip_config.skip_stage_two_when_weight_exhausted = true;
-    skip_config.stage_two_min_tracking_weight = 1e9;
+    iLQRConfig skip_config;
+    skip_config.post_skip_stage_two_when_weight_exhausted = true;
+    skip_config.post_stage_two_min_tracking_weight = 1e9;
     iLQRPostStage skip_post_stage(skip_config, &fixture.reference_builder,
                                  &fixture.solver, MakeVehicleParams());
     const auto result = skip_post_stage.run(path, reference, stage_one, goal,
@@ -1333,7 +1344,7 @@ TEST(iLQRPostStageTest, ReversalScenarioInsertsDwellAndValidates) {
     EXPECT_GE(seam.dwell_duration, seam.t_dwell - 1e-9);
     EXPECT_GE(
         seam.t_dwell,
-        fixture.post_config.kappa_pad * fixture.post_config.shift_delay - 1e-9);
+        fixture.post_config.post_kappa_pad * fixture.post_config.post_shift_delay - 1e-9);
     EXPECT_LE(seam.seam_speed, 0.02);
     // 总时长 = 阶段二时长 + (驻留拉伸 − 窗口时长) > 阶段二时长
     ASSERT_TRUE(result.stage_two.has_value());
@@ -1386,17 +1397,17 @@ TEST(iLQRPostStageTest, FallbackOnValidationFailure) {
 // 反映降级（绝不伪装成阶段二完全成功）
 TEST(iLQRPostStageTest, StageTwoFailureOutputsStageOneCandidate) {
     // 独立装配：阶段二外层预算置零，门控重解必然 MAX_OUTER_ITERATIONS
-    const ApaILQRSolverConfig zero_budget_config = [] {
-        ApaILQRSolverConfig config = MakeSyntheticConfig();
+    const iLQRConfig zero_budget_config = [] {
+        iLQRConfig config = MakeSyntheticConfig();
         config.stage_two_max_outer_iterations = 0;
         return config;
     }();
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator cost_evaluator(zero_budget_config.cost, nullptr);
+    const iLQRCostEvaluator cost_evaluator(zero_budget_config, nullptr);
     ApaILQRSolver solver(zero_budget_config, &dynamics, &cost_evaluator);
-    const iLQRReferenceBuilder reference_builder(iLQRReferenceBuilderConfig{},
+    const iLQRReferenceBuilder reference_builder(iLQRConfig{},
                                                 MakeVehicleParams());
-    iLQRPostStage post_stage(iLQRPostStageConfig{}, &reference_builder, &solver,
+    iLQRPostStage post_stage(iLQRConfig{}, &reference_builder, &solver,
                             MakeVehicleParams());
     const Path path = BuildXPolyline({0.0, 1.0, -1.0});
     const iLQRReference reference = reference_builder.build(path);
@@ -1438,17 +1449,17 @@ TEST(iLQRPostStageTest, StageTwoFailureOutputsStageOneCandidate) {
 // 不过合法性门（终点目标放到 100 m 外）——两级候选依次失败后回退原始
 // A* 路径，诊断同时携带降级原因与降级候选的首个失败门项
 TEST(iLQRPostStageTest, StageOneCandidateAlsoIllegalFallsBack) {
-    const ApaILQRSolverConfig zero_budget_config = [] {
-        ApaILQRSolverConfig config = MakeSyntheticConfig();
+    const iLQRConfig zero_budget_config = [] {
+        iLQRConfig config = MakeSyntheticConfig();
         config.stage_two_max_outer_iterations = 0;
         return config;
     }();
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator cost_evaluator(zero_budget_config.cost, nullptr);
+    const iLQRCostEvaluator cost_evaluator(zero_budget_config, nullptr);
     ApaILQRSolver solver(zero_budget_config, &dynamics, &cost_evaluator);
-    const iLQRReferenceBuilder reference_builder(iLQRReferenceBuilderConfig{},
+    const iLQRReferenceBuilder reference_builder(iLQRConfig{},
                                                 MakeVehicleParams());
-    iLQRPostStage post_stage(iLQRPostStageConfig{}, &reference_builder, &solver,
+    iLQRPostStage post_stage(iLQRConfig{}, &reference_builder, &solver,
                             MakeVehicleParams());
     const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
     const iLQRReference reference = reference_builder.build(path);
@@ -1509,7 +1520,7 @@ TEST(iLQRValidationLayerTest, MetricViolationsDoNotFailGate) {
     // 轨迹契约，物理可执行性由状态幅值门独立保证
     auto doctored_controls = good.stage_two->controls;
     doctored_controls[0](ILQR_IDX_JERK) =
-        fixture.solver_config.inner.jerk_max + 0.5;
+        fixture.solver_config.inner_jerk_max + 0.5;
     EXPECT_TRUE(accessor.validateOutput(good.trajectory, good.stage_two->states,
                                         doctored_controls, path.length(), goal,
                                         esdf_map, footprint_model, &diag));
@@ -1614,14 +1625,14 @@ TEST(iLQRValidationLayerTest, StateAmplitudeViolationFailsGate) {
     iLQRPostStageDiagnostics diag;
     diag.input_maneuver_count = 2;
     auto doctored_states = good.stage_two->states;
-    doctored_states[0](ILQR_IDX_V) = fixture.solver_config.cost.v_max +
-                                    fixture.post_config.amplitude_check_tol +
+    doctored_states[0](ILQR_IDX_V) = fixture.solver_config.cost_v_max +
+                                    fixture.post_config.post_amplitude_check_tol +
                                     0.01;
     EXPECT_FALSE(accessor.validateOutput(
         good.trajectory, doctored_states, good.stage_two->controls,
         path.length(), goal, esdf_map, footprint_model, &diag));
     EXPECT_EQ(diag.failed_check, "amplitude");
-    EXPECT_DOUBLE_EQ(diag.threshold, fixture.post_config.amplitude_check_tol);
+    EXPECT_DOUBLE_EQ(diag.threshold, fixture.post_config.post_amplitude_check_tol);
 }
 
 // 门项边界值：终点位置误差在阈值内侧（−1e-6 m）必须放行、外侧
@@ -1691,8 +1702,8 @@ TEST(iLQRValidationLayerTest, AmplitudeBoundaryIsInclusive) {
                                     &fixture.reference_builder, &fixture.solver,
                                     MakeVehicleParams());
     auto doctored_states = good.stage_two->states;
-    doctored_states[0](ILQR_IDX_V) = fixture.solver_config.cost.v_max +
-                                    fixture.post_config.amplitude_check_tol -
+    doctored_states[0](ILQR_IDX_V) = fixture.solver_config.cost_v_max +
+                                    fixture.post_config.post_amplitude_check_tol -
                                     1e-6;
     iLQRPostStageDiagnostics diag;
     diag.input_maneuver_count = 2;
@@ -1705,7 +1716,7 @@ TEST(iLQRValidationLayerTest, AmplitudeBoundaryIsInclusive) {
     ASSERT_NE(amplitude_check, diag.gate_checks.end());
     EXPECT_TRUE(amplitude_check->passed);
     EXPECT_LE(amplitude_check->measured,
-              fixture.post_config.amplitude_check_tol);
+              fixture.post_config.post_amplitude_check_tol);
     EXPECT_GT(amplitude_check->measured, 0.0);
 }
 
@@ -1730,7 +1741,7 @@ TEST(iLQRValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
     ValidateOutputAccessor accessor(fixture.post_config,
                                     &fixture.reference_builder, &fixture.solver,
                                     MakeVehicleParams());
-    const double delta_max = fixture.solver_config.cost.delta_max;
+    const double delta_max = fixture.solver_config.cost_delta_max;
     // 驻留点（|v|<v_dwell）δ 超限 50%：豁免，门应通过
     {
         auto states = good.stage_two->states;
@@ -1751,7 +1762,7 @@ TEST(iLQRValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
     // amplitude_delta
     {
         auto states = good.stage_two->states;
-        states[0](ILQR_IDX_V) = fixture.post_config.v_dwell;
+        states[0](ILQR_IDX_V) = fixture.post_config.post_v_dwell;
         states[0](ILQR_IDX_DELTA) = 1.03 * delta_max;
         iLQRPostStageDiagnostics diag;
         diag.input_maneuver_count = 2;
@@ -1760,12 +1771,12 @@ TEST(iLQRValidationLayerTest, DeltaCheckedOnlyAtDrivingPointsWithRelTol) {
             goal, esdf_map, footprint_model, &diag));
         EXPECT_EQ(diag.failed_check, "amplitude_delta");
         EXPECT_DOUBLE_EQ(diag.threshold,
-                         fixture.post_config.amplitude_check_rel_tol);
+                         fixture.post_config.post_amplitude_check_rel_tol);
     }
     // 行驶点 δ 在容差内侧（+1%）：放行
     {
         auto states = good.stage_two->states;
-        states[0](ILQR_IDX_V) = fixture.post_config.v_dwell;
+        states[0](ILQR_IDX_V) = fixture.post_config.post_v_dwell;
         states[0](ILQR_IDX_DELTA) = 1.01 * delta_max;
         iLQRPostStageDiagnostics diag;
         diag.input_maneuver_count = 2;
@@ -1795,7 +1806,7 @@ TEST(iLQRValidationLayerTest, OmegaViolationFailsGateWithRelTol) {
                                     &fixture.reference_builder, &fixture.solver,
                                     MakeVehicleParams());
     auto states = good.stage_two->states;
-    states[0](ILQR_IDX_OMEGA) = 1.03 * fixture.solver_config.cost.omega_max;
+    states[0](ILQR_IDX_OMEGA) = 1.03 * fixture.solver_config.cost_omega_max;
     iLQRPostStageDiagnostics diag;
     diag.input_maneuver_count = 2;
     EXPECT_FALSE(accessor.validateOutput(
@@ -1803,10 +1814,10 @@ TEST(iLQRValidationLayerTest, OmegaViolationFailsGateWithRelTol) {
         esdf_map, footprint_model, &diag));
     EXPECT_EQ(diag.failed_check, "amplitude_omega");
     EXPECT_DOUBLE_EQ(diag.threshold,
-                     fixture.post_config.amplitude_check_rel_tol);
+                     fixture.post_config.post_amplitude_check_rel_tol);
     // ω 在容差内侧（+1%）：放行
     auto ok_states = good.stage_two->states;
-    ok_states[0](ILQR_IDX_OMEGA) = 1.01 * fixture.solver_config.cost.omega_max;
+    ok_states[0](ILQR_IDX_OMEGA) = 1.01 * fixture.solver_config.cost_omega_max;
     iLQRPostStageDiagnostics ok_diag;
     ok_diag.input_maneuver_count = 2;
     EXPECT_TRUE(accessor.validateOutput(

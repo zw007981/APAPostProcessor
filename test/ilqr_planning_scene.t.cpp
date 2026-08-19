@@ -63,11 +63,11 @@ TEST(iLQRPlanningSceneTest, AppliesiLQRSpecificOverrides) {
     ASSERT_NE(scene, nullptr);
     const auto* ilqr_scene = dynamic_cast<const ILQRPlanningScene*>(scene.get());
     ASSERT_NE(ilqr_scene, nullptr);
-    EXPECT_EQ(ilqr_scene->ilqrConfig().reference.shooting_interval, 10);
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().reference.v_max, 2.0);
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().solver.outer.mu_min, 5.0);
+    EXPECT_EQ(ilqr_scene->ilqrConfig().reference_shooting_interval, 10);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().reference_v_max, 2.0);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().outer_mu_min, 5.0);
     // 幅值边界单一来源同步：cost.v_max 跟随 reference.v_max
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().solver.cost.v_max, 2.0);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().cost_v_max, 2.0);
 }
 
 // 测试场景：详情 JSON 未配置任何 iLQR 专有字段。
@@ -78,14 +78,14 @@ TEST(iLQRPlanningSceneTest, KeepsiLQRDefaultsWhenDetailsAbsent) {
     const auto* ilqr_scene = dynamic_cast<const ILQRPlanningScene*>(scene.get());
     ASSERT_NE(ilqr_scene, nullptr);
     const iLQRConfig fresh;
-    EXPECT_EQ(ilqr_scene->ilqrConfig().reference.shooting_interval,
-              fresh.reference.shooting_interval);
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().solver.outer.mu_min,
-                     fresh.solver.outer.mu_min);
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().solver.cost.weight_ref_base,
-                     fresh.solver.cost.weight_ref_base);
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().post_stage.kappa_pad,
-                     fresh.post_stage.kappa_pad);
+    EXPECT_EQ(ilqr_scene->ilqrConfig().reference_shooting_interval,
+              fresh.reference_shooting_interval);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().outer_mu_min,
+                     fresh.outer_mu_min);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().cost_weight_ref_base,
+                     fresh.cost_weight_ref_base);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().post_kappa_pad,
+                     fresh.post_kappa_pad);
 }
 
 // 测试场景：loadConfigDetails 收到不存在的文件路径。
@@ -98,10 +98,10 @@ TEST(iLQRPlanningSceneTest, MissingDetailsFileKeepsDefaults) {
     ASSERT_NO_THROW(
         ilqr_scene->loadConfigDetails("/nonexistent/ilqr_config.json"));
     const iLQRConfig fresh;
-    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().solver.outer.mu_min,
-                     fresh.solver.outer.mu_min);
-    EXPECT_EQ(ilqr_scene->ilqrConfig().reference.shooting_interval,
-              fresh.reference.shooting_interval);
+    EXPECT_DOUBLE_EQ(ilqr_scene->ilqrConfig().outer_mu_min,
+                     fresh.outer_mu_min);
+    EXPECT_EQ(ilqr_scene->ilqrConfig().reference_shooting_interval,
+              fresh.reference_shooting_interval);
 }
 
 // 测试场景：未执行 optimize() 时生成优化摘要。

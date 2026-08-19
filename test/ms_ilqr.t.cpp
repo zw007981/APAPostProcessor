@@ -212,12 +212,12 @@ iLQRCostInput MakeCostInput(double tracking_weight) {
 }
 
 // 默认求解器配置：宽松盒约束、极小正则化（便于与无正则参照对拍）
-MsIlqrConfig MakeConfig() {
-    MsIlqrConfig config;
-    config.jerk_max = 100.0;
-    config.steer_accel_max = 100.0;
-    config.reg_initial = 1e-12;
-    config.reg_min = 1e-13;
+iLQRConfig MakeConfig() {
+    iLQRConfig config;
+    config.inner_jerk_max = 100.0;
+    config.inner_steer_accel_max = 100.0;
+    config.inner_reg_initial = 1e-12;
+    config.inner_reg_min = 1e-13;
     return config;
 }
 
@@ -297,7 +297,7 @@ void PrepareNominal(MsIlqrTestAccess* solver, const iLQRReference& reference,
 // 搜索方向必须与独立 Riccati 参照（无约束 LQR 解析解）逐元素一致
 TEST(MsIlqrTest, LqrDirectionConsistency) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {num_steps});
@@ -325,7 +325,7 @@ TEST(MsIlqrTest, LqrDirectionConsistency) {
 // 并在少数几轮内收敛，终态轨迹与 LQR 参照轨迹的差异保持在非线性残差量级
 TEST(MsIlqrTest, LqrConvergesWithFullStep) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {num_steps});
@@ -353,7 +353,7 @@ TEST(MsIlqrTest, LqrConvergesWithFullStep) {
 // （各分量 < 1e-8），且 merit 按 Armijo 接受逐轮严格下降
 TEST(MsIlqrTest, DefectConvergence) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 20;
     const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
     ArcProblem problem =
@@ -386,7 +386,7 @@ TEST(MsIlqrTest, DefectConvergence) {
 // 左邻步（k=0）生效，节点 2（非打靶）的左邻步（k=1）不得出现修正项
 TEST(MsIlqrTest, SingleDefectNodeBackward) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 2;
     const iLQRReference reference = MakeReference(
         {Pose(0.0, 0.0, 0.0), Pose(0.05, 0.0, 0.0), Pose(0.10, 0.01, 0.10)},
@@ -453,15 +453,15 @@ TEST(MsIlqrTest, SingleDefectNodeBackward) {
 // 必须恒为零，且 QP 解出的控制恰好贴在盒边界上
 TEST(MsIlqrTest, BoxActivationBangBang) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 10;
     const iLQRState x0 = iLQRState::Zero();
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
     for (std::size_t k = 0; k <= num_steps; ++k) {
         problem.reference.poses[k] = Pose(0.5, 0.0, 0.0);
     }
-    MsIlqrConfig config = MakeConfig();
-    config.jerk_max = 0.05;
+    iLQRConfig config = MakeConfig();
+    config.inner_jerk_max = 0.05;
     MsIlqrTestAccess solver(config, &dynamics, &evaluator);
     const MsIlqrResult result =
         solver.solve(problem.reference, MakeMultipliers(num_steps),
@@ -475,7 +475,7 @@ TEST(MsIlqrTest, BoxActivationBangBang) {
         has_clamped_jerk = true;
         ExpectMatrixNear(Eigen::Matrix<double, 1, ILQR_STATE_DIM>::Zero(),
                          solver.gain_K_[k].row(ILQR_IDX_JERK), 0.0);
-        EXPECT_NEAR(config.jerk_max,
+        EXPECT_NEAR(config.inner_jerk_max,
                     std::abs(solver.controls_[k](ILQR_IDX_JERK) +
                              solver.feedforward_[k](ILQR_IDX_JERK)),
                     1e-9)
@@ -488,18 +488,18 @@ TEST(MsIlqrTest, BoxActivationBangBang) {
 // 求解结果必须一致，且全部钳制集为空
 TEST(MsIlqrTest, UnconstrainedMatchesWideBox) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.05, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {num_steps});
-    MsIlqrConfig wide_config = MakeConfig();
+    iLQRConfig wide_config = MakeConfig();
     MsIlqrTestAccess wide_solver(wide_config, &dynamics, &evaluator);
     const MsIlqrResult wide_result = wide_solver.solve(
         problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
         problem.states, problem.controls);
-    MsIlqrConfig free_config = MakeConfig();
-    free_config.jerk_max = 1e6;
-    free_config.steer_accel_max = 1e6;
+    iLQRConfig free_config = MakeConfig();
+    free_config.inner_jerk_max = 1e6;
+    free_config.inner_steer_accel_max = 1e6;
     MsIlqrTestAccess free_solver(free_config, &dynamics, &evaluator);
     const MsIlqrResult free_result = free_solver.solve(
         problem.reference, MakeMultipliers(num_steps), MakeCostInput(10.0),
@@ -524,7 +524,7 @@ TEST(MsIlqrTest, UnconstrainedMatchesWideBox) {
 // 完整 solve 后线性 rollout 次数必须恰好等于后向传递次数
 TEST(MsIlqrTest, EcCachingAndRolloutCounts) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {4, 8});
@@ -585,7 +585,7 @@ TEST(MsIlqrTest, EcCachingAndRolloutCounts) {
 // 更新、段内闭环跟踪，接受后缺陷精确缩放为 (1-α)·d̄
 TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 6;
     const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {3, 6});
@@ -633,7 +633,7 @@ TEST(MsIlqrTest, NonlinearRolloutDefectScaling) {
 // 正则化增大并重跑整个后向传递（盒不激活，方向可随 ρ 增大自由收缩）
 TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     const iLQRState x0 = iLQRState::Zero();
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
@@ -652,13 +652,13 @@ TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
     ASSERT_TRUE(solver.backwardPass());
     EXPECT_GE(solver.qp_factorization_count_ - factorizations_first,
               static_cast<std::int64_t>(num_steps));
-    MsIlqrConfig config = MakeConfig();
-    config.jerk_max = 1e6;
-    config.steer_accel_max = 1e6;
-    config.armijo_gamma = 0.8;
-    config.max_backtracks = 1;
-    config.reg_increase = 100.0;
-    config.reg_initial = 1e-6;
+    iLQRConfig config = MakeConfig();
+    config.inner_jerk_max = 1e6;
+    config.inner_steer_accel_max = 1e6;
+    config.inner_armijo_gamma = 0.8;
+    config.inner_max_backtracks = 1;
+    config.inner_reg_increase = 100.0;
+    config.inner_reg_initial = 1e-6;
     MsIlqrTestAccess e2e_solver(config, &dynamics, &evaluator);
     const MsIlqrResult result =
         e2e_solver.solve(problem.reference, MakeMultipliers(num_steps),
@@ -682,7 +682,7 @@ TEST(MsIlqrTest, RegChangeRebuildsAllQps) {
 // 也是本次早停筛选改动影响的核心路径（被拒 trial 的判定边界）。
 TEST(MsIlqrTest, PartialStepAcceptance) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     const iLQRState x0 = iLQRState::Zero();
     ArcProblem problem = MakeArcProblem(num_steps, x0, 0.0, 0.0, {num_steps});
@@ -691,8 +691,8 @@ TEST(MsIlqrTest, PartialStepAcceptance) {
     for (std::size_t k = 0; k <= num_steps; ++k) {
         problem.reference.poses[k] = Pose(1.5, 1.5, 1.57);
     }
-    MsIlqrConfig config = MakeConfig();
-    config.armijo_gamma = 0.8;
+    iLQRConfig config = MakeConfig();
+    config.inner_armijo_gamma = 0.8;
     MsIlqrTestAccess solver(config, &dynamics, &evaluator);
     const MsIlqrResult result =
         solver.solve(problem.reference, MakeMultipliers(num_steps),
@@ -718,27 +718,27 @@ TEST(MsIlqrTest, PartialStepAcceptance) {
 // std::invalid_argument
 TEST(MsIlqrTest, InputValidation) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     EXPECT_THROW(MsIlqrSolver(MakeConfig(), nullptr, &evaluator),
                  std::invalid_argument);
     EXPECT_THROW(MsIlqrSolver(MakeConfig(), &dynamics, nullptr),
                  std::invalid_argument);
-    MsIlqrConfig bad_box = MakeConfig();
-    bad_box.jerk_max = -1.0;
+    iLQRConfig bad_box = MakeConfig();
+    bad_box.inner_jerk_max = -1.0;
     EXPECT_THROW(MsIlqrSolver(bad_box, &dynamics, &evaluator),
                  std::invalid_argument);
-    MsIlqrConfig bad_reg = MakeConfig();
-    bad_reg.reg_min = 10.0;
-    bad_reg.reg_max = 1.0;
+    iLQRConfig bad_reg = MakeConfig();
+    bad_reg.inner_reg_min = 10.0;
+    bad_reg.inner_reg_max = 1.0;
     EXPECT_THROW(MsIlqrSolver(bad_reg, &dynamics, &evaluator),
                  std::invalid_argument);
-    MsIlqrConfig bad_gamma = MakeConfig();
-    bad_gamma.armijo_gamma = 1.5;
+    iLQRConfig bad_gamma = MakeConfig();
+    bad_gamma.inner_armijo_gamma = 1.5;
     EXPECT_THROW(MsIlqrSolver(bad_gamma, &dynamics, &evaluator),
                  std::invalid_argument);
     // merit 上限小于地板 µ₀：地板与上限冲突、语义不自洽，构造拒绝
-    MsIlqrConfig bad_mu_max = MakeConfig();
-    bad_mu_max.merit_mu_max = 0.5 * bad_mu_max.merit_mu0;
+    iLQRConfig bad_mu_max = MakeConfig();
+    bad_mu_max.inner_merit_mu_max = 0.5 * bad_mu_max.inner_merit_mu0;
     EXPECT_THROW(MsIlqrSolver(bad_mu_max, &dynamics, &evaluator),
                  std::invalid_argument);
     const std::size_t num_steps = 4;
@@ -766,21 +766,21 @@ TEST(MsIlqrTest, InputValidation) {
 // 一次被接受迭代的记录
 TEST(MsIlqrTest, RegularizationOverflowReported) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 8;
     ArcProblem problem =
         MakeArcProblem(num_steps, iLQRState::Zero(), 0.0, 0.0, {num_steps});
     for (std::size_t k = 0; k <= num_steps; ++k) {
         problem.reference.poses[k] = Pose(1.5, 1.5, 1.57);
     }
-    MsIlqrConfig config = MakeConfig();
-    config.jerk_max = 1e6;
-    config.steer_accel_max = 1e6;
-    config.armijo_gamma = 0.9;
-    config.max_backtracks = 1;
-    config.reg_min = 1e-4;
-    config.reg_initial = 1e-3;
-    config.reg_max = 1e-3;
+    iLQRConfig config = MakeConfig();
+    config.inner_jerk_max = 1e6;
+    config.inner_steer_accel_max = 1e6;
+    config.inner_armijo_gamma = 0.9;
+    config.inner_max_backtracks = 1;
+    config.inner_reg_min = 1e-4;
+    config.inner_reg_initial = 1e-3;
+    config.inner_reg_max = 1e-3;
     MsIlqrTestAccess solver(config, &dynamics, &evaluator);
     const MsIlqrResult result =
         solver.solve(problem.reference, MakeMultipliers(num_steps),
@@ -802,7 +802,7 @@ TEST(MsIlqrTest, RegularizationOverflowReported) {
 // 不崩溃且代价下降、快速收敛
 TEST(MsIlqrTest, SingleStepProblemSmoke) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const std::size_t num_steps = 1;
     const iLQRReference reference = MakeReference(
         {Pose(0.05, 0.01, 0.05), Pose(0.1, 0.02, 0.05)}, kDt, {1});
@@ -828,7 +828,7 @@ TEST(MsIlqrTest, SingleStepProblemSmoke) {
 // 可行性），放行前必须确认缺陷已愈合
 TEST(MsIlqrTest, ConvergenceRequiresFeasibility) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
     // 容差默认与外层缺陷门同量级（1e-3）：缺陷未愈时不允许收敛出口
     solver.defects_.resize(3);
@@ -849,10 +849,10 @@ TEST(MsIlqrTest, ConvergenceRequiresFeasibility) {
 // merit_mu_max 封顶（c 过大重演「以任意代价歼灭缺陷」的灾难）
 TEST(MsIlqrTest, MeritMuScalesWithAlPenalty) {
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
-    MsIlqrConfig config = MakeConfig();
-    config.merit_mu0 = 100.0;
-    config.merit_mu_max = 1e3;
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    iLQRConfig config = MakeConfig();
+    config.inner_merit_mu0 = 100.0;
+    config.inner_merit_mu_max = 1e3;
     MsIlqrTestAccess solver(config, &dynamics, &evaluator);
     // 低于 µ₀：不动（钉住地板）
     solver.raiseMeritMuFloor(1e-3 * 1e4);  // 10 < 100
@@ -872,8 +872,8 @@ TEST(MsIlqrTest, MeritMuScalesWithAlPenalty) {
     solver.raiseMeritMuFloor(std::numeric_limits<double>::quiet_NaN());
     EXPECT_DOUBLE_EQ(solver.merit_mu_, 1e3);
     // 非法配置（负比率）构造拒绝
-    MsIlqrConfig bad = MakeConfig();
-    bad.merit_mu_al_ratio = -1.0;
+    iLQRConfig bad = MakeConfig();
+    bad.inner_merit_mu_al_ratio = -1.0;
     EXPECT_THROW(MsIlqrSolver(bad, &dynamics, &evaluator),
                  std::invalid_argument);
 }
@@ -890,7 +890,7 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
     const VehicleParams vehicle_params{4.9, 1.9, 2.7, 0.48};
     const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 1);
     const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, &esdf_constraint);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, &esdf_constraint);
     // 名义轨迹：从 y=21.9 以 v=1.0 朝 +y 直行，第 2 步起越出 y≤22——
     // 每个候选（= 名义 + α·修正）都携带越界状态
     const std::size_t num_steps = 20;
@@ -908,8 +908,8 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
     // (A) 守卫开启：越界候选被拒绝（计数 >0），被接受的状态轨迹始终留在
     // 域内（y ≤ 22），无坐标爆炸（参考在域外不可达，收敛与否不作断言）
     {
-        MsIlqrConfig config = MakeConfig();
-        config.domain_guard_margin = 2.0;
+        iLQRConfig config = MakeConfig();
+        config.inner_domain_guard_margin = 2.0;
         MsIlqrTestAccess solver(config, &dynamics, &evaluator);
         const MsIlqrResult result =
             solver.solve(reference, MakeMultipliers(num_steps),
@@ -923,8 +923,8 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
     }
     // (B) 守卫关闭：同一问题拒绝计数为 0、求解正常推进
     {
-        MsIlqrConfig config = MakeConfig();
-        config.domain_guard_margin = 0.0;
+        iLQRConfig config = MakeConfig();
+        config.inner_domain_guard_margin = 0.0;
         MsIlqrTestAccess solver(config, &dynamics, &evaluator);
         const MsIlqrResult result =
             solver.solve(reference, MakeMultipliers(num_steps),
@@ -934,8 +934,8 @@ TEST(MsIlqrTest, DomainGuardRejectsOutOfMapCandidates) {
     }
     // 非法 margin 构造拒绝
     {
-        MsIlqrConfig bad = MakeConfig();
-        bad.domain_guard_margin = -1.0;
+        iLQRConfig bad = MakeConfig();
+        bad.inner_domain_guard_margin = -1.0;
         EXPECT_THROW(MsIlqrTestAccess(bad, &dynamics, &evaluator),
                      std::invalid_argument);
     }
@@ -950,11 +950,11 @@ TEST(MsIlqrTest, VirtualControlEliminationPreservesValue) {
         MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
                        0.2, {0, 8});
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const auto multipliers = MakeMultipliers(8);
     const auto cost_input = MakeCostInput(1.0);
     // 关闭路径回推
-    MsIlqrConfig off_config = MakeConfig();
+    iLQRConfig off_config = MakeConfig();
     MsIlqrTestAccess off_solver(off_config, &dynamics, &evaluator);
     off_solver.prepareWorkspace(8);
     off_solver.setShootingLookup(problem.reference.shooting_nodes);
@@ -964,8 +964,8 @@ TEST(MsIlqrTest, VirtualControlEliminationPreservesValue) {
     off_solver.computeJacobians(problem.reference);
     ASSERT_TRUE(off_solver.backwardPass());
     // 开启路径回推（w 显式零、大权重钉死 w）：退化极限下与关闭一致
-    MsIlqrConfig on_config = MakeConfig();
-    on_config.virtual_control_weight = 1e8;
+    iLQRConfig on_config = MakeConfig();
+    on_config.inner_virtual_control_weight = 1e8;
     MsIlqrVcTestAccess on_solver(on_config, &dynamics, &evaluator);
     on_solver.prepareWorkspace(8);
     on_solver.virtual_controls_.assign(8, iLQRState::Zero());
@@ -993,8 +993,8 @@ TEST(MsIlqrTest, VirtualControlInitReproducesReference) {
     const ArcProblem problem =
         MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
                        0.2, {0, 8});
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
-    MsIlqrConfig config = MakeConfig();
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    iLQRConfig config = MakeConfig();
     MsIlqrVcTestAccess solver(config, &dynamics, &evaluator);
     const auto w = solver.computeVirtualControls(
         problem.reference, problem.states, problem.controls);
@@ -1013,11 +1013,11 @@ TEST(MsIlqrTest, VirtualControlShrinksToZero) {
         MakeArcProblem(8, MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.1, 0.0), 0.3,
                        0.2, {0, 8});
     const BicycleDynamics dynamics(kWheelbase);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const auto multipliers = MakeMultipliers(8);
     const auto cost_input = MakeCostInput(1.0);
-    MsIlqrConfig config = MakeConfig();
-    config.virtual_control_weight = 1e4;
+    iLQRConfig config = MakeConfig();
+    config.inner_virtual_control_weight = 1e4;
     MsIlqrVcTestAccess solver(config, &dynamics, &evaluator);
     iLQRAlignedVec<iLQRState> w_init;
     w_init.reserve(8);

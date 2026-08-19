@@ -22,16 +22,18 @@ namespace {
 static_assert(iLQRStateHessian::RowsAtCompileTime == ILQR_STATE_DIM &&
                   iLQRStateHessian::ColsAtCompileTime == ILQR_STATE_DIM,
               "iLQRStateHessian 必须为 ILQR_STATE_DIM x ILQR_STATE_DIM");
-static_assert(iLQREsdfConstraintConfig{}.margin_safe == 0.02,
-              "margin_safe 默认值必须为 0.02（生产按默认值运行）");
-static_assert(iLQREsdfConstraintConfig{}.margin_comf == 0.10,
-              "margin_comf 默认值必须为 0.10（生产按默认值运行）");
-static_assert(iLQREsdfConstraintConfig{}.weight_safe == 100.0,
-              "weight_safe 默认值必须为 100.0（生产按默认值运行）");
-static_assert(iLQREsdfConstraintConfig{}.weight_comf == 1.0,
-              "weight_comf 默认值必须为 1.0（生产按默认值运行）");
-static_assert(iLQREsdfConstraintConfig{}.stride == 1,
-              "stride 默认值必须为 1（生产按默认值运行）");
+
+// ESDF 配置默认值一致性：iLQRConfig 平铺后含 std::string 等非字面量成员，
+// 编译期 static_assert 不可用，改运行时断言。生产配置 data/ilqr_config.json
+// 未覆盖这些字段时即按默认值运行，默认值漂移必须被测试拦截
+TEST(iLQRConfigDefaultsTest, EsdfDefaultsMatchProduction) {
+    const iLQRConfig config;
+    EXPECT_DOUBLE_EQ(config.esdf_margin_safe, 0.02);
+    EXPECT_DOUBLE_EQ(config.esdf_margin_comf, 0.20);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_safe, 100.0);
+    EXPECT_DOUBLE_EQ(config.esdf_weight_comf, 10.0);
+    EXPECT_EQ(config.esdf_stride, 1);
+}
 
 // 墙场地图参数：第 0 列整列占据；L8.2 契约下最外圈（第 0/63 行与第 63 列）
 // 同样被标记占据。占据栅格中心的符号距离场在 x>=2*resolution 且远离其余
@@ -73,7 +75,7 @@ struct ReferenceCostGradHess {
 // Σ_active 6·W·C·∇C·∇Cᵀ（丢弃含场曲率的 3·W·C²·∇²C 项）
 ReferenceCostGradHess ComputeReference(
     const std::vector<Eigen::Vector2d>& local_centers, double radius, double x,
-    double y, double theta, const iLQREsdfConstraintConfig& config) {
+    double y, double theta, const iLQRConfig& config) {
     const double cos_theta = std::cos(theta);
     const double sin_theta = std::sin(theta);
     ReferenceCostGradHess ref;
@@ -83,20 +85,20 @@ ReferenceCostGradHess ComputeReference(
         const double cx = x + cos_theta * lx - sin_theta * ly;
         const double dcx_dtheta = -sin_theta * lx - cos_theta * ly;
         const Eigen::Vector3d grad_c(-1.0, 0.0, -dcx_dtheta);
-        const double c_safe = radius + config.margin_safe - cx;
+        const double c_safe = radius + config.esdf_margin_safe - cx;
         if (c_safe > 0.0) {
-            ref.cost += config.weight_safe * c_safe * c_safe * c_safe;
+            ref.cost += config.esdf_weight_safe * c_safe * c_safe * c_safe;
             ref.gradient +=
-                (3.0 * config.weight_safe * c_safe * c_safe) * grad_c;
-            ref.hessian += (6.0 * config.weight_safe * c_safe) * grad_c *
+                (3.0 * config.esdf_weight_safe * c_safe * c_safe) * grad_c;
+            ref.hessian += (6.0 * config.esdf_weight_safe * c_safe) * grad_c *
                            grad_c.transpose();
         }
-        const double c_comf = radius + config.margin_comf - cx;
+        const double c_comf = radius + config.esdf_margin_comf - cx;
         if (c_comf > 0.0) {
-            ref.cost += config.weight_comf * c_comf * c_comf * c_comf;
+            ref.cost += config.esdf_weight_comf * c_comf * c_comf * c_comf;
             ref.gradient +=
-                (3.0 * config.weight_comf * c_comf * c_comf) * grad_c;
-            ref.hessian += (6.0 * config.weight_comf * c_comf) * grad_c *
+                (3.0 * config.esdf_weight_comf * c_comf * c_comf) * grad_c;
+            ref.hessian += (6.0 * config.esdf_weight_comf * c_comf) * grad_c *
                            grad_c.transpose();
         }
     }
@@ -136,12 +138,12 @@ class iLQREsdfConstraintTest : public ::testing::Test {
     }
 
     iLQREsdfConstraint MakeConstraint(
-        iLQREsdfConstraintConfig config = {}) const {
+        iLQRConfig config = {}) const {
         return iLQREsdfConstraint(esdf_map_, footprint_model_, config);
     }
 
     TestableiLQREsdfConstraint MakeTestable(
-        iLQREsdfConstraintConfig config = {}) const {
+        iLQRConfig config = {}) const {
         return TestableiLQREsdfConstraint(esdf_map_, footprint_model_, config);
     }
 
@@ -178,20 +180,20 @@ class iLQREsdfConstraintTest : public ::testing::Test {
 // 负权重、非有限值、stride=0 均必须抛 std::invalid_argument。
 // 因为非法配置会静默污染全部下游优化目标，必须在构造期显式拒绝。
 TEST_F(iLQREsdfConstraintTest, ConstructorThrowsOnInvalidConfig) {
-    iLQREsdfConstraintConfig config;
-    config.margin_safe = -0.01;
+    iLQRConfig config;
+    config.esdf_margin_safe = -0.01;
     EXPECT_THROW(MakeConstraint(config), std::invalid_argument);
-    config.margin_safe = 0.02;
-    config.margin_comf = 0.02;
+    config.esdf_margin_safe = 0.02;
+    config.esdf_margin_comf = 0.02;
     EXPECT_THROW(MakeConstraint(config), std::invalid_argument);
-    config.margin_comf = 0.10;
-    config.weight_safe = -1.0;
+    config.esdf_margin_comf = 0.10;
+    config.esdf_weight_safe = -1.0;
     EXPECT_THROW(MakeConstraint(config), std::invalid_argument);
-    config.weight_safe = 1.0;
-    config.weight_comf = std::numeric_limits<double>::quiet_NaN();
+    config.esdf_weight_safe = 1.0;
+    config.esdf_weight_comf = std::numeric_limits<double>::quiet_NaN();
     EXPECT_THROW(MakeConstraint(config), std::invalid_argument);
-    config.weight_comf = 1.0;
-    config.stride = 0;
+    config.esdf_weight_comf = 1.0;
+    config.esdf_stride = 0;
     EXPECT_THROW(MakeConstraint(config), std::invalid_argument);
 }
 
@@ -219,22 +221,26 @@ TEST_F(iLQREsdfConstraintTest, ReturnsZeroOutsideComfortMargin) {
 TEST_F(iLQREsdfConstraintTest, MarginBoundariesAreC1Continuous) {
     const auto constraint = MakeConstraint();
     const auto& config = constraint.config();
-    // 舒适边界：界上严格为零，界内 0.1mm 处梯度量级 ~3·W_comf·(1e-4)²·N_c
-    const double x_comf = circle_radius_ + config.margin_comf;
+    // 舒适边界：界上严格为零，界内 0.1mm 处梯度量级 ~3·W_comf·(1e-4)²·N_c，
+    // 与 W_comf 成正比，故阈值随权重线性缩放（W_comf=10 时实测 ~1.5e-6）
+    const double x_comf = circle_radius_ + config.esdf_margin_comf;
     const auto on_comf = constraint.evaluate(x_comf, 2.5, kHalfPi);
     EXPECT_DOUBLE_EQ(on_comf.cost, 0.0);
     EXPECT_TRUE(on_comf.gradient.isZero());
     EXPECT_TRUE(on_comf.hessian.isZero());
     const auto inside_comf = constraint.evaluate(x_comf - 1e-4, 2.5, kHalfPi);
     EXPECT_GT(inside_comf.cost, 0.0);
-    EXPECT_LT(inside_comf.gradient.norm(), 1e-6);
+    EXPECT_LT(inside_comf.gradient.norm(), 1e-6 * config.esdf_weight_comf);
     // 安全边界：两侧代价差为 O(Δx)（梯度有限），两侧梯度差同样为 O(Δx)
-    // （C¹：梯度在衔接处连续、仅随 C 线性变化），不会出现 O(1) 跳变
-    const double x_safe = circle_radius_ + config.margin_safe;
+    // （C¹：梯度在衔接处连续、仅随 C 线性变化），不会出现 O(1) 跳变；
+    // 衔接处舒适段 C_comf=margin_comf-margin_safe 恒正，Hessian ∝ W_comf·C_comf，
+    // 故两个阈值同样随权重线性缩放（×2 余量覆盖有限差分系数）
+    const double x_safe = circle_radius_ + config.esdf_margin_safe;
     const auto above_safe = constraint.evaluate(x_safe + 1e-4, 2.5, kHalfPi);
     const auto below_safe = constraint.evaluate(x_safe - 1e-4, 2.5, kHalfPi);
-    EXPECT_NEAR(above_safe.cost, below_safe.cost, 1e-4);
-    EXPECT_LT((above_safe.gradient - below_safe.gradient).norm(), 1e-3);
+    EXPECT_NEAR(above_safe.cost, below_safe.cost, 1e-4 * config.esdf_weight_comf);
+    EXPECT_LT((above_safe.gradient - below_safe.gradient).norm(),
+              2.0 * 1e-3 * config.esdf_weight_comf);
 }
 
 // 测试仅舒适段激活时（r+margin_safe < d < r+margin_comf）代价/梯度/Hessian
@@ -408,10 +414,10 @@ TEST_F(iLQREsdfConstraintTest, GnHessianMatchesConstraintJacobianFd) {
         // 两段 margin 共享同一约束雅可比（仅边界值不同）
         EXPECT_GT(circle.c_safe, 0.0);
         EXPECT_GT(circle.c_comf, 0.0);
-        expected_cost += config.weight_safe * std::pow(circle.c_safe, 3) +
-                         config.weight_comf * std::pow(circle.c_comf, 3);
-        expected_hess += (6.0 * config.weight_safe * circle.c_safe +
-                          6.0 * config.weight_comf * circle.c_comf) *
+        expected_cost += config.esdf_weight_safe * std::pow(circle.c_safe, 3) +
+                         config.esdf_weight_comf * std::pow(circle.c_comf, 3);
+        expected_hess += (6.0 * config.esdf_weight_safe * circle.c_safe +
+                          6.0 * config.esdf_weight_comf * circle.c_comf) *
                          grad_numeric * grad_numeric.transpose();
     }
     const auto result = constraint.evaluate(x0, y0, theta0);
@@ -460,20 +466,20 @@ TEST_F(iLQREsdfConstraintTest, OutOfMapCircleYieldsConservativePenalty) {
         }
         // ∇C = -(∇d·∂c/∂pose)：∂d/∂x=-1、dcx/dθ=0 ⟹ ∇C=(1,0,0)
         const Eigen::Vector3d grad_c(1.0, 0.0, 0.0);
-        const double c_safe = circle_radius_ + config.margin_safe - d;
+        const double c_safe = circle_radius_ + config.esdf_margin_safe - d;
         if (c_safe > 0.0) {
-            ref.cost += config.weight_safe * std::pow(c_safe, 3);
+            ref.cost += config.esdf_weight_safe * std::pow(c_safe, 3);
             ref.gradient +=
-                (3.0 * config.weight_safe * c_safe * c_safe) * grad_c;
-            ref.hessian += (6.0 * config.weight_safe * c_safe) * grad_c *
+                (3.0 * config.esdf_weight_safe * c_safe * c_safe) * grad_c;
+            ref.hessian += (6.0 * config.esdf_weight_safe * c_safe) * grad_c *
                            grad_c.transpose();
         }
-        const double c_comf = circle_radius_ + config.margin_comf - d;
+        const double c_comf = circle_radius_ + config.esdf_margin_comf - d;
         if (c_comf > 0.0) {
-            ref.cost += config.weight_comf * std::pow(c_comf, 3);
+            ref.cost += config.esdf_weight_comf * std::pow(c_comf, 3);
             ref.gradient +=
-                (3.0 * config.weight_comf * c_comf * c_comf) * grad_c;
-            ref.hessian += (6.0 * config.weight_comf * c_comf) * grad_c *
+                (3.0 * config.esdf_weight_comf * c_comf * c_comf) * grad_c;
+            ref.hessian += (6.0 * config.esdf_weight_comf * c_comf) * grad_c *
                            grad_c.transpose();
         }
     }
@@ -487,8 +493,8 @@ TEST_F(iLQREsdfConstraintTest, OutOfMapCircleYieldsConservativePenalty) {
     EXPECT_GT(result.hessian(ILQR_IDX_X, ILQR_IDX_X), 0.0);
     // 保守性：惩罚严格大于 L8 前 d=0 哨兵对应的全侵入罚
     const double old_sentinel =
-        config.weight_safe * std::pow(circle_radius_ + config.margin_safe, 3) +
-        config.weight_comf * std::pow(circle_radius_ + config.margin_comf, 3);
+        config.esdf_weight_safe * std::pow(circle_radius_ + config.esdf_margin_safe, 3) +
+        config.esdf_weight_comf * std::pow(circle_radius_ + config.esdf_margin_comf, 3);
     EXPECT_GT(result.cost, old_sentinel);
 }
 
@@ -525,21 +531,21 @@ TEST_F(iLQREsdfConstraintTest, EvaluateMatchesPerCircleFullEvaluationBitExact) {
             const auto circle = constraint.evaluateCircle(
                 center, cos_theta, sin_theta, px, py);
             if (circle.c_safe > 0.0) {
-                expected.cost += config.weight_safe * circle.c_safe *
+                expected.cost += config.esdf_weight_safe * circle.c_safe *
                                  circle.c_safe * circle.c_safe;
-                grad3 += (3.0 * config.weight_safe * circle.c_safe *
+                grad3 += (3.0 * config.esdf_weight_safe * circle.c_safe *
                           circle.c_safe) *
                          circle.grad;
-                hess3 += (6.0 * config.weight_safe * circle.c_safe) *
+                hess3 += (6.0 * config.esdf_weight_safe * circle.c_safe) *
                          (circle.grad * circle.grad.transpose());
             }
             if (circle.c_comf > 0.0) {
-                expected.cost += config.weight_comf * circle.c_comf *
+                expected.cost += config.esdf_weight_comf * circle.c_comf *
                                  circle.c_comf * circle.c_comf;
-                grad3 += (3.0 * config.weight_comf * circle.c_comf *
+                grad3 += (3.0 * config.esdf_weight_comf * circle.c_comf *
                           circle.c_comf) *
                          circle.grad;
-                hess3 += (6.0 * config.weight_comf * circle.c_comf) *
+                hess3 += (6.0 * config.esdf_weight_comf * circle.c_comf) *
                          (circle.grad * circle.grad.transpose());
             }
         }
@@ -569,8 +575,8 @@ TEST_F(iLQREsdfConstraintTest, EvaluateMatchesPerCircleFullEvaluationBitExact) {
 // 因为 ESDF 查询是运行时主导开销，stride=2 时只在偶数阶段做避障检查，
 // 查询量减半；stride=1 时逐阶段检查。
 TEST_F(iLQREsdfConstraintTest, StrideSamplingSkipsIntermediateStages) {
-    iLQREsdfConstraintConfig config;
-    config.stride = 2;
+    iLQRConfig config;
+    config.esdf_stride = 2;
     const auto constraint = MakeConstraint(config);
 
     EXPECT_TRUE(constraint.isSampled(0));

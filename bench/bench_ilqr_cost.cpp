@@ -99,7 +99,7 @@ void BM_iLQRCostFullEvaluationWithEsdf(benchmark::State& state) {
     const auto bundle = MakeEsdfBundle();
     const iLQREsdfConstraint esdf_constraint(bundle.esdf_map,
                                             bundle.footprint_model);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, &esdf_constraint);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, &esdf_constraint);
     const auto multipliers = MakeMultipliers();
     iLQRCostInput input;
     input.tracking_weight = 10.0;
@@ -120,7 +120,7 @@ void BM_iLQRCostFullEvaluationWithoutEsdf(benchmark::State& state) {
     iLQRAlignedVec<iLQRState> states;
     iLQRAlignedVec<iLQRControl> controls;
     MakeScenario(&reference, &states, &controls);
-    const iLQRCostEvaluator evaluator(iLQRCostConfig{}, nullptr);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
     const auto multipliers = MakeMultipliers();
     iLQRCostInput input;
     input.tracking_weight = 10.0;

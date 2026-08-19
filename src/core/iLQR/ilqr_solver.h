@@ -62,7 +62,7 @@ class iLQRSolver {
     // 场景重复提取
     mutable std::unique_ptr<iLQREsdfConstraint> esdf_cache_;
     // 上次缓存对应的 ESDF 配置，用于判断是否需要重建
-    mutable iLQREsdfConstraintConfig last_esdf_config_;
+    mutable iLQRConfig last_esdf_config_;
 };
 
 }  // namespace apa_post_processor

@@ -9,6 +9,7 @@
 #include "../util/trajectory.h"
 #include "MINCO/minco_config.h"
 #include "iLQR/apa_ilqr_solver.h"
+#include "iLQR/ilqr_config.h"
 #include "iLQR/ilqr_post_stage.h"
 #include "NMPC/nmpc_config.h"
 #include "NMPC/nmpc_solver.h"
@@ -73,69 +74,6 @@ struct AdaptiveRetryConfig {
     std::vector<double> nominal_step_s_multipliers = {1.0, 1.0};
     // 是否启用静态走廊的标记序列
     std::vector<bool> use_static_corridor_flags = {false, false};
-};
-
-// iLQR 路径配置：聚合 iLQR 链路各阶段的配置结构体。状态幅值边界
-// （v_max/a_max/δ_max/ω_max）的唯一权威来源是 reference 子配置、且只允许
-// 收紧到车辆物理上限以内——clampToVehicleParams() 把 δ_max/ω_max/a_max 钳到
-// VehicleParams 真值（δ_max≤max_steer_angle、ω_max≤max_steer_rate、
-// a_max≤min(max_accel,|max_decel|)），η_max 的唯一权威来源是
-// solver.inner.steer_accel_max——cost/post_stage 中的同源字段由
-// synchronizeAmplitudeBounds() 自动同步（构造与 JSON 加载时各同步一次，
-// optimizeiLQR 在局部副本上先钳制再同步一次），禁止绕过同步独立改写，否则
-// 初值裁剪/AL 约束/驻留窗宽三者数值不自洽（Config 基类字段双源缺口历史
-// 教训的前置防御）。继承通用 Config 基类（与 MincoConfig 模式一致），供场景
-// 层统一管理配置；基类的代价权重字段为 NMPC 路径专用，iLQR 路径不读取
-// （iLQR 权重全部在 solver.cost 中），基类字段的 JSON 覆盖项（outer_row_num）
-// 由 LoadBaseConfigOverrides 统一承载。运动学参数（轴距）由 PostProcessor
-// 直接取 VehicleParams，不在此重复配置。
-struct iLQRConfig : public Config {
-    // 构造时同步一次幅值边界，保证默认构造即自洽
-    iLQRConfig() { synchronizeAmplitudeBounds(); }
-    // 把权威来源的幅值边界同步进全部消费方：reference.{v_max, a_max,
-    // delta_max, omega_max} → solver.cost 同名字段与 post_stage.omega_max，
-    // solver.inner.steer_accel_max → post_stage.eta_max
-    void synchronizeAmplitudeBounds() {
-        solver.cost.v_max = reference.v_max;
-        solver.cost.a_max = reference.a_max;
-        solver.cost.delta_max = reference.delta_max;
-        solver.cost.omega_max = reference.omega_max;
-        post_stage.omega_max = reference.omega_max;
-        post_stage.eta_max = solver.inner.steer_accel_max;
-    }
-    // 以车辆物理参数为上界收紧幅值边界（只收紧、不放宽），
-    // 收紧后自动同步进全部消费方（等价于先 clamp 再 sync，消除调用顺序
-    // 依赖）。iLQR 链路曾长期以 JSON 硬编码值运行在被放大 15%/25% 的假
-    // 边界上，输出对真实车辆不可执行而三道校验全部漏检。
-    void clampToVehicleParams(const VehicleParams& vehicle_params) {
-        reference.delta_max =
-            std::min(reference.delta_max, vehicle_params.max_steer_angle);
-        reference.omega_max =
-            std::min(reference.omega_max, vehicle_params.max_steer_rate);
-        reference.a_max = std::min(
-            reference.a_max, std::min(vehicle_params.max_accel,
-                                      std::abs(vehicle_params.max_decel)));
-        synchronizeAmplitudeBounds();
-    }
-    // 参考构建配置（重采样间距/固定步长/打靶间隔/初值裁剪盒边界）
-    iLQRReferenceBuilderConfig reference;
-    // Reeds-Shepp 换挡点短接配置（默认关闭）：参考构建前允许换挡位姿
-    // 本身移动、用有界曲率曲线重连，是唯一能突破「换挡点由前端钉死」
-    // 这一天花板的几何前处理，见 ShortcutShiftPoints 的设计注释
-    iLQRRsShortcutConfig rs_shortcut;
-    // 融化开/关双候选择优（L7.2，默认关闭）：启用后同一输入分别以求解
-    // 配置原样（融化开）与退火率 ≈1（融化关）各跑一遍完整链路，按
-    // 「成功 → maneuver 数少 → 长度短」择优输出（详见
-    // PreferControlCandidate）。两个调度候选在四数据集上严格互补
-    // （data3/data1 必须开融化、data7 关融化净收益 +7.2% 长度且升
-    // 阶段二），择优直接消除「对照解防线」缺口；耗时约 +100%
-    bool dual_candidate_select{false};
-    // 阶段一/二求解编排配置（内层 MS-iLQR + 外层 AL + 代价求值三层）
-    ApaILQRSolverConfig solver;
-    // ESDF 双 margin 惩罚配置
-    iLQREsdfConstraintConfig esdf;
-    // 后处理与阶段二门控精化配置
-    iLQRPostStageConfig post_stage;
 };
 
 // 由算法配置详情 JSON 加载 iLQRConfig 专有字段覆盖项：仅覆盖显式出现的字段，

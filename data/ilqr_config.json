@@ -1,12 +1,19 @@
 {
     "algorithm": "ilqr",
     "outer_row_num": 2,
+    "esdf": {
+        "margin_safe": 0.02,
+        "margin_comf": 0.2,
+        "weight_safe": 100.0,
+        "weight_comf": 10.0
+    },
     "solver": {
         "inner": {
             "cost_change_tol": 1e-06,
             "gradient_tol": 1e-05,
             "merit_mu_max": 1000.0,
-            "merit_mu_al_ratio": 0.001
+            "merit_mu_al_ratio": 0.001,
+            "use_virtual_control": true
         },
         "outer": {
             "max_outer_iterations": 30,
@@ -21,7 +28,7 @@
         "stage_two_min_tracking_weight": 0.015,
         "skip_stage_two_when_weight_exhausted": true
     },
-    "dual_candidate_select": true,
+    "dual_candidate_select": false,
     "rs_shortcut": {
         "cap_ratio": 0.9
     }

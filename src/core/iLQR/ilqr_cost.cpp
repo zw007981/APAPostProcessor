@@ -29,22 +29,22 @@ iLQRCostMultiplierState iLQRCostMultiplierState::MakeStageTwoZero(
     return state;
 }
 
-iLQRCostEvaluator::iLQRCostEvaluator(iLQRCostConfig config,
+iLQRCostEvaluator::iLQRCostEvaluator(const iLQRConfig& config,
                                    const iLQREsdfConstraint* esdf_constraint)
     : config_(config), esdf_constraint_(esdf_constraint) {
     // 配置错误会静默污染全部下游求解目标，必须在构造期显式拒绝
-    if (!std::isfinite(config_.weight_jerk) || config_.weight_jerk < 0.0 ||
-        !std::isfinite(config_.weight_steer_accel) ||
-        config_.weight_steer_accel < 0.0 ||
-        !std::isfinite(config_.weight_ref_base) ||
-        config_.weight_ref_base < 0.0 || !std::isfinite(config_.weight_theta) ||
-        config_.weight_theta < 0.0) {
+    if (!std::isfinite(config_.cost_weight_jerk) || config_.cost_weight_jerk < 0.0 ||
+        !std::isfinite(config_.cost_weight_steer_accel) ||
+        config_.cost_weight_steer_accel < 0.0 ||
+        !std::isfinite(config_.cost_weight_ref_base) ||
+        config_.cost_weight_ref_base < 0.0 || !std::isfinite(config_.cost_weight_theta) ||
+        config_.cost_weight_theta < 0.0) {
         throw std::invalid_argument("代价权重必须为非负有限值");
     }
-    if (!std::isfinite(config_.v_max) || config_.v_max <= 0.0 ||
-        !std::isfinite(config_.a_max) || config_.a_max <= 0.0 ||
-        !std::isfinite(config_.omega_max) || config_.omega_max <= 0.0 ||
-        !std::isfinite(config_.delta_max) || config_.delta_max <= 0.0) {
+    if (!std::isfinite(config_.cost_v_max) || config_.cost_v_max <= 0.0 ||
+        !std::isfinite(config_.cost_a_max) || config_.cost_a_max <= 0.0 ||
+        !std::isfinite(config_.cost_omega_max) || config_.cost_omega_max <= 0.0 ||
+        !std::isfinite(config_.cost_delta_max) || config_.cost_delta_max <= 0.0) {
         throw std::invalid_argument("幅值边界必须为正有限值");
     }
 }
@@ -171,17 +171,17 @@ void iLQRCostEvaluator::evaluateRunningStage(
     const double jerk = u(ILQR_IDX_JERK);
     const double eta = u(ILQR_IDX_ETA);
     out->cost_smooth += 0.5 *
-                        (config_.weight_jerk * jerk * jerk +
-                         config_.weight_steer_accel * eta * eta) *
+                        (config_.cost_weight_jerk * jerk * jerk +
+                         config_.cost_weight_steer_accel * eta * eta) *
                         dt;
-    out->lu(ILQR_IDX_JERK) += config_.weight_jerk * jerk * dt;
-    out->lu(ILQR_IDX_ETA) += config_.weight_steer_accel * eta * dt;
-    out->luu(ILQR_IDX_JERK, ILQR_IDX_JERK) += config_.weight_jerk * dt;
-    out->luu(ILQR_IDX_ETA, ILQR_IDX_ETA) += config_.weight_steer_accel * dt;
+    out->lu(ILQR_IDX_JERK) += config_.cost_weight_jerk * jerk * dt;
+    out->lu(ILQR_IDX_ETA) += config_.cost_weight_steer_accel * eta * dt;
+    out->luu(ILQR_IDX_JERK, ILQR_IDX_JERK) += config_.cost_weight_jerk * dt;
+    out->luu(ILQR_IDX_ETA, ILQR_IDX_ETA) += config_.cost_weight_steer_accel * dt;
     // 退火跟踪项：权重选择优先级「豁免点恒用 w_ref,0 > 普通点用 w_ref(r)」
     const auto& mask = input.anneal_exempt_mask;
     const double w_ref = (mask != nullptr && (*mask)[k])
-                             ? config_.weight_ref_base
+                             ? config_.cost_weight_ref_base
                              : input.tracking_weight;
     const Pose& ref = reference.poses[k];
     const double err_x = x(ILQR_IDX_X) - ref.x;
@@ -189,13 +189,13 @@ void iLQRCostEvaluator::evaluateRunningStage(
     const double err_theta = WrapAngle(x(ILQR_IDX_THETA) - ref.theta);
     out->cost_tracking +=
         0.5 * w_ref * (err_x * err_x + err_y * err_y) * dt +
-        0.5 * config_.weight_theta * err_theta * err_theta * dt;
+        0.5 * config_.cost_weight_theta * err_theta * err_theta * dt;
     out->lx(ILQR_IDX_X) += w_ref * err_x * dt;
     out->lx(ILQR_IDX_Y) += w_ref * err_y * dt;
-    out->lx(ILQR_IDX_THETA) += config_.weight_theta * err_theta * dt;
+    out->lx(ILQR_IDX_THETA) += config_.cost_weight_theta * err_theta * dt;
     out->lxx(ILQR_IDX_X, ILQR_IDX_X) += w_ref * dt;
     out->lxx(ILQR_IDX_Y, ILQR_IDX_Y) += w_ref * dt;
-    out->lxx(ILQR_IDX_THETA, ILQR_IDX_THETA) += config_.weight_theta * dt;
+    out->lxx(ILQR_IDX_THETA, ILQR_IDX_THETA) += config_.cost_weight_theta * dt;
     accumulateAmplitudeConstraints(k, x, multipliers, out);
     // 阶段二门控（仅计划在场时累加；阶段一 gating_plan 恒为 nullptr）
     if (input.gating_plan != nullptr) {
@@ -247,23 +247,23 @@ void iLQRCostEvaluator::accumulateAmplitudeConstraints(
     const double delta = x(ILQR_IDX_DELTA);
     const double omega = x(ILQR_IDX_OMEGA);
     AccumulateAmplitudeInequality(
-        v * v - config_.v_max * config_.v_max, 2.0 * v, ILQR_IDX_V,
+        v * v - config_.cost_v_max * config_.cost_v_max, 2.0 * v, ILQR_IDX_V,
         multipliers.amplitude_lambda(base + ILQR_AMP_V),
         multipliers.amplitude_mu(base + ILQR_AMP_V), out);
     AccumulateAmplitudeInequality(
-        a * a - config_.a_max * config_.a_max, 2.0 * a, ILQR_IDX_A,
+        a * a - config_.cost_a_max * config_.cost_a_max, 2.0 * a, ILQR_IDX_A,
         multipliers.amplitude_lambda(base + ILQR_AMP_A),
         multipliers.amplitude_mu(base + ILQR_AMP_A), out);
     AccumulateAmplitudeInequality(
-        omega * omega - config_.omega_max * config_.omega_max, 2.0 * omega,
+        omega * omega - config_.cost_omega_max * config_.cost_omega_max, 2.0 * omega,
         ILQR_IDX_OMEGA, multipliers.amplitude_lambda(base + ILQR_AMP_OMEGA),
         multipliers.amplitude_mu(base + ILQR_AMP_OMEGA), out);
     AccumulateAmplitudeInequality(
-        delta - config_.delta_max, 1.0, ILQR_IDX_DELTA,
+        delta - config_.cost_delta_max, 1.0, ILQR_IDX_DELTA,
         multipliers.amplitude_lambda(base + ILQR_AMP_DELTA_POS),
         multipliers.amplitude_mu(base + ILQR_AMP_DELTA_POS), out);
     AccumulateAmplitudeInequality(
-        -delta - config_.delta_max, -1.0, ILQR_IDX_DELTA,
+        -delta - config_.cost_delta_max, -1.0, ILQR_IDX_DELTA,
         multipliers.amplitude_lambda(base + ILQR_AMP_DELTA_NEG),
         multipliers.amplitude_mu(base + ILQR_AMP_DELTA_NEG), out);
 }

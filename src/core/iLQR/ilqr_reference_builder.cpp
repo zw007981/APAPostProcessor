@@ -54,24 +54,24 @@ Path RebuildPath(const std::vector<Pose>& points) {
 
 // 短接配置的合法性校验：非法值显式抛出（静默降级会让上层误以为
 // 短接已生效）
-void ValidateRsShortcutConfig(const iLQRRsShortcutConfig& config,
+void ValidateRsShortcutConfig(const iLQRConfig& config,
                               double wheelbase, double delta_max) {
-    if (!std::isfinite(config.cap_ratio) || config.cap_ratio < 0.0 ||
-        config.cap_ratio > 1.0) {
+    if (!std::isfinite(config.rs_cap_ratio) || config.rs_cap_ratio < 0.0 ||
+        config.rs_cap_ratio > 1.0) {
         throw std::invalid_argument(
             "ShortcutShiftPoints: 曲率上限比例必须落在 [0,1]");
     }
-    if (!std::isfinite(config.collision_margin) ||
-        config.collision_margin < 0.0) {
+    if (!std::isfinite(config.rs_collision_margin) ||
+        config.rs_collision_margin < 0.0) {
         throw std::invalid_argument(
             "ShortcutShiftPoints: 碰撞裕度必须为非负有限值");
     }
-    if (!std::isfinite(config.max_length_growth) ||
-        config.max_length_growth < 0.0) {
+    if (!std::isfinite(config.rs_max_length_growth) ||
+        config.rs_max_length_growth < 0.0) {
         throw std::invalid_argument(
             "ShortcutShiftPoints: 长度增长上限必须为非负有限值");
     }
-    if (!(config.sample_dist > 0.0)) {
+    if (!(config.rs_sample_dist > 0.0)) {
         throw std::invalid_argument(
             "ShortcutShiftPoints: 采样间距必须为正");
     }
@@ -212,20 +212,20 @@ std::vector<Maneuver> SamplesToManeuvers(
 // 单段 maneuver 的短接代价：弧长 + 短段惩罚（低于阈值时按比例加权），
 // 沿用外部混合 A* 参考实现的定价口径
 double ManeuverShortcutCost(const Maneuver& maneuver,
-                            const iLQRRsShortcutConfig& config) {
+                            const iLQRConfig& config) {
     const double length = maneuver.length();
     double cost = length;
-    if (length <= config.short_segment_length) {
-        cost += 0.5 * config.short_segment_weight *
-                (1.0 + (config.short_segment_length - length) /
-                           config.short_segment_length);
+    if (length <= config.rs_short_segment_length) {
+        cost += 0.5 * config.rs_short_segment_weight *
+                (1.0 + (config.rs_short_segment_length - length) /
+                           config.rs_short_segment_length);
     }
     return cost;
 }
 // 整条路径的短接代价：固定段价 × 段数 + 各段代价之和
 double ShortcutPathCost(const std::vector<Maneuver>& maneuvers,
-                        const iLQRRsShortcutConfig& config) {
-    double total = config.segment_fixed_cost *
+                        const iLQRConfig& config) {
+    double total = config.rs_segment_fixed_cost *
                    static_cast<double>(maneuvers.size());
     for (const auto& maneuver : maneuvers) {
         total += ManeuverShortcutCost(maneuver, config);
@@ -234,13 +234,13 @@ double ShortcutPathCost(const std::vector<Maneuver>& maneuvers,
 }
 }  // namespace
 
-iLQRReferenceBuilder::iLQRReferenceBuilder(iLQRReferenceBuilderConfig config,
+iLQRReferenceBuilder::iLQRReferenceBuilder(const iLQRConfig& config,
                                          const VehicleParams& vehicle_params)
     : config_(config), wheelbase_(vehicle_params.wheelbase) {
-    if (!(config_.sample_dist > 0.0) || !(config_.dt > 0.0) ||
-        config_.shooting_interval < 1 || !(config_.v_max > 0.0) ||
-        !(config_.a_max > 0.0) || !(config_.delta_max > 0.0) ||
-        !(config_.omega_max > 0.0)) {
+    if (!(config_.reference_sample_dist > 0.0) || !(config_.reference_dt > 0.0) ||
+        config_.reference_shooting_interval < 1 || !(config_.reference_v_max > 0.0) ||
+        !(config_.reference_a_max > 0.0) || !(config_.reference_delta_max > 0.0) ||
+        !(config_.reference_omega_max > 0.0)) {
         throw std::invalid_argument(
             "iLQRReferenceBuilder: sample_dist/dt/shooting_interval/box bounds "
             "must be positive!!!");
@@ -260,13 +260,13 @@ iLQRReferenceBuilder::iLQRReferenceBuilder(iLQRReferenceBuilderConfig config,
 Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
                          const VehicleFootprintModel& footprint_model,
                          double wheelbase, double delta_max,
-                         const iLQRRsShortcutConfig& config) {
+                         const iLQRConfig& config) {
     ValidateRsShortcutConfig(config, wheelbase, delta_max);
-    if (config.cap_ratio == 0.0 || path.empty()) {
+    if (config.rs_cap_ratio == 0.0 || path.empty()) {
         return path;
     }
     const double turning_radius =
-        wheelbase / (config.cap_ratio * std::tan(delta_max));
+        wheelbase / (config.rs_cap_ratio * std::tan(delta_max));
     RsTimingSink timing(config.rs_timing_csv, config.rs_timing_tag, "rs");
     const auto& src_maneuvers = path.getManeuvers();
     const int num_maneuvers = static_cast<int>(src_maneuvers.size());
@@ -294,12 +294,12 @@ Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
                                                            CircleType::OUTER);
     const double outer_radius = footprint_model.getOuterRadius();
     const auto samples_safe = MakeSamplesSafeChecker(
-        esdf_map, outer_circles, outer_radius, config.collision_margin);
+        esdf_map, outer_circles, outer_radius, config.rs_collision_margin);
     // 原始总代价是「改进是否值得采纳」的唯一判据，原始总长是长度守卫
     // 的固定基准（改进后不得超预算）
     const double original_cost = ShortcutPathCost(src_maneuvers, config);
     const double length_budget =
-        path.length() * (1.0 + config.max_length_growth);
+        path.length() * (1.0 + config.rs_max_length_growth);
     // dp[i]：从全局起点到节点 i 的最优路径；seg 为空表示该连接段沿用
     // 原路径 maneuvers[parent..current)
     struct ShortcutState {
@@ -325,7 +325,7 @@ Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
             // 记账只给 RS 段计固定段价、原始段免计，等价于给 RS 加税，
             // 在段数少、路径已近最优的数据上会让 DP 永远找不到改进）
             accumulated_original_cost +=
-                config.segment_fixed_cost +
+                config.rs_segment_fixed_cost +
                 ManeuverShortcutCost(src_maneuvers[j - 1], config);
             double best_segment_cost = accumulated_original_cost;
             std::vector<Maneuver> best_segment;
@@ -346,7 +346,7 @@ Path ShortcutShiftPoints(const Path& path, const ESDFMap& esdf_map,
                           rs.valid);
             if (rs.valid) {
                 const auto samples = SampleReedsShepp(
-                    rs, start_node.pose, turning_radius, config.sample_dist);
+                    rs, start_node.pose, turning_radius, config.rs_sample_dist);
                 // 退化守卫：起终点重合的零长解只有单个采样点，构不成
                 // maneuver，不可作为零代价连接
                 if (samples.size() >= 2 && samples_safe(samples)) {
@@ -441,7 +441,7 @@ iLQRReference iLQRReferenceBuilder::build(const Path& path) const {
                                            points[i].y - points[i - 1].y);
     }
     const double total_length = arc_length.back();
-    if (total_length < config_.sample_dist) {
+    if (total_length < config_.reference_sample_dist) {
         throw std::invalid_argument(
             "iLQRReferenceBuilder: path total length is shorter than one "
             "sample spacing!!!");
@@ -449,13 +449,13 @@ iLQRReference iLQRReferenceBuilder::build(const Path& path) const {
     // 全长归一：段数按标称间距四舍五入，实际间距 = L / N，保证均匀覆盖终点
     const std::size_t num_steps = std::max<std::size_t>(
         1, static_cast<std::size_t>(
-               std::lround(total_length / config_.sample_dist)));
+               std::lround(total_length / config_.reference_sample_dist)));
     const double ds = total_length / static_cast<double>(num_steps);
     // 等弧长重采样：双指针扫描，θ 经统一 wrap 后线性插值
     iLQRReference reference;
     reference.ds = ds;
-    reference.dt = config_.dt;
-    reference.step_dt.assign(num_steps, config_.dt);
+    reference.dt = config_.reference_dt;
+    reference.step_dt.assign(num_steps, config_.reference_dt);
     reference.poses.reserve(num_steps + 1);
     std::size_t segment = 0;
     for (std::size_t k = 0; k <= num_steps; ++k) {
@@ -521,21 +521,21 @@ iLQRReference iLQRReferenceBuilder::build(const Path& path) const {
     }
     // 初值提取：v 由名义车速带符号给出，κ 由参考朝向差分得到并反解 δ，
     // a/ω 由 v/δ 经三点中心差分（端点单侧差分）得到，全部裁剪进盒约束
-    const double v_nominal = ds / config_.dt;
+    const double v_nominal = ds / config_.reference_dt;
     std::vector<double> v_init(num_steps + 1, 0.0);
     std::vector<double> delta_init(num_steps + 1, 0.0);
     for (std::size_t k = 0; k <= num_steps; ++k) {
         v_init[k] = ClampSymmetric(
             static_cast<double>(reference.maneuvers[point_maneuver[k]].sign) *
                 v_nominal,
-            config_.v_max);
+            config_.reference_v_max);
     }
     for (std::size_t k = 0; k < num_steps; ++k) {
         const double kappa =
             WrapAngle(reference.poses[k + 1].theta - reference.poses[k].theta) /
             ds;
         delta_init[k] =
-            ClampSymmetric(std::atan(wheelbase_ * kappa), config_.delta_max);
+            ClampSymmetric(std::atan(wheelbase_ * kappa), config_.reference_delta_max);
     }
     delta_init[num_steps] = delta_init[num_steps - 1];
     auto central_difference = [this](const std::vector<double>& values,
@@ -544,17 +544,17 @@ iLQRReference iLQRReferenceBuilder::build(const Path& path) const {
         out->reserve(values.size());
         for (std::size_t k = 0; k <= last; ++k) {
             const double diff =
-                (k == 0) ? (values[1] - values[0]) / config_.dt
+                (k == 0) ? (values[1] - values[0]) / config_.reference_dt
                 : (k == last)
-                    ? (values[last] - values[last - 1]) / config_.dt
-                    : (values[k + 1] - values[k - 1]) / (2.0 * config_.dt);
+                    ? (values[last] - values[last - 1]) / config_.reference_dt
+                    : (values[k + 1] - values[k - 1]) / (2.0 * config_.reference_dt);
             out->push_back(ClampSymmetric(diff, bound));
         }
     };
     std::vector<double> a_init;
     std::vector<double> omega_init;
-    central_difference(v_init, config_.a_max, &a_init);
-    central_difference(delta_init, config_.omega_max, &omega_init);
+    central_difference(v_init, config_.reference_a_max, &a_init);
+    central_difference(delta_init, config_.reference_omega_max, &omega_init);
     reference.initial_states.reserve(num_steps + 1);
     for (std::size_t k = 0; k <= num_steps; ++k) {
         iLQRState state;
@@ -566,11 +566,11 @@ iLQRReference iLQRReferenceBuilder::build(const Path& path) const {
     reference.initial_controls.resize(num_steps, iLQRControl::Zero());
     // 打靶节点布设：{每 n_s 步} ∪ {cusp} ∪ {末点 N}，排序去重
     reference.shooting_nodes.reserve(
-        (num_steps + config_.shooting_interval - 1) /
-            config_.shooting_interval +
+        (num_steps + config_.reference_shooting_interval - 1) /
+            config_.reference_shooting_interval +
         reference.cusp_indices.size() + 2);
     for (std::size_t node = 0; node < num_steps;
-         node += config_.shooting_interval) {
+         node += config_.reference_shooting_interval) {
         reference.shooting_nodes.push_back(node);
     }
     reference.shooting_nodes.insert(reference.shooting_nodes.end(),

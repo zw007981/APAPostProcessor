@@ -399,157 +399,157 @@ void LoadiLQRConfigOverrides(const nlohmann::json& details, iLQRConfig* config) 
     // 权威来源，加载完成后统一同步进 cost/post_stage 的同源字段
     const auto& reference = JsonSectionOrEmpty(details, "reference");
     LoadJsonFieldIfPresent(reference, "sample_dist",
-                           &config->reference.sample_dist);
-    LoadJsonFieldIfPresent(reference, "dt", &config->reference.dt);
+                           &config->reference_sample_dist);
+    LoadJsonFieldIfPresent(reference, "dt", &config->reference_dt);
     LoadJsonFieldIfPresent(reference, "shooting_interval",
-                           &config->reference.shooting_interval);
-    LoadJsonFieldIfPresent(reference, "v_max", &config->reference.v_max);
-    LoadJsonFieldIfPresent(reference, "a_max", &config->reference.a_max);
+                           &config->reference_shooting_interval);
+    LoadJsonFieldIfPresent(reference, "v_max", &config->reference_v_max);
+    LoadJsonFieldIfPresent(reference, "a_max", &config->reference_a_max);
     LoadJsonFieldIfPresent(reference, "delta_max",
-                           &config->reference.delta_max);
+                           &config->reference_delta_max);
     LoadJsonFieldIfPresent(reference, "omega_max",
-                           &config->reference.omega_max);
+                           &config->reference_omega_max);
     // 求解编排节（阶段二门控调度参数）
     const auto& solver = JsonSectionOrEmpty(details, "solver");
     LoadJsonFieldIfPresent(solver, "stage_two_max_outer_iterations",
-                           &config->solver.stage_two_max_outer_iterations);
+                           &config->stage_two_max_outer_iterations);
     LoadJsonFieldIfPresent(solver, "gating_mu_initial",
-                           &config->solver.gating_mu_initial);
+                           &config->gating_mu_initial);
     LoadJsonFieldIfPresent(solver, "gating_mu_max",
-                           &config->solver.gating_mu_max);
-    LoadJsonFieldIfPresent(solver, "gating_tol", &config->solver.gating_tol);
+                           &config->gating_mu_max);
+    LoadJsonFieldIfPresent(solver, "gating_tol", &config->gating_tol);
     // 内层 MS-iLQR 节：steer_accel_max 是 eta_max 的唯一权威来源
     const auto& inner = JsonSectionOrEmpty(solver, "inner");
-    LoadJsonFieldIfPresent(inner, "jerk_max", &config->solver.inner.jerk_max);
+    LoadJsonFieldIfPresent(inner, "jerk_max", &config->inner_jerk_max);
     LoadJsonFieldIfPresent(inner, "steer_accel_max",
-                           &config->solver.inner.steer_accel_max);
+                           &config->inner_steer_accel_max);
     LoadJsonFieldIfPresent(inner, "max_iterations",
-                           &config->solver.inner.max_iterations);
+                           &config->inner_max_iterations);
     LoadJsonFieldIfPresent(inner, "cost_change_tol",
-                           &config->solver.inner.cost_change_tol);
+                           &config->inner_cost_change_tol);
     LoadJsonFieldIfPresent(inner, "gradient_tol",
-                           &config->solver.inner.gradient_tol);
+                           &config->inner_gradient_tol);
     LoadJsonFieldIfPresent(inner, "convergence_defect_tol",
-                           &config->solver.inner.convergence_defect_tol);
+                           &config->inner_convergence_defect_tol);
     LoadJsonFieldIfPresent(inner, "reg_initial",
-                           &config->solver.inner.reg_initial);
-    LoadJsonFieldIfPresent(inner, "reg_min", &config->solver.inner.reg_min);
-    LoadJsonFieldIfPresent(inner, "reg_max", &config->solver.inner.reg_max);
+                           &config->inner_reg_initial);
+    LoadJsonFieldIfPresent(inner, "reg_min", &config->inner_reg_min);
+    LoadJsonFieldIfPresent(inner, "reg_max", &config->inner_reg_max);
     LoadJsonFieldIfPresent(inner, "reg_increase",
-                           &config->solver.inner.reg_increase);
+                           &config->inner_reg_increase);
     LoadJsonFieldIfPresent(inner, "reg_decrease",
-                           &config->solver.inner.reg_decrease);
+                           &config->inner_reg_decrease);
     LoadJsonFieldIfPresent(inner, "armijo_gamma",
-                           &config->solver.inner.armijo_gamma);
+                           &config->inner_armijo_gamma);
     LoadJsonFieldIfPresent(inner, "backtrack_beta",
-                           &config->solver.inner.backtrack_beta);
+                           &config->inner_backtrack_beta);
     LoadJsonFieldIfPresent(inner, "max_backtracks",
-                           &config->solver.inner.max_backtracks);
-    LoadJsonFieldIfPresent(inner, "merit_mu0", &config->solver.inner.merit_mu0);
+                           &config->inner_max_backtracks);
+    LoadJsonFieldIfPresent(inner, "merit_mu0", &config->inner_merit_mu0);
     LoadJsonFieldIfPresent(inner, "merit_mu_max",
-                           &config->solver.inner.merit_mu_max);
+                           &config->inner_merit_mu_max);
     LoadJsonFieldIfPresent(inner, "merit_mu_al_ratio",
-                           &config->solver.inner.merit_mu_al_ratio);
+                           &config->inner_merit_mu_al_ratio);
     LoadJsonFieldIfPresent(inner, "domain_guard_margin",
-                           &config->solver.inner.domain_guard_margin);
+                           &config->inner_domain_guard_margin);
     LoadJsonFieldIfPresent(inner, "use_virtual_control",
-                           &config->solver.inner.use_virtual_control);
+                           &config->inner_use_virtual_control);
     // 外层 AL 节
     const auto& outer = JsonSectionOrEmpty(solver, "outer");
     LoadJsonFieldIfPresent(outer, "max_outer_iterations",
-                           &config->solver.outer.max_outer_iterations);
+                           &config->outer_max_outer_iterations);
     LoadJsonFieldIfPresent(outer, "terminal_position_tol",
-                           &config->solver.outer.terminal_position_tol);
+                           &config->outer_terminal_position_tol);
     LoadJsonFieldIfPresent(outer, "terminal_heading_tol_deg",
-                           &config->solver.outer.terminal_heading_tol_deg);
+                           &config->outer_terminal_heading_tol_deg);
     LoadJsonFieldIfPresent(outer, "inequality_tol",
-                           &config->solver.outer.inequality_tol);
+                           &config->outer_inequality_tol);
     LoadJsonFieldIfPresent(outer, "defect_tol",
-                           &config->solver.outer.defect_tol);
-    LoadJsonFieldIfPresent(outer, "mu_min", &config->solver.outer.mu_min);
-    LoadJsonFieldIfPresent(outer, "mu_max", &config->solver.outer.mu_max);
+                           &config->outer_defect_tol);
+    LoadJsonFieldIfPresent(outer, "mu_min", &config->outer_mu_min);
+    LoadJsonFieldIfPresent(outer, "mu_max", &config->outer_mu_max);
     LoadJsonFieldIfPresent(outer, "first_round_mu",
-                           &config->solver.outer.first_round_mu);
+                           &config->outer_first_round_mu);
     LoadJsonFieldIfPresent(outer, "amplitude_mu_initial",
-                           &config->solver.outer.amplitude_mu_initial);
+                           &config->outer_amplitude_mu_initial);
     LoadJsonFieldIfPresent(outer, "epsilon_mu",
-                           &config->solver.outer.epsilon_mu);
+                           &config->outer_epsilon_mu);
     LoadJsonFieldIfPresent(outer, "mu_gate_kappa",
-                           &config->solver.outer.mu_gate_kappa);
+                           &config->outer_mu_gate_kappa);
     LoadJsonFieldIfPresent(outer, "mu_growth_factor",
-                           &config->solver.outer.mu_growth_factor);
+                           &config->outer_mu_growth_factor);
     LoadJsonFieldIfPresent(outer, "anneal_gamma",
-                           &config->solver.outer.anneal_gamma);
+                           &config->outer_anneal_gamma);
     LoadJsonFieldIfPresent(
         outer, "amplitude_mu_per_element_stage_two",
-        &config->solver.outer.amplitude_mu_per_element_stage_two);
+        &config->outer_amplitude_mu_per_element_stage_two);
     LoadJsonFieldIfPresent(outer, "esdf_scale_growth",
-                           &config->solver.outer.esdf_scale_growth);
+                           &config->outer_esdf_scale_growth);
     LoadJsonFieldIfPresent(outer, "esdf_scale_max",
-                           &config->solver.outer.esdf_scale_max);
+                           &config->outer_esdf_scale_max);
     // 代价节：不接收幅值边界键（由 reference 节统一供给）
     const auto& cost = JsonSectionOrEmpty(solver, "cost");
     LoadJsonFieldIfPresent(cost, "weight_jerk",
-                           &config->solver.cost.weight_jerk);
+                           &config->cost_weight_jerk);
     LoadJsonFieldIfPresent(cost, "weight_steer_accel",
-                           &config->solver.cost.weight_steer_accel);
+                           &config->cost_weight_steer_accel);
     LoadJsonFieldIfPresent(cost, "weight_ref_base",
-                           &config->solver.cost.weight_ref_base);
+                           &config->cost_weight_ref_base);
     LoadJsonFieldIfPresent(cost, "weight_theta",
-                           &config->solver.cost.weight_theta);
+                           &config->cost_weight_theta);
     // ESDF 双 margin 惩罚节
     const auto& esdf = JsonSectionOrEmpty(details, "esdf");
-    LoadJsonFieldIfPresent(esdf, "margin_safe", &config->esdf.margin_safe);
-    LoadJsonFieldIfPresent(esdf, "margin_comf", &config->esdf.margin_comf);
-    LoadJsonFieldIfPresent(esdf, "weight_safe", &config->esdf.weight_safe);
-    LoadJsonFieldIfPresent(esdf, "weight_comf", &config->esdf.weight_comf);
-    LoadJsonFieldIfPresent(esdf, "stride", &config->esdf.stride);
+    LoadJsonFieldIfPresent(esdf, "margin_safe", &config->esdf_margin_safe);
+    LoadJsonFieldIfPresent(esdf, "margin_comf", &config->esdf_margin_comf);
+    LoadJsonFieldIfPresent(esdf, "weight_safe", &config->esdf_weight_safe);
+    LoadJsonFieldIfPresent(esdf, "weight_comf", &config->esdf_weight_comf);
+    LoadJsonFieldIfPresent(esdf, "stride", &config->esdf_stride);
     // 后处理节：不接收 omega_max/eta_max 键（由 reference/inner 节统一
     // 供给）；cleanup/validation 两个嵌套配置不在 JSON 映射范围内
     const auto& post_stage = JsonSectionOrEmpty(details, "post_stage");
     LoadJsonFieldIfPresent(post_stage, "epsilon_v",
-                           &config->post_stage.epsilon_v);
-    LoadJsonFieldIfPresent(post_stage, "v_dwell", &config->post_stage.v_dwell);
+                           &config->post_epsilon_v);
+    LoadJsonFieldIfPresent(post_stage, "v_dwell", &config->post_v_dwell);
     LoadJsonFieldIfPresent(post_stage, "shift_delay",
-                           &config->post_stage.shift_delay);
+                           &config->post_shift_delay);
     LoadJsonFieldIfPresent(post_stage, "kappa_pad",
-                           &config->post_stage.kappa_pad);
+                           &config->post_kappa_pad);
     LoadJsonFieldIfPresent(post_stage, "seam_speed_tol",
-                           &config->post_stage.seam_speed_tol);
+                           &config->post_seam_speed_tol);
     LoadJsonFieldIfPresent(post_stage, "dwell_omega_tol",
-                           &config->post_stage.dwell_omega_tol);
+                           &config->post_dwell_omega_tol);
     LoadJsonFieldIfPresent(post_stage, "amplitude_check_tol",
-                           &config->post_stage.amplitude_check_tol);
+                           &config->post_amplitude_check_tol);
     LoadJsonFieldIfPresent(post_stage, "amplitude_check_rel_tol",
-                           &config->post_stage.amplitude_check_rel_tol);
+                           &config->post_amplitude_check_rel_tol);
     LoadJsonFieldIfPresent(post_stage, "control_overshoot_tol",
-                           &config->post_stage.control_overshoot_tol);
+                           &config->post_control_overshoot_tol);
     LoadJsonFieldIfPresent(post_stage, "stage_two_min_tracking_weight",
-                           &config->post_stage.stage_two_min_tracking_weight);
+                           &config->post_stage_two_min_tracking_weight);
     LoadJsonFieldIfPresent(
         post_stage, "skip_stage_two_when_weight_exhausted",
-        &config->post_stage.skip_stage_two_when_weight_exhausted);
+        &config->post_skip_stage_two_when_weight_exhausted);
     // Reeds-Shepp 换挡点短接节（参考构建前的同伦类重选，默认关闭；
     // 编排为 maneuver 边界节点的动态规划全局择优）
     const auto& rs_shortcut = JsonSectionOrEmpty(details, "rs_shortcut");
     LoadJsonFieldIfPresent(rs_shortcut, "cap_ratio",
-                           &config->rs_shortcut.cap_ratio);
+                           &config->rs_cap_ratio);
     LoadJsonFieldIfPresent(rs_shortcut, "collision_margin",
-                           &config->rs_shortcut.collision_margin);
+                           &config->rs_collision_margin);
     LoadJsonFieldIfPresent(rs_shortcut, "max_length_growth",
-                           &config->rs_shortcut.max_length_growth);
+                           &config->rs_max_length_growth);
     LoadJsonFieldIfPresent(rs_shortcut, "sample_dist",
-                           &config->rs_shortcut.sample_dist);
+                           &config->rs_sample_dist);
     LoadJsonFieldIfPresent(rs_shortcut, "segment_fixed_cost",
-                           &config->rs_shortcut.segment_fixed_cost);
+                           &config->rs_segment_fixed_cost);
     LoadJsonFieldIfPresent(rs_shortcut, "short_segment_weight",
-                           &config->rs_shortcut.short_segment_weight);
+                           &config->rs_short_segment_weight);
     LoadJsonFieldIfPresent(rs_shortcut, "short_segment_length",
-                           &config->rs_shortcut.short_segment_length);
+                           &config->rs_short_segment_length);
     LoadJsonFieldIfPresent(rs_shortcut, "rs_timing_csv",
-                           &config->rs_shortcut.rs_timing_csv);
+                           &config->rs_timing_csv);
     LoadJsonFieldIfPresent(rs_shortcut, "rs_timing_tag",
-                           &config->rs_shortcut.rs_timing_tag);
+                           &config->rs_timing_tag);
     // 融化开/关双候选择优（顶层字段，默认 false = 关闭）
     LoadJsonFieldIfPresent(details, "dual_candidate_select",
                            &config->dual_candidate_select);
@@ -768,9 +768,9 @@ PostProcessorResult PostProcessor::optimizeiLQR(
     // 求解器启动不了的参考，因此它天然不具备单调性。不能靠调参避开
     // 这个风险（那只是在现有数据集上过拟合），而是用失败重试把它堆回
     // 单调：短接不成则以未短接参考重跑一遍，保证不会比关闭短接更差
-    if (ilqr_config.rs_shortcut.cap_ratio > 0.0 && !result.success) {
+    if (ilqr_config.rs_cap_ratio > 0.0 && !result.success) {
         iLQRConfig no_shortcut_config = ilqr_config;
-        no_shortcut_config.rs_shortcut.cap_ratio = 0.0;
+        no_shortcut_config.rs_cap_ratio = 0.0;
         PostProcessorResult fallback =
             optimizeiLQRDualCandidate(init_path, no_shortcut_config);
         LOG_FMT_INFO(
@@ -795,23 +795,23 @@ PostProcessorResult PostProcessor::optimizeiLQRDualCandidate(
     // SinglePass 内二次钳制无副作用）
     Path shared_input = init_path;
     iLQRConfig shared_config = ilqr_config;
-    if (ilqr_config.rs_shortcut.cap_ratio > 0.0) {
+    if (ilqr_config.rs_cap_ratio > 0.0) {
         shared_config.clampToVehicleParams(vehicle_params_);
         Path shortcut = ShortcutShiftPoints(
             init_path, esdf_map_, footprint_model_, vehicle_params_.wheelbase,
-            shared_config.reference.delta_max, shared_config.rs_shortcut);
+            shared_config.reference_delta_max, shared_config);
         LOG_FMT_INFO(
             "iLQR RS shortcut: maneuvers {} -> {}, length {:.3f} -> {:.3f}",
             init_path.numManeuvers(), shortcut.numManeuvers(),
             init_path.length(), shortcut.length());
         shared_input = std::move(shortcut);
-        shared_config.rs_shortcut.cap_ratio = 0.0;
+        shared_config.rs_cap_ratio = 0.0;
     }
     // 候选一：配置原样（融化开）；候选二：退火率 ≈1（融化机制实际关闭，
     // 与调参矩阵的 nomelt_control 同一语义）
     PostProcessorResult melt = optimizeiLQRSinglePass(shared_input, shared_config);
     iLQRConfig control_config = shared_config;
-    control_config.solver.outer.anneal_gamma = 0.999;
+    control_config.outer_anneal_gamma = 0.999;
     PostProcessorResult control =
         optimizeiLQRSinglePass(shared_input, control_config);
     const bool pick_control = PreferControlCandidate(melt, control);

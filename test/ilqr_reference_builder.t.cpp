@@ -56,7 +56,7 @@ void AppendArc(Path* path, double radius, double phi_to) {
 // 与原点列逐点重合；总长不整除时按全长归一，间距 = L / round(L / 0.05)，
 // 首末点仍必须严格保持。
 TEST(iLQRReferenceBuilderTest, StraightLineResamplesToUniformSpacing) {
-    const iLQRReferenceBuilder builder(iLQRReferenceBuilderConfig{},
+    const iLQRReferenceBuilder builder(iLQRConfig{},
                                       MakeVehicleParams());
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
@@ -95,7 +95,7 @@ TEST(iLQRReferenceBuilderTest, StraightLineResamplesToUniformSpacing) {
 // 同时 cusp 不产生任何 v=0 语义，初值速度在 cusp 两侧只是变号而非清零。
 TEST(iLQRReferenceBuilderTest, ShiftPathProducesCuspsAndManeuverMetadata) {
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+        iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
             .build(BuildTwoShiftPath());
     // 总长 2.2 m → N = 44 步、45 个位姿
     ASSERT_EQ(reference.poses.size(), 45);
@@ -136,7 +136,7 @@ TEST(iLQRReferenceBuilderTest, StraightLineInitialGuessMatchesAnalyticValues) {
     AppendXLine(&path, 0.0, 2.0, 0.0);
     path.finalize();
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+        iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
             .build(path);
     ASSERT_EQ(reference.initial_states.size(), 41);
     ASSERT_EQ(reference.initial_controls.size(), 40);
@@ -164,7 +164,7 @@ TEST(iLQRReferenceBuilderTest, CircularArcInitialGuessMatchesAnalyticCurvature) 
     AppendArc(&path, 1.0 / 0.15, 0.375);
     path.finalize();
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+        iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
             .build(path);
     // 弧长 2.5 m → N = 50 步
     ASSERT_EQ(reference.initial_states.size(), 51);
@@ -190,36 +190,36 @@ TEST(iLQRReferenceBuilderTest, CircularArcInitialGuessMatchesAnalyticCurvature) 
 // 所以速度初值必须整体压到 ±0.3；曲率 κ=1.0 的圆弧给出 δ=atan(3.0)>δ_max，
 // 转角初值必须裁到 δ_max。
 TEST(iLQRReferenceBuilderTest, InitialGuessIsClippedIntoBox) {
-    iLQRReferenceBuilderConfig config;
-    config.v_max = 0.3;
+    iLQRConfig config;
+    config.reference_v_max = 0.3;
     const iLQRReference reference =
         iLQRReferenceBuilder(config, MakeVehicleParams())
             .build(BuildTwoShiftPath());
     for (const auto& state : reference.initial_states) {
-        EXPECT_LE(std::abs(state(ILQR_IDX_V)), config.v_max + 1e-12);
-        EXPECT_LE(std::abs(state(ILQR_IDX_A)), config.a_max + 1e-12);
-        EXPECT_LE(std::abs(state(ILQR_IDX_DELTA)), config.delta_max + 1e-12);
-        EXPECT_LE(std::abs(state(ILQR_IDX_OMEGA)), config.omega_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_V)), config.reference_v_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_A)), config.reference_a_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_DELTA)), config.reference_delta_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_OMEGA)), config.reference_omega_max + 1e-12);
     }
     EXPECT_NEAR(reference.initial_states[0](ILQR_IDX_V), 0.3, 1e-12);
     EXPECT_NEAR(reference.initial_states[20](ILQR_IDX_V), -0.3, 1e-12);
     // 第一个 cusp 附近 a 尖峰被裁到 -a_max，第二个 cusp 附近为 +a_max
-    EXPECT_NEAR(reference.initial_states[19](ILQR_IDX_A), -config.a_max, 1e-12);
-    EXPECT_NEAR(reference.initial_states[33](ILQR_IDX_A), config.a_max, 1e-12);
+    EXPECT_NEAR(reference.initial_states[19](ILQR_IDX_A), -config.reference_a_max, 1e-12);
+    EXPECT_NEAR(reference.initial_states[33](ILQR_IDX_A), config.reference_a_max, 1e-12);
 
     Path sharp_arc;
     sharp_arc.addPoint({0.0, 0.0, 0.0});
     AppendArc(&sharp_arc, 1.0, 0.3);
     sharp_arc.finalize();
     const iLQRReference arc_reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+        iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
             .build(sharp_arc);
     for (const auto& state : arc_reference.initial_states) {
         EXPECT_LE(std::abs(state(ILQR_IDX_DELTA)),
-                  iLQRReferenceBuilderConfig{}.delta_max + 1e-12);
+                  iLQRConfig{}.reference_delta_max + 1e-12);
     }
     EXPECT_NEAR(arc_reference.initial_states[3](ILQR_IDX_DELTA),
-                iLQRReferenceBuilderConfig{}.delta_max, 1e-12);
+                iLQRConfig{}.reference_delta_max, 1e-12);
 }
 
 // 测试打靶节点布设：{每 n_s 步} ∪ {全部 cusp} ∪ {末点 N}。
@@ -228,20 +228,20 @@ TEST(iLQRReferenceBuilderTest, InitialGuessIsClippedIntoBox) {
 TEST(iLQRReferenceBuilderTest, ShootingNodesCoverCuspsEndAndIntervalBound) {
     const Path path = BuildTwoShiftPath();
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+        iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
             .build(path);
     const std::vector<std::size_t> expected_nodes = {0, 20, 25, 34, 44};
     EXPECT_EQ(reference.shooting_nodes, expected_nodes);
 
-    iLQRReferenceBuilderConfig wide_config;
-    wide_config.shooting_interval = 100;
+    iLQRConfig wide_config;
+    wide_config.reference_shooting_interval = 100;
     const iLQRReference wide_reference =
         iLQRReferenceBuilder(wide_config, MakeVehicleParams()).build(path);
     const std::vector<std::size_t> expected_wide = {0, 20, 34, 44};
     EXPECT_EQ(wide_reference.shooting_nodes, expected_wide);
 
-    iLQRReferenceBuilderConfig dense_config;
-    dense_config.shooting_interval = 10;
+    iLQRConfig dense_config;
+    dense_config.reference_shooting_interval = 10;
     const iLQRReference dense_reference =
         iLQRReferenceBuilder(dense_config, MakeVehicleParams()).build(path);
     const std::vector<std::size_t> expected_dense = {0, 10, 20, 30, 34, 40, 44};
@@ -257,7 +257,7 @@ TEST(iLQRReferenceBuilderTest, ShootingNodesCoverCuspsEndAndIntervalBound) {
         EXPECT_NE(std::find(nodes.begin(), nodes.end(), cusp), nodes.end());
     }
     for (std::size_t i = 1; i < nodes.size(); ++i) {
-        EXPECT_LE(nodes[i] - nodes[i - 1], dense_config.shooting_interval);
+        EXPECT_LE(nodes[i] - nodes[i - 1], dense_config.reference_shooting_interval);
     }
 }
 
@@ -265,7 +265,7 @@ TEST(iLQRReferenceBuilderTest, ShootingNodesCoverCuspsEndAndIntervalBound) {
 // 纯原地旋转（零位移）路径都必须抛出 std::invalid_argument 而非崩溃或
 // 静默产出无意义结果。
 TEST(iLQRReferenceBuilderTest, DegeneratePathsThrowInvalidArgument) {
-    const iLQRReferenceBuilder builder(iLQRReferenceBuilderConfig{},
+    const iLQRReferenceBuilder builder(iLQRConfig{},
                                       MakeVehicleParams());
     Path empty_path;
     EXPECT_THROW(builder.build(empty_path), std::invalid_argument);
@@ -300,7 +300,7 @@ TEST(iLQRReferenceBuilderTest, HeadingWrapAcrossPiHasNoSpuriousArtifacts) {
     }
     path.finalize();
     const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRReferenceBuilderConfig{}, MakeVehicleParams())
+        iLQRReferenceBuilder(iLQRConfig{}, MakeVehicleParams())
             .build(path);
     ASSERT_EQ(reference.poses.size(), 41);
     for (std::size_t k = 1; k < reference.poses.size(); ++k) {
@@ -329,7 +329,7 @@ TEST_P(iLQRReferenceDatasetTest, RealDatasetPreprocessesToExpectedScale) {
     const auto vehicle_params = VehicleParams::FromProto(request.vehicle());
     const auto init_path = Path::FromProto(request.initial_path());
     ASSERT_FALSE(init_path.empty());
-    const iLQRReferenceBuilderConfig config;
+    const iLQRConfig config;
     const iLQRReference reference =
         iLQRReferenceBuilder(config, vehicle_params).build(init_path);
 
@@ -375,9 +375,9 @@ TEST_P(iLQRReferenceDatasetTest, RealDatasetPreprocessesToExpectedScale) {
         EXPECT_LT(cusp, expected_n + 1);
     }
     for (std::size_t i = 1; i < nodes.size(); ++i) {
-        EXPECT_LE(nodes[i] - nodes[i - 1], config.shooting_interval);
+        EXPECT_LE(nodes[i] - nodes[i - 1], config.reference_shooting_interval);
     }
-    EXPECT_LE(nodes.size(), expected_n / config.shooting_interval +
+    EXPECT_LE(nodes.size(), expected_n / config.reference_shooting_interval +
                                 reference.cusp_indices.size() + 2);
 
     // 端点保持：首末参考位姿与原始路径一致
@@ -395,10 +395,10 @@ TEST_P(iLQRReferenceDatasetTest, RealDatasetPreprocessesToExpectedScale) {
         for (int i = 0; i < ILQR_STATE_DIM; ++i) {
             EXPECT_TRUE(std::isfinite(state(i)));
         }
-        EXPECT_LE(std::abs(state(ILQR_IDX_V)), config.v_max + 1e-12);
-        EXPECT_LE(std::abs(state(ILQR_IDX_A)), config.a_max + 1e-12);
-        EXPECT_LE(std::abs(state(ILQR_IDX_DELTA)), config.delta_max + 1e-12);
-        EXPECT_LE(std::abs(state(ILQR_IDX_OMEGA)), config.omega_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_V)), config.reference_v_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_A)), config.reference_a_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_DELTA)), config.reference_delta_max + 1e-12);
+        EXPECT_LE(std::abs(state(ILQR_IDX_OMEGA)), config.reference_omega_max + 1e-12);
     }
     for (const auto& control : reference.initial_controls) {
         EXPECT_DOUBLE_EQ(control(0), 0.0);
