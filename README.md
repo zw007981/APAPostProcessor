@@ -135,22 +135,22 @@ bench_apa_post_processor
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→12.651m（−65.7%） | 6→4 | 227ms | 阶段二收敛 |
-| `data/mid_park/data3.json` | 24.582→25.110m（+2.1%） | 9→6 | 710ms | 阶段一降级输出 |
-| `data/rub_park/data1.json` | 12.988→10.528m（−18.9%） | 10→4 | 271ms | 阶段一降级输出 |
-| `data/rub_park/data7.json` | 18.744→14.096m（−24.8%） | 6→2 | 248ms | 阶段二收敛 |
+| `data/long_park/data6.json` | 36.862→12.706m（−65.5%） | 6→4 | 154ms | 阶段二收敛 |
+| `data/mid_park/data3.json` | 24.582→24.578m（−0.0%，持平） | 9→6 | 296ms | 阶段一降级输出 |
+| `data/rub_park/data1.json` | 12.988→10.519m（−19.0%） | 10→4 | 175ms | 阶段一降级输出 |
+| `data/rub_park/data7.json` | 18.744→14.096m（−24.8%） | 6→2 | 187ms | 阶段二收敛 |
 
 各场景优化前后对比（红色为原始 A\* 路径，绿色为 iLQR 优化轨迹，顺序与上表一致）：
 
-**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 65.7%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法轨迹的几何特征：
+**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 65.5%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法轨迹的几何特征：
 
 ![ilqr_data6](fig/ilqr_data6.png)
 
-**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度反而增加 2.1%：
+**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度基本持平：
 
 ![ilqr_data3](fig/ilqr_data3.png)
 
-**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 18.9%：
+**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 19.0%：
 
 ![ilqr_data1](fig/ilqr_data1.png)
 
@@ -158,14 +158,14 @@ bench_apa_post_processor
 
 ![ilqr_data7](fig/ilqr_data7.png)
 
-通过配置 `dual_candidate_select=true` 再次进行一轮额外的iLQR精修。四数据集全部阶段二收敛，路径优化效果为所有组合中最好：data3 由默认的 +2.1% 拉回 −37.1%、data1 由 −18.9% 加深到 −39.3%。但合计耗时约 3721 ms（默认约 1456 ms，约 2.6×）：
+通过配置 `dual_candidate_select=true` 可以进行一轮额外的iLQR精修。四数据集全部阶段二收敛，路径优化效果为所有组合中最好：data3 由默认的持平（−0.0%）拉回 −37.1%、data1 由 −19.0% 加深到 −39.3%。但合计耗时约 2357 ms（默认约 811 ms，约 2.9×）：
 
 | 数据集 | 初始路径 | 默认（相对初始） | 开启精修（相对初始） | 默认maneuver | 开启maneuver | 默认耗时 | 开启耗时 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| data6 | 36.862m | 12.651m（−65.7%） | 12.651m（−65.7%） | 6→4 | 6→4 | 227ms | 831ms |
-| data3 | 24.582m | 25.110m（+2.1%） | 15.474m（−37.1%） | 9→6 | 9→6 | 710ms | 1334ms |
-| data1 | 12.988m | 10.528m（−18.9%） | 7.887m（−39.3%） | 10→4 | 10→4 | 271ms | 608ms |
-| data7 | 18.744m | 14.096m（−24.8%） | 13.680m（−27.0%） | 6→2 | 6→2 | 248ms | 947ms |
+| data6 | 36.862m | 12.706m（−65.5%） | 12.706m（−65.5%） | 6→4 | 6→4 | 154ms | 469ms |
+| data3 | 24.582m | 24.578m（−0.0%） | 15.472m（−37.1%） | 9→6 | 9→6 | 296ms | 631ms |
+| data1 | 12.988m | 10.519m（−19.0%） | 7.884m（−39.3%） | 10→4 | 10→4 | 175ms | 595ms |
+| data7 | 18.744m | 14.096m（−24.8%） | 13.680m（−27.0%） | 6→2 | 6→2 | 187ms | 662ms |
 
 但是车端耗时敏感，故默认关闭，效果如下图所示：
 

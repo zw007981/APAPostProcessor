@@ -456,6 +456,9 @@ TEST(ApaILQRSolverTest, InfeasibleTerminalHeadingFailsWithDiagnostics) {
     iLQRConfig config = MakeSyntheticConfig();
     config.cost_delta_max = 0.55;
     config.cost_omega_max = 0.5;
+    // 本测试锁定「几何不可行 → 失败诊断」的出口语义，与 B1 正交；显式
+    // 关闭旧增益复用，防止其改变收敛路径使该场景意外收敛到可接受终点
+    config.inner_gain_reuse_consecutive_limit = 0;
     const auto result = SolveStageOne(reference, nullptr, config);
     EXPECT_TRUE(result.report.status == ApaILQRStatus::MAX_OUTER_ITERATIONS ||
                 result.report.status == ApaILQRStatus::INNER_SOLVER_FAILED)

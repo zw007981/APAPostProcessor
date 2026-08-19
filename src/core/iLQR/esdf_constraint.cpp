@@ -41,12 +41,26 @@ iLQREsdfConstraint::iLQREsdfConstraint(
 
 iLQREsdfPoseCost iLQREsdfConstraint::evaluate(double x, double y,
                                             double theta) const {
+    return evaluateWithSkip(x, y, theta, nullptr);
+}
+
+iLQREsdfPoseCost iLQREsdfConstraint::evaluateWithSkip(
+    double x, double y, double theta, const std::vector<bool>* skip_mask,
+    std::vector<double>* out_dists) const {
     iLQREsdfPoseCost result;
     const double cos_theta = std::cos(theta);
     const double sin_theta = std::sin(theta);
     Eigen::Vector3d grad3 = Eigen::Vector3d::Zero();
     Eigen::Matrix3d hess3 = Eigen::Matrix3d::Zero();
-    for (const auto& local_center : circle_local_centers_) {
+    for (std::size_t i = 0; i < circle_local_centers_.size(); ++i) {
+        // A1 跳过：守卫已证明该圆当前距离仍足够远，整次查询跳过（贡献恒 0）
+        if (skip_mask != nullptr && i < skip_mask->size() && (*skip_mask)[i]) {
+            if (out_dists != nullptr) {
+                (*out_dists)[i] = -1.0;
+            }
+            continue;
+        }
+        const auto& local_center = circle_local_centers_[i];
         const double lx = local_center.x();
         const double ly = local_center.y();
         // 圆心世界坐标 P = (x,y) + R(θ)·p_local
@@ -57,6 +71,9 @@ iLQREsdfPoseCost iLQREsdfConstraint::evaluate(double x, double y,
         // Hessian 的贡献恒为零，梯度插值整体跳过，结果逐位不变
         const auto query = esdf_map_.getDistAndGradIfCloser(
             cx, cy, circle_radius_ + config_.esdf_margin_comf);
+        if (out_dists != nullptr) {
+            (*out_dists)[i] = query.dist;
+        }
         // 防御：ESDF 查询返回非有限值（当前实现整数距离场下不可达，属
         // 保守侵入兜底，梯度取零与逐圆全量路径的防御分支一致）
         if (!std::isfinite(query.dist)) {
@@ -104,6 +121,14 @@ iLQREsdfPoseCost iLQREsdfConstraint::evaluate(double x, double y,
     result.gradient(ILQR_IDX_THETA) = grad3.z();
     result.hessian.topLeftCorner<3, 3>() = hess3;
     return result;
+}
+
+double iLQREsdfConstraint::maxCircleLeverArm() const {
+    double max_arm = 0.0;
+    for (const auto& c : circle_local_centers_) {
+        max_arm = std::max(max_arm, c.norm());
+    }
+    return max_arm;
 }
 
 iLQREsdfCircleConstraint iLQREsdfConstraint::evaluateCircle(

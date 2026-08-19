@@ -110,6 +110,12 @@ struct iLQRConfig : public Config {
     bool inner_use_virtual_control{true};
     // 虚拟控制软代价权重 R_inf
     double inner_virtual_control_weight{1e4};
+    // 旧增益复用连续次数上限（0=关闭，默认 1=开启：连续复用 1 次后强制
+    // BP 刷新）
+    int inner_gain_reuse_consecutive_limit{1};
+    // 旧增益复用连续拒绝熔断阈值（0=关闭熔断）：连续拒绝达阈值后本次
+    // solve 内不再尝试复用
+    int inner_gain_reuse_reject_limit{8};
 
     // ===== 外层 AL（AlOuterLoop）=====
     // 外层迭代上限
@@ -168,6 +174,10 @@ struct iLQRConfig : public Config {
     double esdf_weight_comf{10.0};
     // 时间轴抽样间隔
     int esdf_stride{1};
+    // 活跃圆守卫跳过（默认开启）
+    bool esdf_active_circle_skip{true};
+    // A1 跳过余量 (m)：d_off = r_outer+margin_comf+该余量
+    double esdf_skip_margin{0.1};
 
     // ===== 后处理与阶段二门控精化（iLQRPostStage）=====
     // 符号游程滞回 (m/s)

@@ -2,10 +2,7 @@
     "algorithm": "ilqr",
     "outer_row_num": 2,
     "esdf": {
-        "margin_safe": 0.02,
-        "margin_comf": 0.2,
-        "weight_safe": 100.0,
-        "weight_comf": 10.0
+        "active_circle_skip": true
     },
     "solver": {
         "inner": {
@@ -13,6 +10,8 @@
             "gradient_tol": 1e-05,
             "merit_mu_max": 1000.0,
             "merit_mu_al_ratio": 0.001,
+            "gain_reuse_consecutive_limit": 1,
+            "gain_reuse_reject_limit": 8,
             "use_virtual_control": true
         },
         "outer": {

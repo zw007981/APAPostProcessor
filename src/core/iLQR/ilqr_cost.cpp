@@ -32,6 +32,10 @@ iLQRCostMultiplierState iLQRCostMultiplierState::MakeStageTwoZero(
 iLQRCostEvaluator::iLQRCostEvaluator(const iLQRConfig& config,
                                    const iLQREsdfConstraint* esdf_constraint)
     : config_(config), esdf_constraint_(esdf_constraint) {
+    // A1 守卫的杠杆臂：构造时初始化，后续跨求值调用复用
+    if (esdf_constraint != nullptr) {
+        max_lever_arm_ = esdf_constraint->maxCircleLeverArm();
+    }
     // 配置错误会静默污染全部下游求解目标，必须在构造期显式拒绝
     if (!std::isfinite(config_.cost_weight_jerk) || config_.cost_weight_jerk < 0.0 ||
         !std::isfinite(config_.cost_weight_steer_accel) ||
@@ -140,12 +144,13 @@ iLQRCostEvaluation iLQRCostEvaluator::evaluate(
     // 顺序与全量求值路径一致，接受路径的数值逐位不变）
     for (std::size_t k = 0; k < num_steps; ++k) {
         if (esdf_constraint_ != nullptr && esdf_constraint_->isSampled(k)) {
-            accumulateEsdfStage(states[k], input.esdf_scale, &result.stages[k]);
+            accumulateEsdfStage(k, states[k], input.esdf_scale,
+                                &result.stages[k]);
         }
     }
     // 终端阶段恒评估 ESDF（终点避障不抽样）
     if (esdf_constraint_ != nullptr) {
-        accumulateEsdfStage(states[num_steps], input.esdf_scale,
+        accumulateEsdfStage(num_steps, states[num_steps], input.esdf_scale,
                             &result.stages[num_steps]);
     }
     // 完整总代价按同一固定顺序重算
@@ -204,9 +209,59 @@ void iLQRCostEvaluator::evaluateRunningStage(
 }
 
 void iLQRCostEvaluator::accumulateEsdfStage(
-    const iLQRState& x, double esdf_scale, iLQRStageCostDerivatives* out) const {
-    const auto esdf = esdf_constraint_->evaluate(
-        x(ILQR_IDX_X), x(ILQR_IDX_Y), x(ILQR_IDX_THETA));
+    std::size_t k, const iLQRState& x, double esdf_scale,
+    iLQRStageCostDerivatives* out) const {
+    // A1 活跃圆守卫（默认关闭）：缓存已初始化时，对每个圆用
+    // 「上次距离 − 圆心位移上界 ≥ d_off」判定可跳过；跳过圆贡献恒 0，
+    // 与全量求值逐位一致（守卫是严格下界，见 §4.4.1 A1）
+    std::vector<bool> skip_mask;
+    std::vector<double> dists;
+    if (config_.esdf_active_circle_skip &&
+        esdf_constraint_ != nullptr && k < esdf_last_dist_.size()) {
+        const auto& last_pose = esdf_last_pose_[k];
+        const double dp =
+            std::hypot(x(ILQR_IDX_X) - last_pose[0],
+                       x(ILQR_IDX_Y) - last_pose[1]);
+        const double dtheta =
+            std::abs(WrapAngle(x(ILQR_IDX_THETA) - last_pose[2]));
+        // 圆心位移上界：|Δcenter| ≤ |Δp| + 杠杆臂·|Δψ|
+        const double d_center =
+            dp + max_lever_arm_ * dtheta;
+        const double skip_threshold =
+            esdf_constraint_->inactiveThreshold() + config_.esdf_skip_margin;
+        skip_mask.assign(esdf_last_dist_[k].size(), false);
+        bool any_skip = false;
+        for (std::size_t i = 0; i < esdf_last_dist_[k].size(); ++i) {
+            if (esdf_last_dist_[k][i] - d_center >= skip_threshold) {
+                skip_mask[i] = true;
+                any_skip = true;
+            }
+        }
+        if (!any_skip) {
+            skip_mask.clear();
+        }
+    }
+    dists.resize(esdf_constraint_ != nullptr
+                     ? esdf_constraint_->numCircles()
+                     : 0,
+                 0.0);
+    const auto esdf = esdf_constraint_->evaluateWithSkip(
+        x(ILQR_IDX_X), x(ILQR_IDX_Y), x(ILQR_IDX_THETA),
+        skip_mask.empty() ? nullptr : &skip_mask, &dists);
+    // 全量查询（无跳过）时更新守卫缓存；部分跳过时距离保留旧值（更保守）
+    if (config_.esdf_active_circle_skip && skip_mask.empty() &&
+        esdf_constraint_ != nullptr) {
+        if (esdf_last_dist_.size() != esdf_last_pose_.size()) {
+            esdf_last_pose_.resize(esdf_last_dist_.size());
+        }
+        if (k >= esdf_last_dist_.size()) {
+            esdf_last_dist_.resize(k + 1);
+            esdf_last_pose_.resize(k + 1);
+        }
+        esdf_last_dist_[k].assign(dists.begin(), dists.end());
+        esdf_last_pose_[k] = {x(ILQR_IDX_X), x(ILQR_IDX_Y),
+                              x(ILQR_IDX_THETA)};
+    }
     out->cost_esdf += esdf_scale * esdf.cost;
     out->lx += esdf_scale * esdf.gradient;
     out->lxx += esdf_scale * esdf.hessian;

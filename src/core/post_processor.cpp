@@ -454,6 +454,10 @@ void LoadiLQRConfigOverrides(const nlohmann::json& details, iLQRConfig* config) 
                            &config->inner_domain_guard_margin);
     LoadJsonFieldIfPresent(inner, "use_virtual_control",
                            &config->inner_use_virtual_control);
+    LoadJsonFieldIfPresent(inner, "gain_reuse_consecutive_limit",
+                           &config->inner_gain_reuse_consecutive_limit);
+    LoadJsonFieldIfPresent(inner, "gain_reuse_reject_limit",
+                           &config->inner_gain_reuse_reject_limit);
     // 外层 AL 节
     const auto& outer = JsonSectionOrEmpty(solver, "outer");
     LoadJsonFieldIfPresent(outer, "max_outer_iterations",
@@ -504,6 +508,9 @@ void LoadiLQRConfigOverrides(const nlohmann::json& details, iLQRConfig* config) 
     LoadJsonFieldIfPresent(esdf, "weight_safe", &config->esdf_weight_safe);
     LoadJsonFieldIfPresent(esdf, "weight_comf", &config->esdf_weight_comf);
     LoadJsonFieldIfPresent(esdf, "stride", &config->esdf_stride);
+    LoadJsonFieldIfPresent(esdf, "active_circle_skip",
+                           &config->esdf_active_circle_skip);
+    LoadJsonFieldIfPresent(esdf, "skip_margin", &config->esdf_skip_margin);
     // 后处理节：不接收 omega_max/eta_max 键（由 reference/inner 节统一
     // 供给）；cleanup/validation 两个嵌套配置不在 JSON 映射范围内
     const auto& post_stage = JsonSectionOrEmpty(details, "post_stage");

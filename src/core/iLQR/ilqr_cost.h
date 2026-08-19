@@ -151,8 +151,10 @@ class iLQRCostEvaluator {
                                const iLQRCostMultiplierState& multipliers,
                                iLQRStageCostDerivatives* out) const;
     // ESDF 双 margin 惩罚单阶段补入（运行/终端阶段共用）：与廉价项
-    // 累加顺序固定为「先廉价后 ESDF」，与全量求值路径逐位一致
-    void accumulateEsdfStage(const iLQRState& x, double esdf_scale,
+    // 累加顺序固定为「先廉价后 ESDF」，与全量求值路径逐位一致。k 为
+    // 阶段索引（0..N，终端为 N），供 A1 活跃圆守卫缓存按阶段对齐
+    void accumulateEsdfStage(std::size_t k, const iLQRState& x,
+                             double esdf_scale,
                              iLQRStageCostDerivatives* out) const;
     // 幅值 AL 五项累加（v/a/ω 平方形态 + δ 双侧线性形态）
     void accumulateAmplitudeConstraints(
@@ -176,5 +178,12 @@ class iLQRCostEvaluator {
     iLQRConfig config_;
     // ESDF 双 margin 惩罚（不持有所有权，可为空）
     const iLQREsdfConstraint* esdf_constraint_;
+    // A1 活跃圆守卫缓存（跨求值调用）：上次查询的每阶段每圆距离与对应
+    // 位姿。mutable：evaluate 为 const，缓存不改变结果语义（跳过圆贡献
+    // 恒 0，守卫失败即回退全量，正确性不依赖缓存状态）
+    mutable std::vector<std::vector<double>> esdf_last_dist_;
+    mutable std::vector<std::array<double, 3>> esdf_last_pose_;
+    // A1 守卫：最大外圆杠杆臂（圆心到车辆中心的距离上界，m）
+    double max_lever_arm_{0.0};
 };
 }  // namespace apa_post_processor

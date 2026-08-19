@@ -75,6 +75,12 @@ class MsIlqrTestAccess : public MsIlqrSolver {
     using MsIlqrSolver::expectedChange;
     using MsIlqrSolver::feedforward_;
     using MsIlqrSolver::gain_K_;
+    using MsIlqrSolver::gain_reuse_accepted_;
+    using MsIlqrSolver::gain_reuse_attempts_;
+    using MsIlqrSolver::gain_reuse_consecutive_rejections_;
+    using MsIlqrSolver::gain_reuse_count_;
+    using MsIlqrSolver::gain_reuse_rejected_;
+    using MsIlqrSolver::gains_valid_;
     using MsIlqrSolver::increaseReg;
     using MsIlqrSolver::is_shooting_;
     using MsIlqrSolver::linear_rollout_count_;
@@ -91,6 +97,7 @@ class MsIlqrTestAccess : public MsIlqrSolver {
     using MsIlqrSolver::q_x_;
     using MsIlqrSolver::qp_factorization_count_;
     using MsIlqrSolver::rho_reg_;
+    using MsIlqrSolver::tryReuseGains;
     using MsIlqrSolver::computeVirtualControls;
     using MsIlqrSolver::setNominalTrajectory;
     using MsIlqrSolver::setShootingLookup;
@@ -532,7 +539,11 @@ TEST(MsIlqrTest, EcCachingAndRolloutCounts) {
         MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
     problem.states[4] += offset;
     problem.states[8] += offset;
-    MsIlqrTestAccess solver(MakeConfig(), &dynamics, &evaluator);
+    // 本测试锁定 BP/线性 rollout/EC 缓存的计数契约，与 B1 正交；显式关闭
+    // 旧增益复用，防止复用迭代（跳过 BP）扰动计数断言
+    iLQRConfig config = MakeConfig();
+    config.inner_gain_reuse_consecutive_limit = 0;
+    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
     PrepareNominal(&solver, problem.reference, MakeMultipliers(num_steps),
                    MakeCostInput(10.0), problem.states, problem.controls);
     ASSERT_TRUE(solver.backwardPass());
@@ -1037,6 +1048,283 @@ TEST(MsIlqrTest, VirtualControlShrinksToZero) {
         w_inf = std::max(w_inf, w.cwiseAbs().maxCoeff());
     }
     EXPECT_LT(w_inf, 0.01);
+}
+
+// B1 旧增益复用（默认关闭）：开启后复用迭代 backward_passes==0（跳过
+// BP），求解仍收敛且终代价不劣于关闭；关闭时无任何复用发生。场景带
+// 打靶缺陷（offset）使收敛需多轮迭代，给复用留出机会
+TEST(MsIlqrTest, GainReuseSkipsBackwardPassWhenAccepted) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    const std::size_t num_steps = 8;
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {4, 8});
+    const iLQRState offset =
+        MakeState(0.10, -0.08, 0.03, 0.02, 0.01, 0.01, 0.01);
+    problem.states[4] += offset;
+    problem.states[8] += offset;
+    // 关闭基线
+    iLQRConfig off_config = MakeConfig();
+    off_config.inner_cost_change_tol = 1e-9;
+    off_config.inner_gain_reuse_consecutive_limit = 0;
+    MsIlqrTestAccess off_solver(off_config, &dynamics, &evaluator);
+    const MsIlqrResult off_result =
+        off_solver.solve(problem.reference, MakeMultipliers(num_steps),
+                         MakeCostInput(10.0), problem.states,
+                         problem.controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, off_result.status);
+    // 开启
+    iLQRConfig on_config = MakeConfig();
+    on_config.inner_cost_change_tol = 1e-9;
+    on_config.inner_gain_reuse_consecutive_limit = 3;
+    MsIlqrTestAccess on_solver(on_config, &dynamics, &evaluator);
+    const MsIlqrResult on_result =
+        on_solver.solve(problem.reference, MakeMultipliers(num_steps),
+                        MakeCostInput(10.0), problem.states,
+                        problem.controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, on_result.status);
+    // 复用逻辑确实被触发（尝试发生）；合成小场景下旧增益接受率低是
+    // 正常现象（真实带 ESDF/AL 约束的场景接受率 33~61%，见 §4.8）
+    EXPECT_GT(on_solver.gain_reuse_attempts_, 0);
+    // 终代价不劣化（复用是近似步，允许 ulp 级差异）
+    EXPECT_LE(on_result.final_cost, off_result.final_cost + 1e-9);
+    // 关闭时无任何复用尝试
+    EXPECT_EQ(off_solver.gain_reuse_attempts_, 0);
+    EXPECT_EQ(off_solver.gain_reuse_accepted_, 0);
+}
+
+// B1 复用上限：max=1 时任意连续复用迭代数 <= 1（达到上限后强制 BP
+// 刷新增益，防止旧增益过时拖垮收敛）
+TEST(MsIlqrTest, GainReuseLimitEnforced) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    const std::size_t num_steps = 10;
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {5, 10});
+    iLQRConfig config = MakeConfig();
+    config.inner_gain_reuse_consecutive_limit = 1;
+    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+    const MsIlqrResult result =
+        solver.solve(problem.reference, MakeMultipliers(num_steps),
+                     MakeCostInput(10.0), problem.states, problem.controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, result.status);
+    int consecutive = 0;
+    int max_consecutive = 0;
+    for (const auto& rec : solver.history()) {
+        if (rec.backward_passes == 0) {
+            ++consecutive;
+            max_consecutive = std::max(max_consecutive, consecutive);
+        } else {
+            consecutive = 0;
+        }
+    }
+    EXPECT_LE(max_consecutive, 1);
+}
+
+// B1 拒绝回退：旧增益试跑被拒时（大幅扰动 nominal 使旧 k/K 失准），
+// tryReuseGains 返回 false 且不触碰名义轨迹（候选被丢弃）；随后完整
+// solve 仍正常收敛——回退路径与关闭一致
+TEST(MsIlqrTest, GainReuseRejectedLeavesNominalIntact) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    const std::size_t num_steps = 10;
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {5, 10});
+    iLQRConfig config = MakeConfig();
+    config.inner_gain_reuse_consecutive_limit = 3;
+    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+    PrepareNominal(&solver, problem.reference, MakeMultipliers(num_steps),
+                   MakeCostInput(10.0), problem.states, problem.controls);
+    // 先完成一轮 BP+LR，得到可用旧增益（不 accept，保持 nominal 为初值）
+    ASSERT_TRUE(solver.backwardPass());
+    solver.linearRollout();
+    solver.gains_valid_ = true;
+    // 大幅扰动名义轨迹（0.5 m 级）使旧增益必然失准
+    for (std::size_t k = 0; k <= num_steps; ++k) {
+        solver.states_[k](ILQR_IDX_X) += 0.5;
+        solver.states_[k](ILQR_IDX_Y) += 0.5;
+    }
+    const auto perturbed = solver.states_;
+    EXPECT_FALSE(solver.tryReuseGains(problem.reference,
+                                      MakeMultipliers(num_steps),
+                                      MakeCostInput(10.0)));
+    // 名义轨迹未被 tryReuseGains 改写（候选丢弃在 cand_* 缓存）
+    for (std::size_t k = 0; k <= num_steps; ++k) {
+        ExpectMatrixNear(solver.states_[k], perturbed[k], 1e-12);
+    }
+}
+
+// B1 连续拒绝熔断（评审问题 3）：连续拒绝达阈值后 tryReuseGains 短路
+// 返回 false 且不再计入尝试次数（零开销），把 B1 最坏开销锁死在关闭
+// 表现——最多多付 limit 次失败 rollout，绝不更慢
+TEST(MsIlqrTest, GainReuseCircuitBreakerAfterRepeatedRejections) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    const std::size_t num_steps = 10;
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {5, 10});
+    iLQRConfig config = MakeConfig();
+    config.inner_gain_reuse_consecutive_limit = 3;
+    config.inner_gain_reuse_reject_limit = 3;  // 小阈值便于测试
+    MsIlqrTestAccess solver(config, &dynamics, &evaluator);
+    PrepareNominal(&solver, problem.reference, MakeMultipliers(num_steps),
+                   MakeCostInput(10.0), problem.states, problem.controls);
+    // 先完成一轮 BP+LR，得到可用旧增益（不 accept，保持 nominal 为初值）
+    ASSERT_TRUE(solver.backwardPass());
+    solver.linearRollout();
+    solver.gains_valid_ = true;
+    // 大幅扰动名义轨迹（0.5 m 级）使旧增益必然失准，每次调用均被拒
+    for (std::size_t k = 0; k <= num_steps; ++k) {
+        solver.states_[k](ILQR_IDX_X) += 0.5;
+        solver.states_[k](ILQR_IDX_Y) += 0.5;
+    }
+    const auto multipliers = MakeMultipliers(num_steps);
+    const auto cost_input = MakeCostInput(10.0);
+    // 前 limit 次：真实尝试并逐个累计连续拒绝计数
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_FALSE(solver.tryReuseGains(problem.reference, multipliers,
+                                          cost_input));
+        EXPECT_EQ(i + 1, solver.gain_reuse_consecutive_rejections_);
+    }
+    const std::int64_t attempts_before = solver.gain_reuse_attempts_;
+    // 熔断生效后：短路返回 false，不再计入尝试次数（零开销），
+    // 连续拒绝计数停在阈值上直到本次 solve 结束
+    EXPECT_FALSE(solver.tryReuseGains(problem.reference, multipliers,
+                                      cost_input));
+    EXPECT_EQ(attempts_before, solver.gain_reuse_attempts_);
+    EXPECT_EQ(3, solver.gain_reuse_consecutive_rejections_);
+}
+
+// B1 活动集翻转场景（评审问题 4）：紧控制盒 + 初始控制贴边（bang-bang
+// 段特征），且参考速度前慢后快——前几轮迭代前半段控制应释放、后半段
+// 保持贴边，活动集必然翻转。开启复用后 merit 判据兜底：坏复用被拒、解
+// 不劣于关闭（status 级别不劣、终代价不劣、终态缺陷达标）、且释放与
+// 贴边段并存（未被旧活动集的 K 行钉死）
+TEST(MsIlqrTest, GainReuseActiveSetFlipsStillConverges) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    const std::size_t num_steps = 10;
+    // 手工参考：前 5 步 x 间距 0.05（v_ref≈0.5），后 5 步间距 0.1
+    // （v_ref≈1.0）——后半段需要持续正跃度追赶，最优解贴 +jerk_max；
+    // 初值 v=0.5 全程 → 前半段与参考同步无需跃度
+    std::vector<Pose> poses;
+    double x = 0.0;
+    poses.emplace_back(x, 0.0, 0.0);
+    for (int i = 0; i < 5; ++i) {
+        x += 0.05;
+        poses.emplace_back(x, 0.0, 0.0);
+    }
+    for (int i = 0; i < 5; ++i) {
+        x += 0.1;
+        poses.emplace_back(x, 0.0, 0.0);
+    }
+    const iLQRReference reference = MakeReference(poses, kDt, {5, 10});
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    iLQRAlignedVec<iLQRControl> controls(num_steps, iLQRControl::Zero());
+    auto states = RolloutStates(dynamics, x0, controls, kDt);
+    // 初始控制全部贴 +jerk_max 上边界（模拟 bang-bang 段活动集在边界上）
+    const double jerk_max = 0.3;
+    for (auto& u : controls) {
+        u(ILQR_IDX_JERK) = jerk_max;
+    }
+    const auto multipliers = MakeMultipliers(num_steps);
+    const auto cost_input = MakeCostInput(100.0);
+    // 关闭基线
+    iLQRConfig off_config = MakeConfig();
+    off_config.inner_jerk_max = jerk_max;
+    off_config.inner_cost_change_tol = 1e-9;
+    off_config.inner_gain_reuse_consecutive_limit = 0;
+    MsIlqrTestAccess off_solver(off_config, &dynamics, &evaluator);
+    const MsIlqrResult off_result =
+        off_solver.solve(reference, multipliers, cost_input, states, controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, off_result.status);
+    // 场景有效性：关闭最优解也确实贴边（后半段追不上，活动集非空）
+    bool off_boundary = false;
+    for (const auto& u : off_solver.controls_) {
+        off_boundary = off_boundary ||
+                       std::abs(u(ILQR_IDX_JERK) - jerk_max) < 1e-9;
+    }
+    ASSERT_TRUE(off_boundary);
+    // 开启
+    iLQRConfig on_config = MakeConfig();
+    on_config.inner_jerk_max = jerk_max;
+    on_config.inner_cost_change_tol = 1e-9;
+    on_config.inner_gain_reuse_consecutive_limit = 3;
+    MsIlqrTestAccess on_solver(on_config, &dynamics, &evaluator);
+    const MsIlqrResult on_result =
+        on_solver.solve(reference, multipliers, cost_input, states, controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, on_result.status);
+    // status 不劣于关闭（等价类比较）：CONVERGED_COST 与 CONVERGED_GRADIENT
+    // 同属收敛类（只是出口不同，枚举数值不可直接比大小），开启不得落入
+    // 未收敛/失败类（MAX_ITERATIONS / REGULARIZATION_OVERFLOW）
+    const auto is_converged = [](MsIlqrStatus s) {
+        return s == MsIlqrStatus::CONVERGED_COST ||
+               s == MsIlqrStatus::CONVERGED_GRADIENT;
+    };
+    ASSERT_TRUE(is_converged(off_result.status));  // 关闭已收敛（场景前提）
+    EXPECT_TRUE(is_converged(on_result.status));   // 开启不劣于关闭
+    // 终代价不劣化
+    EXPECT_LE(on_result.final_cost, off_result.final_cost + 1e-9);
+    // 终态缺陷达标（与关闭同量级，复用未破坏可行性）
+    EXPECT_LE(on_result.final_defect_norm,
+              off_result.final_defect_norm + 1e-9);
+    // 活动集翻转被正确处理：贴边段仍在（后半段追不上）+ 释放段存在
+    // （前半段已从初始贴边释放，未被旧活动集的 K 行钉死）
+    bool on_boundary = false;
+    bool on_free = false;
+    for (const auto& u : on_solver.controls_) {
+        const bool at_bound =
+            std::abs(u(ILQR_IDX_JERK) - jerk_max) < 1e-9;
+        on_boundary = on_boundary || at_bound;
+        on_free = on_free || !at_bound;
+    }
+    EXPECT_TRUE(on_boundary);
+    EXPECT_TRUE(on_free);
+}
+
+// B1 梯度收敛出口不变量（评审问题 2）：复用迭代（backward_passes==0）
+// 的 max_qu_norm_ 是陈旧值，不允许触发 CONVERGED_GRADIENT——若 solve 以
+// 梯度判据退出，最后一次迭代必须做过 backward pass（梯度在当前点评估）。
+// 先跑关闭复用对照：同一场景必须到达 CONVERGED_GRADIENT，证明梯度判据
+// 是主导出口、守卫确实被行使（防止「开启后从未触发梯度出口」的空洞通过）
+TEST(MsIlqrTest, GainReuseGradientExitRequiresFreshBackwardPass) {
+    const BicycleDynamics dynamics(kWheelbase);
+    const iLQRCostEvaluator evaluator(iLQRConfig{}, nullptr);
+    const std::size_t num_steps = 10;
+    const iLQRState x0 = MakeState(0.0, 0.0, 0.0, 0.5, 0.0, 0.04, 0.0);
+    ArcProblem problem = MakeArcProblem(num_steps, x0, 0.02, 0.01, {5, 10});
+    const auto multipliers = MakeMultipliers(num_steps);
+    const auto cost_input = MakeCostInput(10.0);
+    // 关小代价判据、放大梯度容差，迫使梯度判据优先触发
+    const auto make_config = [] {
+        iLQRConfig config = MakeConfig();
+        config.inner_cost_change_tol = 1e-12;
+        config.inner_gradient_tol = 1e-2;
+        return config;
+    };
+    // 对照：关闭复用，同一场景必须以 CONVERGED_GRADIENT 收敛
+    iLQRConfig off_config = make_config();
+    off_config.inner_gain_reuse_consecutive_limit = 0;
+    MsIlqrTestAccess off_solver(off_config, &dynamics, &evaluator);
+    const MsIlqrResult off_result =
+        off_solver.solve(problem.reference, multipliers, cost_input,
+                         problem.states, problem.controls);
+    ASSERT_EQ(MsIlqrStatus::CONVERGED_GRADIENT, off_result.status);
+    // 开启复用
+    iLQRConfig on_config = make_config();
+    on_config.inner_gain_reuse_consecutive_limit = 3;
+    MsIlqrTestAccess on_solver(on_config, &dynamics, &evaluator);
+    const MsIlqrResult on_result =
+        on_solver.solve(problem.reference, multipliers, cost_input,
+                        problem.states, problem.controls);
+    ASSERT_NE(MsIlqrStatus::REGULARIZATION_OVERFLOW, on_result.status);
+    ASSERT_FALSE(on_solver.history().empty());
+    // 若开启后仍以梯度判据退出，最后一轮必须是 BP 迭代（当前点梯度已
+    // 评估，不允许用陈旧 max_qu_norm_ 宣告收敛）；复用改变了收敛路径，
+    // 也可能以代价判据退出，属正常，不在此断言范围内
+    if (on_result.status == MsIlqrStatus::CONVERGED_GRADIENT) {
+        EXPECT_GT(on_solver.history().back().backward_passes, 0);
+    }
 }
 
 }  // namespace

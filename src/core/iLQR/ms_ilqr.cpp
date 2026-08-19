@@ -119,10 +119,46 @@ MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
         double accepted_cost = 0.0;
         int passes_this_iter = 0;
         int trials_this_iter = 0;
-        // 正则化重试循环：QP 未收敛或线搜索耗尽都不能简单放弃本轮，必须
-        while (true) {
-            ++passes_this_iter;
-            if (!backwardPass()) {
+        // B1 旧增益复用（默认关闭）：上一迭代 BP 产物有效且连续复用未达
+        // 上限时，用旧 k/K 与旧 EC 试跑 α=1——接受则跳过本轮 BP 直接
+        // 进入下一迭代；拒绝则回退（本迭代照常全 BP，与关闭逐位一致）
+        bool reused_gains = false;
+        if (config_.inner_gain_reuse_consecutive_limit > 0 && gains_valid_ &&
+            gain_reuse_count_ < config_.inner_gain_reuse_consecutive_limit &&
+            tryReuseGains(reference, multipliers, cost_input)) {
+            reused_gains = true;
+            accepted_alpha = 1.0;
+            accepted_cost = cand_cost_;
+            ++gain_reuse_count_;
+        } else {
+            gain_reuse_count_ = 0;
+        }
+        if (!reused_gains) {
+            // 正则化重试循环：QP 未收敛或线搜索耗尽都不能简单放弃本轮，必须
+            while (true) {
+                ++passes_this_iter;
+                if (!backwardPass()) {
+                    if (!increaseReg()) {
+                        result.status = MsIlqrStatus::REGULARIZATION_OVERFLOW;
+                        result.iterations = iter - 1;
+                        result.final_cost = total_cost_;
+                        result.final_defect_norm = defect_norm_;
+                        result.domain_guard_rejections = domain_guard_rejections_;
+                        return result;
+                    }
+                    continue;
+                }
+                linearRollout();
+                const double merit_prev = total_cost_ + merit_mu_ * defect_norm_;
+                const std::int64_t trials_before = nonlinear_rollout_count_;
+                if (lineSearch(reference, multipliers, cost_input, merit_prev,
+                               &accepted_alpha, &accepted_cost)) {
+                    trials_this_iter =
+                        static_cast<int>(nonlinear_rollout_count_ - trials_before);
+                    break;
+                }
+                // 线搜索被拒：升 ρ_reg 后重跑整个回推（QP 随 Hessian 变化
+                // 必须重做分解——与 QP 失败路径同一约定）
                 if (!increaseReg()) {
                     result.status = MsIlqrStatus::REGULARIZATION_OVERFLOW;
                     result.iterations = iter - 1;
@@ -131,27 +167,8 @@ MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
                     result.domain_guard_rejections = domain_guard_rejections_;
                     return result;
                 }
-                continue;
             }
-            linearRollout();
-            const double merit_prev = total_cost_ + merit_mu_ * defect_norm_;
-            const std::int64_t trials_before = nonlinear_rollout_count_;
-            if (lineSearch(reference, multipliers, cost_input, merit_prev,
-                           &accepted_alpha, &accepted_cost)) {
-                trials_this_iter =
-                    static_cast<int>(nonlinear_rollout_count_ - trials_before);
-                break;
-            }
-            // 线搜索被拒：升 ρ_reg 后重跑整个回推（QP 随 Hessian 变化
-            // 必须重做分解——与 QP 失败路径同一约定）
-            if (!increaseReg()) {
-                result.status = MsIlqrStatus::REGULARIZATION_OVERFLOW;
-                result.iterations = iter - 1;
-                result.final_cost = total_cost_;
-                result.final_defect_norm = defect_norm_;
-                result.domain_guard_rejections = domain_guard_rejections_;
-                return result;
-            }
+            gains_valid_ = true;
         }
         // 接受：ρ_reg 按既有 LM 调度收缩
         decreaseReg();
@@ -177,7 +194,12 @@ MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
             result.status = MsIlqrStatus::CONVERGED_COST;
             break;
         }
-        if (max_qu_norm_ < config_.inner_gradient_tol && convergenceAllowed()) {
+        // 梯度判据只在当前迭代做过 backward pass 时才有效：复用迭代跳过
+        // 了 BP，max_qu_norm_ 是上一个名义点的陈旧值（可能已 < tol 但当前
+        // 点并非梯度驻点，见 §4.11.2 问题 2）
+        if (record.backward_passes > 0 &&
+            max_qu_norm_ < config_.inner_gradient_tol &&
+            convergenceAllowed()) {
             result.status = MsIlqrStatus::CONVERGED_GRADIENT;
             break;
         }
@@ -190,6 +212,13 @@ MsIlqrResult MsIlqrSolverT<UseVirtualControl>::solve(
 
 template <bool UseVirtualControl>
 void MsIlqrSolverT<UseVirtualControl>::prepareWorkspace(std::size_t num_steps) {
+    // B1 增益复用状态：每次 solve 重新初始化
+    gains_valid_ = false;
+    gain_reuse_count_ = 0;
+    gain_reuse_attempts_ = 0;
+    gain_reuse_accepted_ = 0;
+    gain_reuse_rejected_ = 0;
+    gain_reuse_consecutive_rejections_ = 0;
     // 步数不变时跳过全部 resize/assign，仅清空历史（热启动主路径）
     if (num_steps_ == num_steps) {
         is_shooting_.assign(is_shooting_.size(), false);
@@ -679,6 +708,56 @@ bool MsIlqrSolverT<UseVirtualControl>::lineSearch(const iLQRReference& reference
         }
         alpha *= config_.inner_backtrack_beta;
     }
+    return false;
+}
+
+template <bool UseVirtualControl>
+bool MsIlqrSolverT<UseVirtualControl>::tryReuseGains(
+    const iLQRReference& reference, const iLQRCostMultiplierState& multipliers,
+    const iLQRCostInput& cost_input) {
+    // B1 熔断：连续拒绝达阈值后本次 solve 内不再尝试复用（把 B1 下界锁
+    // 死在关闭表现，最坏多付 ≤limit 次失败 rollout，绝不更慢；见 §4.11.2）
+    if (config_.inner_gain_reuse_reject_limit > 0 &&
+        gain_reuse_consecutive_rejections_ >=
+            config_.inner_gain_reuse_reject_limit) {
+        return false;
+    }
+    ++gain_reuse_attempts_;
+    // 与 lineSearch 的 α=1 分支判据形式同构（量值近似：ρ_reg 已被上轮
+    // decreaseReg 缩小、EC 是上一名义点的陈旧量、被钳制控制的 K 行可能
+    // 不再对应当前活动集）：旧 EC(1) 折算 Armijo 阈值，非线性滚动 +
+    // merit 接受判据形式相同；被拒即返回（候选丢弃、由调用方回退全 BP，
+    // 与关闭路径逐位一致）
+    const double merit_prev = total_cost_ + merit_mu_ * defect_norm_;
+    const double expected =
+        expectedChange(1.0) - merit_mu_ * defect_norm_;
+    // 守卫：expected ≥ 0 时阈值不低于当前 merit，接受只会使 merit 不降
+    // 反升（MS-iLQR 的 EC 含缺陷项且是陈旧量，expected<0 无硬保证）；
+    // 此守卫保证复用只发生在「存在预期下降」时，杜绝接受更差候选
+    if (!(expected < 0.0)) {
+        ++gain_reuse_rejected_;
+        ++gain_reuse_consecutive_rejections_;
+        return false;
+    }
+    const double merit_threshold =
+        merit_prev + config_.inner_armijo_gamma * expected;
+    const double cand_cost =
+        nonlinearRollout(1.0, reference, multipliers, cost_input,
+                         merit_threshold);
+    double cand_merit = cand_cost + merit_mu_ * cand_defect_norm_;
+    if (cand_eval_.esdf_screened_out && cand_merit <= merit_threshold) {
+        cand_eval_ = cost_evaluator_->evaluate(
+            reference, cand_states_, cand_controls_, multipliers, cost_input);
+        cand_cost_ = cand_eval_.total_cost;
+        cand_merit = cand_cost_ + merit_mu_ * cand_defect_norm_;
+    }
+    if (std::isfinite(cand_merit) && cand_merit <= merit_threshold) {
+        ++gain_reuse_accepted_;
+        gain_reuse_consecutive_rejections_ = 0;
+        return true;
+    }
+    ++gain_reuse_rejected_;
+    ++gain_reuse_consecutive_rejections_;
     return false;
 }
 

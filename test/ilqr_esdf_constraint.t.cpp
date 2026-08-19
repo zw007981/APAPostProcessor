@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/iLQR/esdf_constraint.h"
+#include "core/iLQR/ilqr_cost.h"
 #include "core/NMPC/vehicle_circle_geometry.h"
 #include "spatial/esdf_map.h"
 #include "spatial/grid_map.h"
@@ -588,6 +589,83 @@ TEST_F(iLQREsdfConstraintTest, StrideSamplingSkipsIntermediateStages) {
     EXPECT_TRUE(per_step.isSampled(0));
     EXPECT_TRUE(per_step.isSampled(1));
     EXPECT_TRUE(per_step.isSampled(399));
+}
+
+// A1 跳过掩码语义：跳过圆不查询、贡献恒为 0，且 out_dists 中跳过圆
+// 置 -1。用近墙位姿（存在活跃圆）验证全跳过 → 结果恒 0（与全量非零
+// 对照，证明跳过圆确实不产生任何贡献）
+TEST_F(iLQREsdfConstraintTest, EvaluateWithSkipZeroesSkippedCircles) {
+    const auto c = MakeConstraint(iLQRConfig{});
+    // 近墙位姿：至少一个外圆活跃（全量代价非零）
+    const double x = 1.0, y = 3.0, theta = 0.0;
+    const auto full = c.evaluate(x, y, theta);
+    ASSERT_GT(full.cost, 0.0);
+    // 全跳过掩码：所有圆不查询，结果恒 0
+    std::vector<bool> skip_all(c.numCircles(), true);
+    std::vector<double> dists(c.numCircles(), 0.0);
+    const auto skipped =
+        c.evaluateWithSkip(x, y, theta, &skip_all, &dists);
+    EXPECT_DOUBLE_EQ(skipped.cost, 0.0);
+    EXPECT_TRUE(skipped.gradient.isZero(0.0));
+    EXPECT_TRUE(skipped.hessian.isZero(0.0));
+    for (std::size_t i = 0; i < dists.size(); ++i) {
+        EXPECT_DOUBLE_EQ(dists[i], -1.0) << "circle " << i;
+    }
+}
+
+// A1 活跃圆守卫端到端：开启（守卫跳过）与关闭（全量）在同一轨迹逐轮
+// evaluate 上结果逐位一致——跳过圆贡献恒 0、守卫失败回退全量，缓存
+// 状态不影响数值。多轮微位移模拟内层迭代后期
+TEST_F(iLQREsdfConstraintTest, ActiveCircleSkipMatchesFullEvaluation) {
+    iLQRConfig off_config;
+    off_config.esdf_active_circle_skip = false;
+    iLQRConfig on_config;
+    on_config.esdf_active_circle_skip = true;
+    const auto off_c = MakeConstraint(off_config);
+    const auto on_c = MakeConstraint(on_config);
+    const iLQRCostEvaluator off_eval(off_config, &off_c);
+    const iLQRCostEvaluator on_eval(on_config, &on_c);
+    // 远离墙面的直线轨迹（x>=5.0，全部外圆不活跃）
+    constexpr std::size_t kSteps = 8;
+    iLQRReference reference;
+    reference.poses.resize(kSteps + 1);
+    reference.dt = 0.1;
+    iLQRAlignedVec<iLQRState> states(kSteps + 1);
+    iLQRAlignedVec<iLQRControl> controls(kSteps);
+    for (std::size_t k = 0; k <= kSteps; ++k) {
+        reference.poses[k] =
+            Pose{5.0 + 0.5 * static_cast<double>(k), 3.0, 0.0};
+        states[k] = iLQRState::Zero();
+        states[k](ILQR_IDX_X) = reference.poses[k].x;
+        states[k](ILQR_IDX_Y) = reference.poses[k].y;
+        states[k](ILQR_IDX_V) = 0.5;
+    }
+    const auto multipliers = iLQRCostMultiplierState::MakeZero(kSteps);
+    iLQRCostInput input;
+    input.tracking_weight = 10.0;
+    for (int round = 0; round < 4; ++round) {
+        const auto off = off_eval.evaluate(reference, states, controls,
+                                           multipliers, input);
+        const auto on = on_eval.evaluate(reference, states, controls,
+                                         multipliers, input);
+        EXPECT_DOUBLE_EQ(off.total_cost, on.total_cost)
+            << "round " << round;
+        for (std::size_t k = 0; k <= kSteps; ++k) {
+            EXPECT_DOUBLE_EQ(
+                (off.stages[k].lx - on.stages[k].lx).cwiseAbs().maxCoeff(),
+                0.0)
+                << "stage " << k << " round " << round;
+            EXPECT_DOUBLE_EQ(
+                (off.stages[k].lxx - on.stages[k].lxx).cwiseAbs().maxCoeff(),
+                0.0);
+            EXPECT_DOUBLE_EQ(off.stages[k].cost_esdf, on.stages[k].cost_esdf);
+        }
+        // 微位移（收敛后期量级）模拟迭代：守卫应能跳过部分查询
+        for (auto& s : states) {
+            s(ILQR_IDX_X) += 0.002;
+            s(ILQR_IDX_Y) += 0.001;
+        }
+    }
 }
 
 }  // namespace

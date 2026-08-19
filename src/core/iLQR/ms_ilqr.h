@@ -194,6 +194,14 @@ class MsIlqrSolverT : public MsIlqrSolverInterface {
                     const iLQRCostMultiplierState& multipliers,
                     const iLQRCostInput& cost_input, double merit_prev,
                     double* accepted_alpha, double* accepted_cost);
+    // B1 旧增益复用：用上一迭代 k/K 与旧 EC 试跑 α=1（与 lineSearch 的
+    // α=1 分支判据形式同构、量值近似——ρ_reg 已被上轮 decreaseReg 缩小、
+    // EC 是陈旧量、被钳制控制的 K 行可能不再对应当前活动集），接受返回
+    // true（调用方随后 acceptCandidate(1.0)），拒绝返回 false（候选丢弃、
+    // 调用方回退全 BP，与关闭逐位一致）
+    bool tryReuseGains(const iLQRReference& reference,
+                       const iLQRCostMultiplierState& multipliers,
+                       const iLQRCostInput& cost_input);
     // 接受候选轨迹：名义状态/控制/缺陷/代价整体替换（缺陷按 1-α 缩放，
     // 候选代价求值结果直接移入名义缓存，避免每轮重复全轨迹求值）
     void acceptCandidate(double alpha);
@@ -305,8 +313,7 @@ class MsIlqrSolverT : public MsIlqrSolverInterface {
     BoxQpSolver<> qp_;
     // 计数器（每次 solve 清零，供单元测试断言双 rollout 调用次数与
     // 正则化变更后的全量重分解；统一 64 位，长时多次 solve 累积不溢出）
-    std::int64_t backward_pass_count_{0};
-    // 线性 rollout 计数
+    std::int64_t backward_pass_count_{0};    // 线性 rollout 计数
     std::int64_t linear_rollout_count_{0};
     // 非线性 rollout 计数
     std::int64_t nonlinear_rollout_count_{0};
@@ -314,6 +321,17 @@ class MsIlqrSolverT : public MsIlqrSolverInterface {
     std::int64_t qp_factorization_count_{0};
     // 定义域守卫拒绝的试探候选数（每次 solve 清零）
     std::int64_t domain_guard_rejections_{0};
+    // B1 旧增益复用状态：上一迭代 BP 产物是否有效（solve 开始时清空）
+    bool gains_valid_{false};
+    // B1 连续复用迭代计数（达上限强制 BP 刷新增益）
+    std::int64_t gain_reuse_count_{0};
+    // B1 连续拒绝熔断计数：连续拒绝达 inner_gain_reuse_reject_limit 后
+    // 本次 solve 内不再尝试复用（下界锁死在关闭表现）
+    std::int64_t gain_reuse_consecutive_rejections_{0};
+    // B1 诊断计数器（测试/消融断言用）
+    std::int64_t gain_reuse_attempts_{0};
+    std::int64_t gain_reuse_accepted_{0};
+    std::int64_t gain_reuse_rejected_{0};
     // 逐轮诊断历史（仅接受迭代）
     std::vector<MsIlqrIterationRecord> history_;
 };
