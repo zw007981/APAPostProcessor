@@ -18,9 +18,9 @@ namespace {
     proto.set_wheelbase(wheelbase);
     proto.set_max_steer_angle(max_steer_angle);
     proto.set_rear_overhang(rear_overhang);
-    proto.set_max_accel(max_accel);
-    proto.set_max_decel(max_decel);
-    proto.set_max_steer_rate(max_steer_rate);
+    proto.mutable_max_accel()->set_value(max_accel);
+    proto.mutable_max_decel()->set_value(max_decel);
+    proto.mutable_max_steer_rate()->set_value(max_steer_rate);
     return proto;
 }
 
@@ -118,6 +118,24 @@ TEST(VehicleParamsTest, FromProtoBuildsVehicleParamFields) {
     EXPECT_NEAR(vehicle_params.max_kappa, std::tan(0.7) / 2.8, 1e-12);
     EXPECT_DOUBLE_EQ(vehicle_params.max_accel, 1.0);
     EXPECT_DOUBLE_EQ(vehicle_params.max_decel, -1.5);
+    EXPECT_DOUBLE_EQ(vehicle_params.max_steer_rate, 0.4);
+}
+
+// 测试 FromProto 在未设置纵向极限时回落默认值的场景。
+// 因为 wrapper 字段未设置时 has_xxx() 返回 false，所以 FromProto
+// 应回落使用内部默认值（1.5 / -3.0 / 0.4），验证 wrapper 的缺省语义。
+TEST(VehicleParamsTest, FromProtoFallsBackToDefaultsWhenOptionalUnset) {
+    ::apa::post_processor::VehicleParams proto;
+    proto.set_length(4.5);
+    proto.set_width(1.9);
+    proto.set_wheelbase(2.8);
+    proto.set_max_steer_angle(0.7);
+    proto.set_rear_overhang(0.3);
+
+    const VehicleParams vehicle_params = VehicleParams::FromProto(proto);
+
+    EXPECT_DOUBLE_EQ(vehicle_params.max_accel, 1.5);
+    EXPECT_DOUBLE_EQ(vehicle_params.max_decel, -3.0);
     EXPECT_DOUBLE_EQ(vehicle_params.max_steer_rate, 0.4);
 }
 
