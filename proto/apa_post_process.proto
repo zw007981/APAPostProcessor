@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/wrappers.proto";
+
 package apa.post_processor;
 
 // ==========================================
@@ -32,11 +34,11 @@ message VehicleParams {
     // 后轴到后保险杠的距离 (m)
     double rear_overhang = 5;
     // 最大纵向加速度 (m/s^2)
-    optional double max_accel = 6;
+    google.protobuf.DoubleValue max_accel = 6;
     // 最大纵向减速度 (m/s^2)
-    optional double max_decel = 7;
+    google.protobuf.DoubleValue max_decel = 7;
     // 前轮最大偏角速度 (rad/s)
-    optional double max_steer_rate = 8;
+    google.protobuf.DoubleValue max_steer_rate = 8;
 }
 
 // ==========================================

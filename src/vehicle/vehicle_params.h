@@ -38,9 +38,9 @@ struct VehicleParams {
             proto.wheelbase(),
             proto.max_steer_angle(),
             proto.rear_overhang(),
-            proto.has_max_accel() ? proto.max_accel() : 1.5,
-            proto.has_max_decel() ? proto.max_decel() : -3.0,
-            proto.has_max_steer_rate() ? proto.max_steer_rate() : 0.4};
+            proto.has_max_accel() ? proto.max_accel().value() : 1.5,
+            proto.has_max_decel() ? proto.max_decel().value() : -3.0,
+            proto.has_max_steer_rate() ? proto.max_steer_rate().value() : 0.4};
         if (params.length < EPSILON || params.width < EPSILON ||
             params.wheelbase < EPSILON || params.max_steer_angle < EPSILON ||
             params.rear_overhang < 0.0) {
