@@ -216,7 +216,8 @@ TEST(PostProcessoriLQRTest, iLQRTrajFilledOnSuccessAndEmptyOnFailure) {
     }
     // 时间戳严格单调（驻留插入只拉伸时间轴）
     for (std::size_t i = 1; i < result.optimized_trajectory.size(); ++i) {
-        EXPECT_GT(result.optimized_trajectory[i].getT(), result.optimized_trajectory[i - 1].getT());
+        EXPECT_GT(result.optimized_trajectory[i].getT(),
+                  result.optimized_trajectory[i - 1].getT());
     }
     const Path empty_path;
     const auto failed = processor.optimizeiLQR(empty_path, iLQRConfig{});
@@ -269,30 +270,51 @@ TEST(PostProcessoriLQRTest, EndToEndGearShiftCompletes) {
         0.02);
 }
 
-// 短倒退换挡场景（倒退段仅 0.5 m）：虚拟控制默认开启后该场景阶段二
-// 转为收敛（此前默认关闭时阶段二门控重解内层未收敛、输出阶段一降级
-// 候选）。改写为阶段二成功路径断言：message 完整收敛、output_level
-// 完全成功，输出轨迹过碰撞/终点双指标门，物理方向段数不增。
-TEST(PostProcessoriLQRTest, ShortReversalConvergesToStageTwo) {
+// 短倒退换挡场景（倒退段仅 0.5 m）的阶段二可用性依赖虚拟控制：
+// 默认关闭时阶段二门控重解内层未收敛、输出阶段一降级候选；
+// 显式开启虚拟控制后阶段二转为收敛、输出完全成功。
+TEST(PostProcessoriLQRTest, ShortReversalStageTwoDependsOnVirtualControl) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildShortReversalPath();
-    const auto result = processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
-    ASSERT_TRUE(result.success) << result.message;
-    EXPECT_EQ(result.message, "iLQR converged") << result.message;
-    EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
-    EXPECT_FALSE(result.optimized_path.empty());
-    EXPECT_FALSE(result.optimized_trajectory.empty());
-    EXPECT_TRUE(IsPathFinite(result.optimized_path));
-    EXPECT_LE(TerminalPositionError(result.optimized_path, path), 0.05);
-    EXPECT_LE(TerminalHeadingErrorDeg(result.optimized_path, path), 1.5);
-    EXPECT_LE(
-        ComputeMaxCollisionDepth(result.optimized_path, esdf_map, footprint),
-        0.02);
-    EXPECT_GE(result.final_maneuvers, 1);
-    EXPECT_LE(result.final_maneuvers, 2);
+    // 默认（虚拟控制关闭）：阶段一降级输出，但仍过碰撞/终点双指标门
+    {
+        const auto result =
+            processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
+        ASSERT_TRUE(result.success) << result.message;
+        EXPECT_EQ(result.output_level, OutputLevel::kDegraded);
+        EXPECT_FALSE(result.optimized_path.empty());
+        EXPECT_FALSE(result.optimized_trajectory.empty());
+        EXPECT_TRUE(IsPathFinite(result.optimized_path));
+        EXPECT_LE(TerminalPositionError(result.optimized_path, path), 0.05);
+        EXPECT_LE(TerminalHeadingErrorDeg(result.optimized_path, path), 1.5);
+        EXPECT_LE(ComputeMaxCollisionDepth(result.optimized_path, esdf_map,
+                                           footprint),
+                  0.02);
+        EXPECT_GE(result.final_maneuvers, 1);
+        EXPECT_LE(result.final_maneuvers, 2);
+    }
+    // 显式开启虚拟控制：阶段二收敛、完全成功
+    {
+        auto config = MakeSyntheticiLQRConfig();
+        config.inner_use_virtual_control = true;
+        const auto result = processor.optimizeiLQR(path, config);
+        ASSERT_TRUE(result.success) << result.message;
+        EXPECT_EQ(result.message, "iLQR converged") << result.message;
+        EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
+        EXPECT_FALSE(result.optimized_path.empty());
+        EXPECT_FALSE(result.optimized_trajectory.empty());
+        EXPECT_TRUE(IsPathFinite(result.optimized_path));
+        EXPECT_LE(TerminalPositionError(result.optimized_path, path), 0.05);
+        EXPECT_LE(TerminalHeadingErrorDeg(result.optimized_path, path), 1.5);
+        EXPECT_LE(ComputeMaxCollisionDepth(result.optimized_path, esdf_map,
+                                           footprint),
+                  0.02);
+        EXPECT_GE(result.final_maneuvers, 1);
+        EXPECT_LE(result.final_maneuvers, 2);
+    }
 }
 
 // 双候选择优规则真值表（L7.2）：成功优先 → maneuver 数少优先 → 长度短
@@ -388,13 +410,19 @@ TEST(PostProcessoriLQRTest, OutputLevelReflectsResultQuality) {
         ASSERT_TRUE(result.success);
         EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
     }
-    // 短倒退场景：虚拟控制默认开启后阶段二收敛，完全成功
+    // 短倒退场景：默认关闭虚拟控制时阶段二不可用、输出阶段一降级候选；
+    // 显式开启虚拟控制后阶段二收敛、完全成功
     {
         const auto path = BuildShortReversalPath();
         const auto result =
             processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
         ASSERT_TRUE(result.success);
-        EXPECT_EQ(result.output_level, OutputLevel::kFullSuccess);
+        EXPECT_EQ(result.output_level, OutputLevel::kDegraded);
+        auto config = MakeSyntheticiLQRConfig();
+        config.inner_use_virtual_control = true;
+        const auto vc_result = processor.optimizeiLQR(path, config);
+        ASSERT_TRUE(vc_result.success);
+        EXPECT_EQ(vc_result.output_level, OutputLevel::kFullSuccess);
     }
     // 空路径：直接失败
     {
