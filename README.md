@@ -131,41 +131,41 @@ bench_apa_post_processor
 
 ## 3. iLQR
 
-详细设计文档见 [docs/iLQR.md](docs/iLQR.md)。在不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/iLQR.md](docs/iLQR.md)。当前默认关闭虚拟控制增广（`use_virtual_control=false`，换取交付轨迹的纯动力学一致性；代价是阶段二门控精化不可用，四个数据集均输出阶段一降级候选，长度/段数逊于开启虚拟控制时）。在不同数据集上的优化效果如下表所示：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→12.706m（−65.5%） | 6→4 | 154ms | 阶段二收敛 |
-| `data/mid_park/data3.json` | 24.582→24.578m（−0.0%，持平） | 9→6 | 296ms | 阶段一降级输出 |
-| `data/rub_park/data1.json` | 12.988→10.519m（−19.0%） | 10→4 | 175ms | 阶段一降级输出 |
-| `data/rub_park/data7.json` | 18.744→14.096m（−24.8%） | 6→2 | 187ms | 阶段二收敛 |
+| `data/long_park/data6.json` | 36.862→17.653m（−52.1%） | 6→4 | 75ms | 阶段一降级输出 |
+| `data/mid_park/data3.json` | 24.582→27.002m（+9.8%） | 9→6 | 294ms | 阶段一降级输出 |
+| `data/rub_park/data1.json` | 12.988→11.427m（−12.0%） | 10→4 | 131ms | 阶段一降级输出 |
+| `data/rub_park/data7.json` | 18.744→17.119m（−8.7%） | 6→4 | 121ms | 阶段一降级输出 |
 
 各场景优化前后对比（红色为原始 A\* 路径，绿色为 iLQR 优化轨迹，顺序与上表一致）：
 
-**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 65.5%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法轨迹的几何特征：
+**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 52.1%，这里为了克服长距离泊车场景中初始轨迹的局部最优问题，使用了基于动态规划的Reeds-Shepp对原始轨迹进行预处理，因此改变了输入数值优化算法轨迹的几何特征：
 
 ![ilqr_data6](fig/ilqr_data6.png)
 
-**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度基本持平：
+**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→6，长度增加 9.8%：
 
 ![ilqr_data3](fig/ilqr_data3.png)
 
-**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 19.0%：
+**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 12.0%：
 
 ![ilqr_data1](fig/ilqr_data1.png)
 
-**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→2，长度缩短 24.8%：
+**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 8.7%：
 
 ![ilqr_data7](fig/ilqr_data7.png)
 
-通过配置 `dual_candidate_select=true` 可以进行一轮额外的iLQR精修。四数据集全部阶段二收敛，路径优化效果为所有组合中最好：data3 由默认的持平（−0.0%）拉回 −37.1%、data1 由 −19.0% 加深到 −39.3%。但合计耗时约 2357 ms（默认约 811 ms，约 2.9×）：
+通过配置 `dual_candidate_select=true` 可以进行一轮额外的iLQR精修。在当前默认（关闭虚拟控制）下精修只对部分数据集有收益：data3 由 +9.8% 拉回 −9.3%、data7 由 −8.7% 加深到 −9.7%，data6/data1 无变化；输出同样为阶段一降级候选。合计耗时约 1944 ms（默认约 621 ms，约 3.1×）：
 
 | 数据集 | 初始路径 | 默认（相对初始） | 开启精修（相对初始） | 默认maneuver | 开启maneuver | 默认耗时 | 开启耗时 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| data6 | 36.862m | 12.706m（−65.5%） | 12.706m（−65.5%） | 6→4 | 6→4 | 154ms | 469ms |
-| data3 | 24.582m | 24.578m（−0.0%） | 15.472m（−37.1%） | 9→6 | 9→6 | 296ms | 631ms |
-| data1 | 12.988m | 10.519m（−19.0%） | 7.884m（−39.3%） | 10→4 | 10→4 | 175ms | 595ms |
-| data7 | 18.744m | 14.096m（−24.8%） | 13.680m（−27.0%） | 6→2 | 6→2 | 187ms | 662ms |
+| data6 | 36.862m | 17.653m（−52.1%） | 17.653m（−52.1%） | 6→4 | 6→4 | 75ms | 192ms |
+| data3 | 24.582m | 27.002m（+9.8%） | 22.286m（−9.3%） | 9→6 | 9→6 | 294ms | 888ms |
+| data1 | 12.988m | 11.427m（−12.0%） | 11.427m（−12.0%） | 10→4 | 10→4 | 131ms | 512ms |
+| data7 | 18.744m | 17.119m（−8.7%） | 16.923m（−9.7%） | 6→4 | 6→4 | 121ms | 352ms |
 
 但是车端耗时敏感，故默认关闭，效果如下图所示：
 

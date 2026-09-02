@@ -12,7 +12,7 @@
             "merit_mu_al_ratio": 0.001,
             "gain_reuse_consecutive_limit": 1,
             "gain_reuse_reject_limit": 8,
-            "use_virtual_control": true
+            "use_virtual_control": false
         },
         "outer": {
             "max_outer_iterations": 30,

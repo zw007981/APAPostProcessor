@@ -105,9 +105,8 @@ struct iLQRConfig : public Config {
     double inner_merit_mu_max{1e9};
     // 定义域守卫外扩 margin (m)，0=关闭
     double inner_domain_guard_margin{2.0};
-    // true=ALTRO 虚拟控制增广（默认开启）：首轮 rollout 缺陷恒零，帮助
-    // 从不可行初值起步，四数据集长度更短且 data6/data7 升为阶段二收敛
-    bool inner_use_virtual_control{true};
+    // 虚拟控制增广（默认关闭）
+    bool inner_use_virtual_control{false};
     // 虚拟控制软代价权重 R_inf
     double inner_virtual_control_weight{1e4};
     // 旧增益复用连续次数上限（0=关闭，默认 1=开启：连续复用 1 次后强制
