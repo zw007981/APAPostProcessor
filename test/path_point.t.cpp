@@ -11,7 +11,7 @@ namespace apa_post_processor {
 namespace {
 
 // 测试 TrajectoryPoint 默认构造时所有派生量均未设置。
-// 因为默认值统一用 NaN 表示"尚未提供"，所以几何量继承 Pose 的 0 初值，且五个
+// 因为默认值统一用 NaN 表示"尚未提供"，所以几何量继承 Pose 的 0 初值，且六个
 // hasXxx() 都应返回 false。
 TEST(PathPointTest, DefaultConstructLeavesDerivedFieldsUnset) {
     const TrajectoryPoint point;
@@ -20,6 +20,7 @@ TEST(PathPointTest, DefaultConstructLeavesDerivedFieldsUnset) {
     EXPECT_DOUBLE_EQ(point.y, 0.0);
     EXPECT_DOUBLE_EQ(point.theta, 0.0);
     EXPECT_FALSE(point.hasKappa());
+    EXPECT_FALSE(point.hasKappaKinematic());
     EXPECT_FALSE(point.hasV());
     EXPECT_FALSE(point.hasDelta());
     EXPECT_FALSE(point.hasA());
@@ -32,6 +33,7 @@ TEST(PathPointTest, GettersThrowWhenFieldsAreNotSet) {
     const TrajectoryPoint point;
 
     EXPECT_THROW(point.getKappa(), std::logic_error);
+    EXPECT_THROW(point.getKappaKinematic(), std::logic_error);
     EXPECT_THROW(point.getV(), std::logic_error);
     EXPECT_THROW(point.getDelta(), std::logic_error);
     EXPECT_THROW(point.getA(), std::logic_error);
@@ -43,6 +45,7 @@ TEST(PathPointTest, GettersThrowWhenFieldsAreNotSet) {
 TEST(PathPointTest, SettersEnableCorrespondingGetters) {
     TrajectoryPoint point;
     point.setKappa(0.12);
+    point.setKappaKinematic(0.13);
     point.setV(1.5);
     point.setDelta(0.25);
     point.setA(-0.3);
@@ -50,6 +53,8 @@ TEST(PathPointTest, SettersEnableCorrespondingGetters) {
 
     EXPECT_TRUE(point.hasKappa());
     EXPECT_DOUBLE_EQ(point.getKappa(), 0.12);
+    EXPECT_TRUE(point.hasKappaKinematic());
+    EXPECT_DOUBLE_EQ(point.getKappaKinematic(), 0.13);
     EXPECT_TRUE(point.hasV());
     EXPECT_DOUBLE_EQ(point.getV(), 1.5);
     EXPECT_TRUE(point.hasDelta());
@@ -72,9 +77,30 @@ TEST(PathPointTest, SettingNaNResetsFieldToUnset) {
     EXPECT_THROW(point.getKappa(), std::logic_error);
 }
 
+// 测试 kappa_kinematic 的 has/get/set 三件套与 NaN 复位行为。
+// 因为它与 kappa 是两种独立口径的派生量，所以各自的设置状态互不影响。
+TEST(PathPointTest, KappaKinematicTrioIsIndependentFromKappa) {
+    TrajectoryPoint point;
+
+    point.setKappaKinematic(0.17);
+    EXPECT_TRUE(point.hasKappaKinematic());
+    EXPECT_DOUBLE_EQ(point.getKappaKinematic(), 0.17);
+    EXPECT_FALSE(point.hasKappa());
+
+    point.setKappa(0.15);
+    EXPECT_TRUE(point.hasKappa());
+    EXPECT_DOUBLE_EQ(point.getKappa(), 0.15);
+    EXPECT_DOUBLE_EQ(point.getKappaKinematic(), 0.17);
+
+    point.setKappaKinematic(std::numeric_limits<double>::quiet_NaN());
+    EXPECT_FALSE(point.hasKappaKinematic());
+    EXPECT_THROW(point.getKappaKinematic(), std::logic_error);
+    EXPECT_TRUE(point.hasKappa());
+}
+
 // 测试使用 x、y、theta 构造 TrajectoryPoint 的场景。
 // 因为几何量必须直接来自输入且派生量默认未提供，所以应同时初始化 x/y/theta
-// 并保持五个 hasXxx() 为 false。
+// 并保持六个 hasXxx() 为 false。
 TEST(PathPointTest, ConstructWithValuesInitializesPoseAndLeavesDerivedUnset) {
     const TrajectoryPoint point{1.2, 3.4, 0.6};
 
@@ -82,6 +108,7 @@ TEST(PathPointTest, ConstructWithValuesInitializesPoseAndLeavesDerivedUnset) {
     EXPECT_DOUBLE_EQ(point.y, 3.4);
     EXPECT_DOUBLE_EQ(point.theta, 0.6);
     EXPECT_FALSE(point.hasKappa());
+    EXPECT_FALSE(point.hasKappaKinematic());
     EXPECT_FALSE(point.hasV());
     EXPECT_FALSE(point.hasDelta());
     EXPECT_FALSE(point.hasA());
@@ -99,6 +126,7 @@ TEST(PathPointTest, ConstructFromPoseInitializesPoseAndLeavesDerivedUnset) {
     EXPECT_DOUBLE_EQ(point.y, 4.3);
     EXPECT_DOUBLE_EQ(point.theta, 0.7);
     EXPECT_FALSE(point.hasKappa());
+    EXPECT_FALSE(point.hasKappaKinematic());
     EXPECT_FALSE(point.hasV());
     EXPECT_FALSE(point.hasDelta());
     EXPECT_FALSE(point.hasA());
@@ -137,6 +165,24 @@ TEST(PathPointTest, ToStringIncludesOnlySetDerivedFields) {
     EXPECT_EQ(point.toString(), std::string("{\"x\": 1.23, \"y\": 5.68, "
                                             "\"theta\": 0.46, \"kappa\": 0.12, "
                                             "\"a\": -0.57}"));
+}
+
+// 测试 toString 对双口径曲率的序列化场景。
+// 因为 kappa 与 kappa_kinematic 独立管理，所以只设置 kappa_kinematic 时输出
+// 不含 kappa，两者同时设置时 kappa_kinematic 紧跟 kappa 之后。
+TEST(PathPointTest, ToStringSerializesKappaKinematicAfterKappa) {
+    TrajectoryPoint kinematic_only{1.234, 5.678, 0.456};
+    kinematic_only.setKappaKinematic(0.1734);
+    EXPECT_EQ(kinematic_only.toString(),
+              std::string("{\"x\": 1.23, \"y\": 5.68, \"theta\": 0.46, "
+                          "\"kappa_kinematic\": 0.17}"));
+
+    TrajectoryPoint both{1.234, 5.678, 0.456};
+    both.setKappa(0.1234);
+    both.setKappaKinematic(0.1734);
+    EXPECT_EQ(both.toString(),
+              std::string("{\"x\": 1.23, \"y\": 5.68, \"theta\": 0.46, "
+                          "\"kappa\": 0.12, \"kappa_kinematic\": 0.17}"));
 }
 
 // 测试 TrajectoryPoint 可以隐式向上转型为 const Pose&。

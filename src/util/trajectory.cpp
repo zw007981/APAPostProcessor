@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <stdexcept>
 
@@ -10,13 +11,175 @@
 #include "../spatial/esdf_map.h"
 #include "../vehicle/vehicle_footprint_model.h"
 #include "../vehicle/vehicle_params.h"
+#include "constants.h"
 #include "logger.h"
 #include "path.h"
 
 namespace apa_post_processor {
+namespace {
+// 逐点累计弧长：相邻点欧氏距离累加，重合点（换挡边界的共享点）
+// 不前进，保持序列非递减
+std::vector<double> ComputeArcLengths(
+    const std::vector<TrajectoryPoint>& points) {
+    std::vector<double> arc_length(points.size(), 0.0);
+    for (std::size_t i = 1; i < points.size(); ++i) {
+        arc_length[i] =
+            arc_length[i - 1] + std::hypot(points[i].x - points[i - 1].x,
+                                           points[i].y - points[i - 1].y);
+    }
+    return arc_length;
+}
+// 单点运动方向符号：停驻（|v| 低于阈值）或缺少速度数据时返回 0，
+// 调用方据此把它并入当前游程段
+int DirectionSignOf(const TrajectoryPoint& point, double v_epsilon) {
+    if (!point.hasV() || std::abs(point.getV()) < v_epsilon) {
+        return 0;
+    }
+    return point.getV() > 0.0 ? 1 : -1;
+}
+// 段内按弧长插值航向角：走最短角差；越界取端点，重合段取右点
+double SampleHeadingAt(const std::vector<TrajectoryPoint>& points,
+                       const std::vector<double>& arc_length,
+                       const PointSpan& span, double s_target) {
+    const auto begin_it =
+        arc_length.begin() + static_cast<std::ptrdiff_t>(span.begin);
+    const auto end_it =
+        arc_length.begin() + static_cast<std::ptrdiff_t>(span.end);
+    const auto it = std::lower_bound(begin_it, end_it, s_target);
+    if (it == begin_it) {
+        return points[span.begin].theta;
+    }
+    if (it == end_it) {
+        return points[span.end - 1].theta;
+    }
+    const std::size_t upper =
+        static_cast<std::size_t>(std::distance(arc_length.begin(), it));
+    const std::size_t lower = upper - 1;
+    const double segment_length = arc_length[upper] - arc_length[lower];
+    if (segment_length < EPSILON_PRECISE) {
+        return points[upper].theta;
+    }
+    const double ratio =
+        std::clamp((s_target - arc_length[lower]) / segment_length, 0.0, 1.0);
+    const double delta =
+        std::remainder(points[upper].theta - points[lower].theta, 2.0 * PI);
+    return points[lower].theta + ratio * delta;
+}
+}  // namespace
+std::vector<PointSpan> Trajectory::SplitDirectionSpans(
+    const std::vector<TrajectoryPoint>& points,
+    const WindowKappaConfig& config) {
+    if (points.empty()) {
+        return {};
+    }
+    std::vector<PointSpan> spans;
+    spans.reserve(points.size());
+    std::size_t span_begin = 0;
+    int run_sign = 0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        const int sign = DirectionSignOf(points[i], config.v_epsilon);
+        if (sign == 0) {
+            continue;
+        }
+        if (run_sign == 0) {
+            run_sign = sign;
+            continue;
+        }
+        if (sign != run_sign) {
+            spans.push_back({span_begin, i});
+            span_begin = i;
+            run_sign = sign;
+        }
+    }
+    spans.push_back({span_begin, points.size()});
+    return spans;
+}
+
+WindowKappaSeries Trajectory::ComputeWindowKappa(
+    const std::vector<TrajectoryPoint>& points,
+    const std::vector<PointSpan>& spans, const WindowKappaConfig& config) {
+    if (!(config.half_window > 0.0) || !(config.min_half_window > 0.0) ||
+        config.min_half_window > config.half_window) {
+        throw std::invalid_argument(
+            "ComputeWindowKappa 收到非法的窗口曲率配置!!!");
+    }
+    WindowKappaSeries series;
+    series.arc_length = ComputeArcLengths(points);
+    series.kappa.assign(points.size(),
+                        std::numeric_limits<double>::quiet_NaN());
+    for (const auto& span : spans) {
+        if (span.end > points.size()) {
+            throw std::invalid_argument(
+                "ComputeWindowKappa 收到越界的方向段区间!!!");
+        }
+        if (span.begin >= span.end) {
+            continue;
+        }
+        const double span_begin_s = series.arc_length[span.begin];
+        const double span_end_s = series.arc_length[span.end - 1];
+        for (std::size_t i = span.begin; i < span.end; ++i) {
+            const double s = series.arc_length[i];
+            const double left = s - span_begin_s;
+            const double right = span_end_s - s;
+            if (std::max(left, right) < config.min_half_window) {
+                continue;
+            }
+            if (left >= config.half_window && right >= config.half_window) {
+                // 双侧充裕：中心差分，截断误差 O(h^2)
+                const double before = SampleHeadingAt(
+                    points, series.arc_length, span, s - config.half_window);
+                const double after = SampleHeadingAt(
+                    points, series.arc_length, span, s + config.half_window);
+                series.kappa[i] =
+                    std::remainder(after - before, 2.0 * PI) /
+                    (2.0 * config.half_window);
+                continue;
+            }
+            // 段端单侧差分：以较长一侧的可用弧长为步长。段端一律取
+            // 中心差分会在换挡点两侧各留一段空白，低速区密采样时
+            // 这些空白会把 κ 曲线切成碎片
+            const double step =
+                std::min(config.half_window, std::max(left, right));
+            const double center =
+                SampleHeadingAt(points, series.arc_length, span, s);
+            if (left >= right) {
+                const double before = SampleHeadingAt(
+                    points, series.arc_length, span, s - step);
+                series.kappa[i] =
+                    std::remainder(center - before, 2.0 * PI) / step;
+                continue;
+            }
+            const double after = SampleHeadingAt(points, series.arc_length,
+                                                 span, s + step);
+            series.kappa[i] =
+                std::remainder(after - center, 2.0 * PI) / step;
+        }
+    }
+    return series;
+}
+
 Trajectory::Trajectory(std::vector<TrajectoryPoint> points)
     : points_(std::move(points)) {
     length_cache_.reset();
+}
+
+void Trajectory::finalizeKappa(double wheelbase,
+                               const WindowKappaConfig& config) {
+    if (!std::isfinite(wheelbase) || wheelbase <= 0.0) {
+        throw std::invalid_argument(
+            "Trajectory::finalizeKappa: wheelbase must be positive and "
+            "finite!!!");
+    }
+    const auto spans = SplitDirectionSpans(points_, config);
+    const auto series = ComputeWindowKappa(points_, spans, config);
+    for (std::size_t i = 0; i < points_.size(); ++i) {
+        // 含 NaN 写入：窗口不足的点覆盖回未设置状态，保证幂等
+        points_[i].setKappa(series.kappa[i]);
+        if (points_[i].hasDelta()) {
+            points_[i].setKappaKinematic(std::tan(points_[i].getDelta()) /
+                                         wheelbase);
+        }
+    }
 }
 
 Trajectory::Trajectory(const Path& path, const VehicleParams& vehicle_params,
@@ -105,6 +268,10 @@ Trajectory::Trajectory(const Path& path, const VehicleParams& vehicle_params,
                     : 0.0);
         }
     }
+    // 交付曲率统一口径：kappa 覆盖上方的 σ 签名窄窗值为加宽窗几何值，
+    // kappa_kinematic 由 δ 换算（数值上恰等于该 σ 签名窄窗 κ）——
+    // 本构造器产物与三条算法路径交付轨迹的字段语义自此完全一致
+    finalizeKappa(vehicle_params.wheelbase);
 }
 
 void Trajectory::clear() {

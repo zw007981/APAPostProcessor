@@ -75,4 +75,5 @@
 
 - 先写/更新测试，确认失败，再修改实现，确认通过（TDD）。
 - 编译通过、测试全绿、无新增静态检查告警后才算完成。
+- **构建口径统一以 Release 为最优先对象**：端到端验证、调参、性能数据、生产运行与一切对外"实测数字"均以 `build/Release` 产物为准，Debug 仅用于单元测试与调试（依据与已知数值差异边界见 [.agents/instructions/build-conventions.md](.agents/instructions/build-conventions.md) 第 6 节）。
 - 任务结束后更新 `docs/milestones.md`；如发现新的坑或边界条件，补充到 `docs/known-limitations.md`。

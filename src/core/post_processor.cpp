@@ -159,6 +159,11 @@ PostProcessorResult PostProcessor::optimize(
     // 先填充输出轨迹再统计（final_maneuvers 依赖轨迹内容）
     result.algorithm = "nmpc";
     result.optimized_trajectory = std::move(attempt.nmpc_traj);
+    // 交付曲率统一口径填充（几何 kappa + kappa_kinematic），与 MINCO/iLQR
+    // 交付轨迹语义一致
+    if (!result.optimized_trajectory.empty()) {
+        result.optimized_trajectory.finalizeKappa(vehicle_params_.wheelbase);
+    }
     result.output_level = result.success ? OutputLevel::kFullSuccess
                                          : OutputLevel::kFallback;
     if (!attempt.preprocessed_traj.empty()) {
@@ -732,6 +737,9 @@ PostProcessorResult PostProcessor::optimizeMinco(
         // 填充 MINCO 轨迹视图（与输出 Path 同序采样点，携带 v/a/delta/delta_dot，
         // 未携带时间戳），供可视化与下游消费
         result.optimized_trajectory = FlattenManeuvers(optimized.getManeuvers());
+        // 交付曲率统一口径填充：kappa 覆盖 Path::finalize 的窄窗值为加宽窗
+        // 几何口径，kappa_kinematic 按 tanδ/L 填充，与 NMPC/iLQR 交付一致
+        result.optimized_trajectory.finalizeKappa(vehicle_params_.wheelbase);
         result.optimized_path = std::move(optimized);
         result.success = true;
         result.message =

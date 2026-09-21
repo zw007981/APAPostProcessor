@@ -45,6 +45,14 @@ APAPostProcessor 是一个 **APA（Automated Parking Assist，自动泊车辅助
    一次性脚本排查管线内部数值问题的方式。该能力默认关闭（`enable_debug_output = false`），
    仅在显式开启时填充调试数据，不影响生产路径的内存占用，详见
    [docs/visualizer_for_preprocessing_pipeline.md](visualizer_for_preprocessing_pipeline.md) 完整设计。
+   轨迹对比画布的曲率信号带与 `main.cpp` 的曲率统计共用 `src/util/trajectory.h` 中
+   `Trajectory::ComputeWindowKappa` 的加宽窗
+   几何曲率（κ=Δθ/Δs，半窗 0.1m），并在图上叠加车辆物理上限 ±κ_max 参考线，因此三种算法与
+   原始路径的曲率曲线口径一致、可直接判读超限。交付轨迹的 `TrajectoryPoint` 字段层面同样
+   统一为该几何口径：`kappa` 由 `Trajectory::finalizeKappa()` 用同一 `Trajectory::ComputeWindowKappa` 填充
+   （对外唯一曲率口径），运动学口径 tanδ/L 以独立字段 `kappa_kinematic` 保留、仅供内部
+   动力学相关消费；`Path` 内部 `Path::finalize()` 的逐点窄窗估计是内部中间量，分工详见
+   [docs/known-limitations.md](known-limitations.md) 的 κ 口径条目。
 
 关键设计取舍：
 
@@ -56,7 +64,7 @@ APAPostProcessor 是一个 **APA（Automated Parking Assist，自动泊车辅助
 - **碰撞约束用软代价而非硬约束**：真实数据的初始猜测可能已经贴着障碍物（甚至瞬时违反安全裕度），
   硬约束会导致 QP 在第 0 次迭代就因不可行而直接求解失败；软代价保证可行域非空，只是违反时支付
   高额代价（详见 `NmpcSolverConfig::esdf_penalty_weight` 注释）。
-- **路径的方向切分与曲率完全由 `Path` 自己用几何启发式推导**（纵向投影 + 外接圆法），不依赖
+- **路径的方向切分与曲率完全由 `Path` 自己用几何启发式推导**（纵向投影 + 角度差分法），不依赖
   上游标注，因为上游 Hybrid A* 等前端不保证提供这些信息、且格式可能不统一。
 - **"位姿"与"路径点"是两个不同的领域概念，不应该用同一个类型承担**：`Pose` 是任意时刻/任意场景下
   的几何位姿（车辆瞬时位姿、可视化标注等），`PathPoint` 才是"路径规划输出的轨迹点"，多出的曲率
@@ -116,7 +124,14 @@ classDiagram
   用 `struct` 声明、字段全公开，代表这三个量**必然存在**，**不应该包含任何路径规划语境下
   才有意义的派生量**（如曲率、速度）。
 - `PathPoint`：`public` 继承 `Pose`，新增一组**不一定存在**的派生量：
-  - `kappa`（有向曲率，1/m）：唯一权威来源是 `Path` 内部的曲率估计算法（外接圆法）；
+  - `kappa`（有向几何曲率，1/m）：**对外统一的曲率口径**（Δθ/Δs，不随方向
+    签名）。`Path` 上由 `Path::finalize()` 的角度差分估计填充（逐点窄窗，
+    内部中间量）；**交付轨迹与 `Trajectory(Path)` 补全轨迹**上一律由
+    `Trajectory::finalizeKappa()` 用加宽窗 `Trajectory::ComputeWindowKappa` 填充（与绘图层/
+    曲率统计同源，全仓库唯一计算点），窗口不足的点保持未设置；
+  - `kappa_kinematic`（运动学曲率 tanδ/L，1/m）：仅供内部动力学相关计算与诊断
+    消费，有 `delta` 的点由 `Trajectory::finalizeKappa()` 一并填充；与 `kappa`
+    的逐点差异即几何-运动学自洽性诊断信号（倒退段还存在方向符号约定差异）；
   - `v`（纵向速度，m/s）、`delta`（前轮转角，rad）：对应 NMPC 优化轨迹的状态量；
   - `a`（纵向加速度，m/s²）、`delta_dot`（前轮转角变化率，rad/s）：对应 NMPC 优化轨迹的
     控制量（每段最后一个点通常没有对应的控制量）。
@@ -140,10 +155,10 @@ classDiagram
 - `Path`：`Maneuver` 的有序序列。对外提供基于"逐点追加"的构造方式（`addPoint`），内部维护：
   - 去重/插值：过近的点忽略，过远的点线性插值补点；
   - 方向推断：基于纵向投影与位移阈值，推断当前点相对上一参考点是前进/后退/原地转向；
-  - 曲率估计：基于外接圆法，在一个滑动的距离窗口内取前后参考点计算有向曲率。**计算时机在
-    所有点追加完成后，由 `finalize()` 统一批量完成**（而非 `addPoint()` 时增量刷新），
-    避免"草稿曲率/最终曲率"两套状态并存的复杂度；`addPoint()` 追加的点在 `finalize()`
-    之前 `hasKappa() == false`。
+  - 曲率估计：基于角度差分法（逐点窄窗，内部点中心差分、段端点单侧差分，
+    κ=wrap(Δθ)/Δs）。**计算时机在所有点追加完成后，由 `finalize()` 统一批量完成**
+    （而非 `addPoint()` 时增量刷新），避免"草稿曲率/最终曲率"两套状态并存的复杂度；
+    `addPoint()` 追加的点在 `finalize()` 之前 `hasKappa() == false`。
 
 ### 3.3 环境与车辆几何
 
@@ -376,7 +391,7 @@ Eigen 对齐分配器 + 严禁热循环堆分配为强制实现规范。
 
 | 模块 | 路径 | 职责 |
 |---|---|---|
-| 基础工具层 | `src/util/` | `Position`/`Pose`/`PathPoint`/`Maneuver`/`Path` 等核心数据结构，`Logger`、`DataLoader`、`Visualizer`、常量定义 |
+| 基础工具层 | `src/util/` | `Position`/`Pose`/`PathPoint`/`Maneuver`/`Path` 等核心数据结构，`Logger`、`DataLoader`、`Visualizer`、`Trajectory`（含交付曲率填充 `finalizeKappa` 与加宽窗几何曲率函数 `Trajectory::SplitDirectionSpans`/`Trajectory::ComputeWindowKappa`，轨迹对比画布与日志统计共用）、常量定义 |
 | 环境表示 | `src/spatial/` | `GridMap`（占据栅格）、`ESDFMap`（符号距离场）；`sfc_corridor.h/.cpp` 当前为空文件，是规划中的安全飞行走廊（Safe Flight Corridor）模块，**尚未实现** |
 | 车辆几何 | `src/vehicle/` | `VehicleParams`（物理参数）、`VehicleFootprintModel`（多圆近似车身占据） |
 | 后处理算法核心 | `src/core/` | 承载具体后处理算法实现；`obb_inflator.h/.cpp` 当前为空文件，是规划中的 OBB（有向包围盒）膨胀算法模块，**尚未实现** |

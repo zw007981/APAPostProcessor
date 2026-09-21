@@ -7,6 +7,7 @@
 #include "core/collision_check.h"
 #include "scene/planning_scene.h"
 #include "util/logger.h"
+#include "util/trajectory.h"
 #include "util/visualizer.hpp"
 
 using namespace apa_post_processor;
@@ -35,21 +36,61 @@ double ComputeMinClearance(const Trajectory& trajectory,
     return min_clearance;
 }
 
-// 计算优化轨迹沿线的曲率统计 (1/m)。输出两套指标：
-//   - 几何曲率 κ_geom（Path::finalize 的角度差分 Δθ/Δs，与绘图 Curvature
-//     面板一致）：换挡/方向翻转折点处会因 Δθ 大而畸高
-//   - 运动学曲率 κ_kin = tan(δ)/L（车辆几何，受前轮转角限幅约束）
-// 均与物理上限 max_kappa 对比，输出最大 |κ|、p99 分位与超限点数
+// 计算优化轨迹沿线的曲率统计 (1/m)：geom 读 kappa 字段（finalizeKappa
+// 加宽窗统一填充，全仓库唯一计算点），kin 读 kappa_kinematic（回退
+// tanδ/L）；xchk 交叉核对只统计驱动段（|v|≥0.05 且非方向段首末点，
+// 过滤依据见 docs/interfaces.md 2026-09-21 变更记录）
 void LogKappaStats(const Trajectory& trajectory, double wheelbase,
                    double max_kappa) {
+    // 驱动段速度阈值 (m/s)：与 iLQR post_v_dwell 豁免阈值、
+    // SplitDirectionSpans 默认 v_epsilon 同值
+    static constexpr double kXDwellSpeed = 0.05;
     std::vector<double> geom, kin;
-    for (const auto& pt : trajectory.points()) {
+    const WindowKappaConfig kappa_config;
+    const auto spans = Trajectory::SplitDirectionSpans(trajectory.points(), kappa_config);
+    std::vector<bool> span_edge(trajectory.size(), false);
+    for (const auto& span : spans) {
+        if (span.begin < span.end) {
+            span_edge[span.begin] = true;
+            span_edge[span.end - 1] = true;
+        }
+    }
+    double max_abs_diff = 0.0;
+    std::size_t diff_points = 0;
+    std::size_t argmax_index = 0;
+    double argmax_v = 0.0, argmax_geom = 0.0, argmax_kin = 0.0;
+    for (std::size_t i = 0; i < trajectory.size(); ++i) {
+        const auto& pt = trajectory[i];
+        double g = std::numeric_limits<double>::quiet_NaN();
+        double k = std::numeric_limits<double>::quiet_NaN();
         if (pt.hasKappa()) {
-            geom.push_back(std::abs(pt.getKappa()));
+            g = pt.getKappa();
+            geom.push_back(std::abs(g));
         }
-        if (pt.hasDelta()) {
-            kin.push_back(std::abs(std::tan(pt.getDelta()) / wheelbase));
+        // 优先读交付轨迹携带的 kappa_kinematic 字段；未设置时（如中间
+        // 轨迹）回退为 tanδ/L 现场换算
+        if (pt.hasKappaKinematic()) {
+            k = pt.getKappaKinematic();
+        } else if (pt.hasDelta()) {
+            k = std::tan(pt.getDelta()) / wheelbase;
         }
+        if (std::isfinite(k)) {
+            kin.push_back(std::abs(k));
+        }
+        // xchk 只统计驱动段内部点（过滤规则见函数注释）
+        if (!std::isfinite(g) || !std::isfinite(k) || span_edge[i] ||
+            !pt.hasV() || std::abs(pt.getV()) < kXDwellSpeed) {
+            continue;
+        }
+        const double diff = std::abs(std::abs(g) - std::abs(k));
+        if (diff >= max_abs_diff) {
+            max_abs_diff = diff;
+            argmax_index = i;
+            argmax_v = pt.getV();
+            argmax_geom = g;
+            argmax_kin = k;
+        }
+        ++diff_points;
     }
     const auto summarize = [&](const char* name, std::vector<double> v) {
         if (v.empty()) {
@@ -72,6 +113,15 @@ void LogKappaStats(const Trajectory& trajectory, double wheelbase,
     };
     summarize("geom", geom);
     summarize("kin ", kin);
+    if (diff_points > 0) {
+        LOG_FMT_INFO(
+            "kappa[xchk]: max||geom|-|kin||={:.4f} (×{:.2f} κ_max, 对拍 {} "
+            "点) argmax=[i={} v={:.3f} geom={:.4f} kin={:.4f}]",
+            max_abs_diff, max_abs_diff / max_kappa, diff_points, argmax_index,
+            argmax_v, argmax_geom, argmax_kin);
+    } else {
+        LOG_FMT_INFO("kappa[xchk]: 驱动段过滤后无有效对拍点");
+    }
 }
 
 int main() {

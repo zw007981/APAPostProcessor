@@ -1192,6 +1192,49 @@ TEST(iLQRPostStageTest, MeltedScenarioOutputsSingleManeuver) {
     EXPECT_TRUE(result.diagnostics.seams.empty());
 }
 
+// 交付轨迹的曲率双口径契约：kappa_kinematic 严格等于 tanδ/L（运动学口径，
+// 与交付的 δ 自洽）；kappa 为加宽窗几何口径，与直接调用
+// SplitDirectionSpans + ComputeWindowKappa 的
+// 结果逐点一致（对外统一判读口径，与绘图/曲率统计同源）
+TEST(iLQRPostStageTest, DeliveredTrajectoryCarriesDualKappaConventions) {
+    PostStageFixture fixture;
+    const Path path = BuildXPolyline({0.0, 1.0, 0.85, 1.85});
+    const iLQRReference reference = BuildReference(path);
+    const auto stage_one = fixture.solver.solveStageOne(reference);
+    ASSERT_EQ(stage_one.report.status, ApaILQRStatus::CONVERGED);
+    GridMap grid_map(0.1, 300, 200, Position{-15.0, -10.0}, {});
+    const ESDFMap esdf_map(grid_map);
+    const auto vehicle_params = MakeVehicleParams();
+    const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 2);
+    TrajectoryPoint goal;
+    goal.x = 1.85;
+    goal.y = 0.0;
+    goal.theta = 0.0;
+    const auto result = fixture.post_stage.run(path, reference, stage_one, goal,
+                                               esdf_map, footprint_model);
+    ASSERT_EQ(result.status, iLQRPostStageStatus::SUCCESS)
+        << "failed_check=" << result.diagnostics.failed_check;
+    ASSERT_FALSE(result.trajectory.empty());
+    const WindowKappaConfig kappa_config;
+    const auto spans =
+        Trajectory::SplitDirectionSpans(result.trajectory.points(), kappa_config);
+    const auto expected =
+        Trajectory::ComputeWindowKappa(result.trajectory.points(), spans, kappa_config);
+    for (std::size_t i = 0; i < result.trajectory.size(); ++i) {
+        const auto& pt = result.trajectory[i];
+        ASSERT_TRUE(pt.hasDelta());
+        ASSERT_TRUE(pt.hasKappaKinematic());
+        EXPECT_DOUBLE_EQ(pt.getKappaKinematic(),
+                         std::tan(pt.getDelta()) / vehicle_params.wheelbase);
+        if (std::isnan(expected.kappa[i])) {
+            EXPECT_FALSE(pt.hasKappa());
+        } else {
+            ASSERT_TRUE(pt.hasKappa());
+            EXPECT_DOUBLE_EQ(pt.getKappa(), expected.kappa[i]);
+        }
+    }
+}
+
 // 阶段二跟踪权重地板（显式钉住）：地板高于阶段一末轮退火值时，阶段二
 // 的逐轮跟踪权重必须取地板值（深退火调度下防止精化因跟踪过弱脱离热
 // 启动邻域）；地板为 0 时保持既有「冻结在阶段一末轮值」行为
@@ -1879,6 +1922,14 @@ TEST(iLQRPostStageTest, StageOneFailureFallsBack) {
     EXPECT_TRUE(result.used_fallback);
     EXPECT_EQ(result.diagnostics.failed_check, "stage_one_convergence");
     ASSERT_FALSE(result.trajectory.empty());
+    // 回退轨迹同样携带双口径曲率（与 iLQR 其他出口语义一致）
+    const auto vehicle_params = MakeVehicleParams();
+    for (const auto& pt : result.trajectory.points()) {
+        ASSERT_TRUE(pt.hasDelta());
+        ASSERT_TRUE(pt.hasKappaKinematic());
+        EXPECT_DOUBLE_EQ(pt.getKappaKinematic(),
+                         std::tan(pt.getDelta()) / vehicle_params.wheelbase);
+    }
 }
 
 // 回退路径：阶段一解退化为全长 0.02 m 的蠕动轨迹（单游程），修剪后路径

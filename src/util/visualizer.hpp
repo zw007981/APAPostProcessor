@@ -1877,7 +1877,7 @@ class Visualizer {
     // 从 Trajectory 构建 DetailSeriesData。
     static DetailSeriesData buildDetailSeriesFromTrajPoints(
         const Trajectory& traj, const std::string& label,
-        const cv::Scalar& color, int line_width, const VehicleParams& vp) {
+        const cv::Scalar& color, int line_width) {
         DetailSeriesData series;
         series.label = label;
         series.color = color;
@@ -1887,7 +1887,13 @@ class Visualizer {
         }
         const std::size_t n = traj.size();
         reserveDetailSeries(series, n);
-        const double wheelbase = vp.wheelbase;
+        // 统一曲率口径：加宽窗几何 κ=Δθ/Δs，只依赖交付的几何量
+        // (x,y,θ)，不依赖各算法自产的求解器状态量 δ，因此三种算法
+        // 与原始路径在同一张图上天然可比，且能暴露几何不可执行的缺陷
+        const WindowKappaConfig kappa_config;
+        const auto spans = Trajectory::SplitDirectionSpans(traj.points(), kappa_config);
+        const auto kappa_series =
+            Trajectory::ComputeWindowKappa(traj.points(), spans, kappa_config);
         double arc = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
             const auto& pp = traj[i];
@@ -1901,13 +1907,7 @@ class Visualizer {
             series.delta.push_back(pp.hasDelta() ? pp.getDelta() : NAN);
             series.delta_dot.push_back(pp.hasDeltaDot() ? pp.getDeltaDot()
                                                         : NAN);
-            if (pp.hasKappa()) {
-                series.curvature.push_back(pp.getKappa());
-            } else if (pp.hasDelta() && std::abs(wheelbase) > EPSILON) {
-                series.curvature.push_back(std::tan(pp.getDelta()) / wheelbase);
-            } else {
-                series.curvature.push_back(NAN);
-            }
+            series.curvature.push_back(kappa_series.kappa[i]);
             if (i + 1 < n) {
                 arc += std::hypot(traj[i + 1].x - pp.x, traj[i + 1].y - pp.y);
             }
@@ -1939,8 +1939,7 @@ class Visualizer {
                 entry.style.count("label") ? entry.style.at("label") : "Traj";
             ctxs.push_back(
                 {buildDetailSeriesFromTrajPoints(entry.points, lb, clr,
-                                                 styleLineWidth(entry.style, 2),
-                                                 entry.vehicle_params),
+                                                 styleLineWidth(entry.style, 2)),
                  &entry});
         }
         if (ctxs.empty()) {
@@ -2065,10 +2064,17 @@ class Visualizer {
         // 为 min_margin band 和 v(m/s) band 添加 y=0 红色虚线参考线。
         std::vector<std::vector<std::pair<double, cv::Scalar>>> band_refs(
             n_bands);
+        // κ 参考线取车辆物理上限：曲线触碰该线即表示该处超限，因此
+        // 必须始终可见（绘制侧会把 per-band 参考线纳入量程）
+        const double max_kappa = ctxs.front().entry->vehicle_params.max_kappa;
         for (std::size_t i = 0; i < n_bands; ++i) {
             if (y_labels[i].find("min_margin") != std::string::npos ||
                 y_labels[i] == "v(m/s)") {
                 band_refs[i].push_back({0.0, cv::Scalar(0, 0, 255)});
+            }
+            if (y_labels[i] == "kappa(1/m)" && max_kappa > 0.0) {
+                band_refs[i].push_back({max_kappa, cv::Scalar(0, 140, 255)});
+                band_refs[i].push_back({-max_kappa, cv::Scalar(0, 140, 255)});
             }
         }
         drawDetailSubplotStacked(
@@ -2457,6 +2463,14 @@ class Visualizer {
                 min_y = std::min(min_y, ref_y);
                 max_y = std::max(max_y, ref_y);
             }
+            // per-band 参考线（如 κ 上限线）同样纳入量程：曲线全部
+            // 合规时参考线若落在量程之外，超限与否就无从判读
+            if (band_idx < static_cast<int>(band_refs.size())) {
+                for (const auto& [ref_y, ref_color] : band_refs[band_idx]) {
+                    min_y = std::min(min_y, ref_y);
+                    max_y = std::max(max_y, ref_y);
+                }
+            }
             double plot_min_x = min_x;
             double plot_max_x = max_x;
             normalizePlotRange(plot_min_x, plot_max_x, min_y, max_y, plot_rect,
@@ -2570,8 +2584,12 @@ class Visualizer {
                             ref_y_pixel),
                         ref_color, 1);
                 }
+                // 参考线数值至少保留两位小数：κ 上限这类关键阈值被
+                // 取整成 0.2 会掩盖真实判定值 0.17
+                const int ref_precision =
+                    std::max(2, ComputeCoordinatePrecision(y_interval));
                 sanctum_.putRawText(
-                    FormatNumber(ref_y, ComputeCoordinatePrecision(y_interval)),
+                    FormatNumber(ref_y, ref_precision),
                     cv::Point(plot_rect.x + plot_rect.width + 4,
                               ref_y_pixel + 3),
                     0.26, ref_color, 1);

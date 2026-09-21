@@ -361,8 +361,10 @@ TEST(TrajectoryTest, FromPathForwardArcFillsDeltaFromFlatness) {
 }
 
 // 测试场景：半径 10m 的倒车圆弧（航向 = 切向 + π，几何曲率 κ_geom>0）。
-// 预期行为：识别为 BACKWARD，内部 v 恒负、首末为 0；运动方向签名曲率与
-// δ 取负（σ=-1 ⇒ κ=-1/R、δ=atan(-L/R)），δ̇≈0。
+// 预期行为：识别为 BACKWARD，内部 v 恒负、首末为 0；δ 取负（σ=-1 ⇒
+// δ=atan(-L/R)），δ̇≈0。构造末尾 finalizeKappa 统一口径后：kappa 字段为
+// 未签名的加宽窗几何值（+1/R），kappa_kinematic 由 δ 换算保持 σ 签名
+// （-1/R）——两字段在倒退段的符号差异即方向约定差异，非不一致。
 TEST(TrajectoryTest, FromPathBackwardArcFlipsSteerSign) {
     Path path;
     path.addPoint({0.0, 0.0, PI});
@@ -380,7 +382,9 @@ TEST(TrajectoryTest, FromPathBackwardArcFlipsSteerSign) {
         EXPECT_LT(traj[i].getV(), 0.0);
     }
     for (const auto& pt : traj) {
-        EXPECT_NEAR(pt.getKappa(), -0.1, 1e-4);
+        EXPECT_NEAR(pt.getKappa(), 0.1, 1e-4);
+        ASSERT_TRUE(pt.hasKappaKinematic());
+        EXPECT_NEAR(pt.getKappaKinematic(), -0.1, 1e-4);
         EXPECT_NEAR(pt.getDelta(), std::atan(-params.wheelbase / 10.0), 1e-4);
         EXPECT_NEAR(pt.getDeltaDot(), 0.0, 1e-6);
     }
@@ -430,8 +434,10 @@ TEST(TrajectoryTest, FromPathSteerRateTracksCurvatureVariation) {
 }
 
 // 测试场景：路径未 finalize（路径点 κ 未设置）时构造轨迹。
-// 预期行为：κ 按 0 回退处理，δ 随之恒为 0，不抛异常。
-TEST(TrajectoryTest, FromPathUnfinalizedPathTreatsKappaAsZero) {
+// 预期行为：δ 按 κ=0 回退处理（随之 kappa_kinematic 恒为 0），不抛异常；
+// kappa 字段如实反映几何——finalizeKappa 的加宽窗几何口径不依赖 Path 的
+// 窄窗 κ，圆弧路径上仍约为 1/R。两口径分叉即"Path 未 finalize"的信号。
+TEST(TrajectoryTest, FromPathUnfinalizedPathFallsBackToZeroDelta) {
     Path path;
     path.addPoint({0.0, 0.0, 0.0});
     AppendArcPoints(&path, 0.0, 0.0, 10.0, 0.01, 30, /*heading_offset=*/0.0);
@@ -439,8 +445,12 @@ TEST(TrajectoryTest, FromPathUnfinalizedPathTreatsKappaAsZero) {
     const Trajectory traj(path, MakeRefTrajVehicleParams());
     ASSERT_EQ(traj.size(), path.size());
     for (const auto& pt : traj) {
-        EXPECT_DOUBLE_EQ(pt.getKappa(), 0.0);
         EXPECT_DOUBLE_EQ(pt.getDelta(), 0.0);
+        ASSERT_TRUE(pt.hasKappaKinematic());
+        EXPECT_DOUBLE_EQ(pt.getKappaKinematic(), 0.0);
+        if (pt.hasKappa()) {
+            EXPECT_NEAR(pt.getKappa(), 0.1, 1e-3);
+        }
     }
 }
 
@@ -712,6 +722,143 @@ TEST(TrajectoryTest, ValidateCustomCollisionThreshold) {
     EXPECT_FALSE(result_strict.collision_safe);
     EXPECT_GT(result_strict.max_intrusion_depth,
               strict_config.max_collision_depth);
+}
+
+// ===== finalizeKappa（交付曲率双口径填充）=====
+
+// 测试辅助：构造半径为 radius 的匀速圆弧轨迹（圆心 (0, radius)，起点在原点、
+// 航向 +x），点距 ds，总长 total_arc；每个点携带 v（前进）与
+// delta=atan(wheelbase/radius)
+Trajectory MakeCircularArcTrajectory(double radius, double ds, double total_arc,
+                                     double v, double wheelbase) {
+    Trajectory traj;
+    const int n = static_cast<int>(std::ceil(total_arc / ds)) + 1;
+    for (int i = 0; i < n; ++i) {
+        const double s = std::min(static_cast<double>(i) * ds, total_arc);
+        const double theta = s / radius;
+        TrajectoryPoint pt(radius * std::sin(theta),
+                           radius * (1.0 - std::cos(theta)), theta);
+        pt.setV(v);
+        pt.setDelta(std::atan(wheelbase / radius));
+        traj.push_back(pt);
+    }
+    return traj;
+}
+
+// 测试场景：匀速圆弧轨迹填充双口径曲率。
+// 预期行为：窗口充足点的 kappa 接近 1/R（几何口径），kappa_kinematic 严格
+// 等于 tan(delta)/L（运动学口径）。
+TEST(TrajectoryTest, FinalizeKappaFillsBothConventionsOnCircularArc) {
+    const double radius = 10.0;
+    const double wheelbase = 3.0;
+    auto traj = MakeCircularArcTrajectory(radius, 0.02, 2.0, 1.0, wheelbase);
+
+    traj.finalizeKappa(wheelbase);
+
+    int checked = 0;
+    for (const auto& pt : traj.points()) {
+        if (!pt.hasKappa()) {
+            continue;
+        }
+        EXPECT_NEAR(pt.getKappa(), 1.0 / radius, 1e-3);
+        ++checked;
+    }
+    // 全长 2m 远大于半窗 0.1m，绝大多数点应窗口充足
+    EXPECT_GT(checked, 80);
+    for (const auto& pt : traj.points()) {
+        ASSERT_TRUE(pt.hasKappaKinematic());
+        EXPECT_DOUBLE_EQ(pt.getKappaKinematic(),
+                         std::tan(pt.getDelta()) / wheelbase);
+        EXPECT_NEAR(pt.getKappaKinematic(), 1.0 / radius, 1e-12);
+    }
+}
+
+// 测试场景：前进→倒退方向反转的轨迹填充。
+// 预期行为：方向段按 v 符号游程切分，填充结果与直接调用
+// SplitDirectionSpans + ComputeWindowKappa 一致（分段不跨越换挡点）。
+TEST(TrajectoryTest, FinalizeKappaSplitsSpansAtDirectionReversal) {
+    const double radius = 10.0;
+    const double wheelbase = 3.0;
+    Trajectory traj;
+    // 前半段前进
+    const auto forward =
+        MakeCircularArcTrajectory(radius, 0.02, 1.0, 1.0, wheelbase);
+    for (const auto& pt : forward.points()) {
+        traj.push_back(pt);
+    }
+    // 后半段倒退：从前进段终点继续沿圆弧走，v 取负
+    const auto backward =
+        MakeCircularArcTrajectory(radius, 0.02, 1.0, -1.0, wheelbase);
+    for (std::size_t i = 1; i < backward.size(); ++i) {
+        auto pt = backward[i];
+        pt.x = forward.back().x + (pt.x - backward.front().x);
+        pt.y = forward.back().y + (pt.y - backward.front().y);
+        pt.setV(-1.0);
+        pt.setDelta(std::atan(wheelbase / radius));
+        traj.push_back(pt);
+    }
+
+    traj.finalizeKappa(wheelbase);
+
+    // 与直接调用 SplitDirectionSpans + ComputeWindowKappa 的结果逐点一致
+    const WindowKappaConfig config;
+    const auto spans = Trajectory::SplitDirectionSpans(traj.points(), config);
+    const auto expected = Trajectory::ComputeWindowKappa(traj.points(), spans, config);
+    ASSERT_EQ(spans.size(), 2u);
+    for (std::size_t i = 0; i < traj.size(); ++i) {
+        if (std::isnan(expected.kappa[i])) {
+            EXPECT_FALSE(traj[i].hasKappa());
+        } else {
+            ASSERT_TRUE(traj[i].hasKappa());
+            EXPECT_DOUBLE_EQ(traj[i].getKappa(), expected.kappa[i]);
+        }
+    }
+}
+
+// 测试场景：预置旧 kappa 值的轨迹填充。
+// 预期行为：既有值一律被覆盖——窗口充足点覆盖为几何口径值，窗口不足点
+// （总长短于两倍最小半窗）覆盖为未设置。
+TEST(TrajectoryTest, FinalizeKappaOverwritesStaleValues) {
+    const double wheelbase = 3.0;
+    auto traj = MakeCircularArcTrajectory(10.0, 0.02, 2.0, 1.0, wheelbase);
+    for (auto& pt : traj) {
+        pt.setKappa(999.0);
+    }
+
+    traj.finalizeKappa(wheelbase);
+
+    for (const auto& pt : traj.points()) {
+        if (pt.hasKappa()) {
+            EXPECT_NE(pt.getKappa(), 999.0);
+        }
+    }
+    // 总长短于 2*min_half_window(0.05m) 的轨迹：所有点 kappa 复位为未设置
+    Trajectory short_traj;
+    for (int i = 0; i < 3; ++i) {
+        TrajectoryPoint pt(0.01 * i, 0.0, 0.0);
+        pt.setV(1.0);
+        pt.setKappa(999.0);
+        short_traj.push_back(pt);
+    }
+    short_traj.finalizeKappa(wheelbase);
+    for (const auto& pt : short_traj.points()) {
+        EXPECT_FALSE(pt.hasKappa());
+    }
+}
+
+// 测试场景：无 delta 的点与非法轴距。
+// 预期行为：无 delta 的点 kappa_kinematic 保持未设置；wheelbase 非正抛
+// std::invalid_argument。
+TEST(TrajectoryTest, FinalizeKappaHandlesMissingDeltaAndInvalidWheelbase) {
+    auto traj = MakeSimpleTrajectory();
+
+    traj.finalizeKappa(3.0);
+
+    for (const auto& pt : traj.points()) {
+        EXPECT_FALSE(pt.hasKappaKinematic());
+    }
+    EXPECT_THROW(traj.finalizeKappa(0.0), std::invalid_argument);
+    EXPECT_THROW(traj.finalizeKappa(-1.0), std::invalid_argument);
 }
 
 }  // namespace

@@ -78,14 +78,16 @@ APA路径规划后处理器
 | 字段 | 含义 | 可选值 |
 | --- | --- | --- |
 | `data_file_path` | 输入数据集（车辆参数/栅格地图/初始路径的 protobuf JSON） | `data/rub_park/data1.json`、`data/rub_park/data7.json`、`data/mid_park/data3.json`、`data/long_park/data6.json`（`data/test.json` 为轻量调试数据仅用于单元测试） |
-| `config_details_path` | 算法配置详情 JSON，**按约定每个算法一个** | `data/minco_config.json`（MINCO 路径）、`data/nmpc_config.json`（NMPC 路径） |
+| `config_details_path` | 算法配置详情 JSON，**按约定每个算法一个** | `data/minco_config.json`（MINCO 路径）、`data/ilqr_config.json`（iLQR 路径）、`data/nmpc_config.json`（NMPC 路径） |
 
-切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"minco"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在两种算法下的效果时，先指向 `data/minco_config.json` 跑一遍，再改成`data/nmpc_config.json` 直接重跑即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
+切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"minco"`、`"ilqr"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在三种算法下的效果时，依次指向三个算法的配置文件各跑一遍即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
+
+> **构建口径约定**：本文档 §2~§4 的全部数字与对比图均为 **Release 构建**（`build/Release`，`OMP_NUM_THREADS=4`）2026-09-21 实测重刷。端到端验证、调参与性能数据一律以 Release 为准（Debug 仅用于单元测试与调试，存在 Debug/Release 数值差异的已知边界，见 [.agents/instructions/build-conventions.md](.agents/instructions/build-conventions.md) 第 6 节）。
 
 运行后产物：
 
 - **优化摘要日志**：控制台与 `log/` 日志文件输出优化前后路径长度、机动段数变化与耗时（优化失败时输出失败原因）；
-- **对比图**：`fig/` 下生成"原始路径（红）vs 优化轨迹（绿，标签带算法名）"的轨迹对比图（空间几何 + κ/heading/v/a/δ/δ̇/安全余量信号带）；原始路径的时间信息由最快走完前提的梯形加减速时间参数化补全。优化失败时只绘制初始轨迹。
+- **对比图**：`fig/` 下生成"原始路径（红）vs 优化轨迹（绿，标签带算法名）"的轨迹对比图（空间几何 + κ/heading/v/a/δ/δ̇/安全余量信号带）；原始路径的时间信息由最快走完前提的梯形加减速时间参数化补全。优化失败时只绘制初始轨迹。其中 **κ 信号带为统一口径的几何曲率**（沿弧长加宽窗的 Δθ/Δs，只依赖交付的 x/y/θ，与算法无关，详见 [docs/known-limitations.md](docs/known-limitations.md) 的 κ 口径条目），并叠加车辆物理上限 ±κ_max 参考线——**曲线触碰参考线即表示该处超限**。
 
 ### 1.5. 单元测试和性能基准测试运行方法
 
@@ -104,10 +106,10 @@ bench_apa_post_processor
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→32.475m（−11.9%） | 6→4 | 279ms | 收敛 |
-| `data/mid_park/data3.json` | 24.582→22.114m（−10.0%） | 9→7 | 816ms | 收敛 |
-| `data/rub_park/data1.json` | 12.988→10.967m（−15.6%） | 10→4 | 165ms | 收敛 |
-| `data/rub_park/data7.json` | 18.744→16.580m（−11.5%） | 6→4 | 425ms | 收敛 |
+| `data/long_park/data6.json` | 36.862→32.475m（−11.9%） | 6→4 | 207ms | 收敛 |
+| `data/mid_park/data3.json` | 24.582→22.114m（−10.0%） | 9→7 | 439ms | 收敛 |
+| `data/rub_park/data1.json` | 12.988→10.967m（−15.6%） | 10→4 | 109ms | 收敛 |
+| `data/rub_park/data7.json` | 18.744→16.580m（−11.5%） | 6→4 | 320ms | 收敛 |
 
 各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 MINCO 优化后轨迹，顺序与上表一致）：
 
@@ -135,10 +137,10 @@ bench_apa_post_processor
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→17.653m（−52.1%） | 6→4 | 75ms | 阶段一降级输出 |
-| `data/mid_park/data3.json` | 24.582→27.002m（+9.8%） | 9→6 | 294ms | 阶段一降级输出 |
-| `data/rub_park/data1.json` | 12.988→11.427m（−12.0%） | 10→4 | 131ms | 阶段一降级输出 |
-| `data/rub_park/data7.json` | 18.744→17.119m（−8.7%） | 6→4 | 121ms | 阶段一降级输出 |
+| `data/long_park/data6.json` | 36.862→17.653m（−52.1%） | 6→4 | 66ms | 阶段一降级输出 |
+| `data/mid_park/data3.json` | 24.582→27.002m（+9.8%） | 9→6 | 219ms | 阶段一降级输出 |
+| `data/rub_park/data1.json` | 12.988→11.427m（−12.0%） | 10→4 | 107ms | 阶段一降级输出 |
+| `data/rub_park/data7.json` | 18.744→17.119m（−8.7%） | 6→4 | 111ms | 阶段一降级输出 |
 
 各场景优化前后对比（红色为原始 A\* 路径，绿色为 iLQR 优化轨迹，顺序与上表一致）：
 
@@ -158,14 +160,14 @@ bench_apa_post_processor
 
 ![ilqr_data7](fig/ilqr_data7.png)
 
-通过配置 `dual_candidate_select=true` 可以进行一轮额外的iLQR精修。在当前默认（关闭虚拟控制）下精修只对部分数据集有收益：data3 由 +9.8% 拉回 −9.3%、data7 由 −8.7% 加深到 −9.7%，data6/data1 无变化；输出同样为阶段一降级候选。合计耗时约 1944 ms（默认约 621 ms，约 3.1×）：
+通过配置 `dual_candidate_select=true` 可以进行一轮额外的iLQR精修。在当前默认（关闭虚拟控制）下精修只对部分数据集有收益：data3 由 +9.8% 拉回 −9.3%、data7 由 −8.7% 加深到 −9.7%，data6/data1 无变化；输出同样为阶段一降级候选。合计耗时约 2314 ms（默认约 503 ms，约 4.6×）：
 
 | 数据集 | 初始路径 | 默认（相对初始） | 开启精修（相对初始） | 默认maneuver | 开启maneuver | 默认耗时 | 开启耗时 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| data6 | 36.862m | 17.653m（−52.1%） | 17.653m（−52.1%） | 6→4 | 6→4 | 75ms | 192ms |
-| data3 | 24.582m | 27.002m（+9.8%） | 22.286m（−9.3%） | 9→6 | 9→6 | 294ms | 888ms |
-| data1 | 12.988m | 11.427m（−12.0%） | 11.427m（−12.0%） | 10→4 | 10→4 | 131ms | 512ms |
-| data7 | 18.744m | 17.119m（−8.7%） | 16.923m（−9.7%） | 6→4 | 6→4 | 121ms | 352ms |
+| data6 | 36.862m | 17.653m（−52.1%） | 17.653m（−52.1%） | 6→4 | 6→4 | 66ms | 215ms |
+| data3 | 24.582m | 27.002m（+9.8%） | 22.286m（−9.3%） | 9→6 | 9→6 | 219ms | 1091ms |
+| data1 | 12.988m | 11.427m（−12.0%） | 11.427m（−12.0%） | 10→4 | 10→4 | 107ms | 540ms |
+| data7 | 18.744m | 17.119m（−8.7%） | 16.923m（−9.7%） | 6→4 | 6→4 | 111ms | 468ms |
 
 但是车端耗时敏感，故默认关闭，效果如下图所示：
 
@@ -185,14 +187,18 @@ bench_apa_post_processor
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→36.836m | 6→6 | 2982ms | 求解失败，回退到预处理轨迹 |
-| `data/mid_park/data3.json` | 24.582→20.882m（−15.1%） | 9→7 | 4361ms | 收敛 |
-| `data/rub_park/data1.json` | 12.988→10.594m（−18.4%） | 10→8 | 1586ms | 收敛 |
-| `data/rub_park/data7.json` | 18.744→18.099m（−3.4%） | 6→5 | 6817ms | 未完全收敛，使用末迭代解 |
+| `data/long_park/data6.json` | 36.862→36.836m | 6→6 | 4249ms | 求解失败，回退到预处理轨迹 |
+| `data/mid_park/data3.json` | 24.582→20.882m（−15.1%） | 9→7 | 6573ms | 收敛 |
+| `data/rub_park/data1.json` | 12.988→10.594m（−18.4%） | 10→8 | 2292ms | 收敛 |
+| `data/rub_park/data7.json` | 18.744→18.099m（−3.4%） | 6→5 | 8375ms | 未完全收敛，使用末迭代解 |
+
+> 注：data1 虽收敛但交付几何在换挡/分段边界附近存在超物理上限的曲率尖峰（几何-运动学不自洽），已登记 [docs/known-limitations.md](docs/known-limitations.md) 待立项排查。
 
 **long_park**：长距离泊车场景，数据集为 `data/long_park/data6.json`。若仅以 ESDF 距离场的距离合法性作为约束把碰撞安全以软惩罚形式计入优化目标，优化器在几何上允许跨越障碍物，即不局限于初始路径所在的同伦类，理论上可以收敛到全局最优解。下图中红色轨迹为初始路径，蓝色轨迹为该设置下的优化结果：
 
 ![long_park_alter](fig/dat6_alter.png)
+
+> 注：该图是上述"仅软惩罚"实验设置下的历史产物——迭代走廊约束（`IterativeCorridorConstraint`）在 NMPC 求解器内恒为常开、没有配置开关，当前代码无法从配置复现该设置，因此本次 κ 口径统一未重绘该图（其 κ 信号带仍是旧口径，仅供观察空间几何）。
 
 然而，这一自由度是有代价的：软约束仅在求解收敛的前提下才能保证无碰撞，一旦优化未能收敛，中间迭代轨迹便可能与障碍物发生碰撞，甚至卡死于障碍物内部。出于"未收敛情形下也必须保证安全"的工程考虑，我们主动舍弃了这一自由度，改为引入迭代走廊硬约束，将优化空间尽可能限制在初始路径的同伦类内。其代价在本场景中同样直观：优化器无法再从障碍物右侧绕行，优化失败：
 

@@ -11,6 +11,7 @@ quality-audits/
 src/generated/
 altro-main/
 fig/test/
+reference/
 
 .favorites.json
 note.md

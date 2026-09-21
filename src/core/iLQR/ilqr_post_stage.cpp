@@ -427,8 +427,8 @@ TrajectoryPoint iLQRPostStage::stateToPoint(const iLQRState& x, double t) const 
     point.setA(x(ILQR_IDX_A));
     point.setDelta(x(ILQR_IDX_DELTA));
     point.setDeltaDot(x(ILQR_IDX_OMEGA));
-    // κ=tanδ/L：与 θ̇=v·κ 的运动学关系自洽（含 v 变号）
-    point.setKappa(std::tan(x(ILQR_IDX_DELTA)) / vehicle_params_.wheelbase);
+    // 曲率不在此逐点回填：交付轨迹装配完成后由 finalizeKappa 统一填充
+    // （kappa 为加宽窗几何口径，kappa_kinematic 为 tanδ/L）
     point.setT(t);
     return point;
 }
@@ -747,7 +747,7 @@ void iLQRPostStage::makeFallback(iLQRPostStageResult* result,
     result->diagnostics.measured_value = measured;
     result->diagnostics.threshold = threshold;
     // 回退轨迹：原始 A* 路径经梯形加减速时间参数化补全为可执行轨迹
-    // （与生产模块的兜底语义一致，绝不输出半成品轨迹）
+    // （绝不输出半成品）；构造器已统一填充交付曲率双口径，与其他出口一致
     result->trajectory = Trajectory(original_path, vehicle_params_);
 }
 
@@ -802,6 +802,8 @@ iLQRPostStageResult iLQRPostStage::run(
         Trajectory output =
             insertDwells(stage_one_result.states, stage_one_reference.dt,
                          seam_plans, &result.diagnostics.seams);
+        // 交付曲率统一口径填充（几何 kappa + kappa_kinematic）
+        output.finalizeKappa(vehicle_params_.wheelbase);
         if (validateOutput(output, stage_one_result.states,
                            stage_one_result.controls, original_path.length(),
                            goal, esdf_map, footprint_model,
@@ -872,6 +874,8 @@ iLQRPostStageResult iLQRPostStage::run(
             Trajectory stage_two_output =
                 insertDwells(stage_two.states, stage_two_reference.dt,
                              gating.seams, &result.diagnostics.seams);
+            // 交付曲率统一口径填充（几何 kappa + kappa_kinematic）
+            stage_two_output.finalizeKappa(vehicle_params_.wheelbase);
             result.stage_two = std::move(stage_two);
             if (validateOutput(stage_two_output, result.stage_two->states,
                                result.stage_two->controls,

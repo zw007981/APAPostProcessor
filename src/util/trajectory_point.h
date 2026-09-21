@@ -12,6 +12,8 @@
 
 namespace apa_post_processor {
 // 路径点：在位姿基础上增加曲率及运动学状态/控制量。未设置的量默认为NaN，获取时抛出异常。
+// 曲率携带两种口径：kappa 为对外统一的几何口径（Δθ/Δs），kappa_kinematic 为
+// 运动学口径（tanδ/L），仅供内部动力学相关计算与诊断消费。
 class TrajectoryPoint : public Pose {
    public:
     TrajectoryPoint() = default;
@@ -32,6 +34,21 @@ class TrajectoryPoint : public Pose {
     }
     // 设置曲率
     void setKappa(double kappa) { kappa_ = kappa; }
+    // 运动学曲率是否已设置
+    bool hasKappaKinematic() const { return !std::isnan(kappa_kinematic_); }
+    // 获取运动学曲率 (1/m)，未设置时抛出
+    double getKappaKinematic() const {
+        if (!hasKappaKinematic()) {
+            throw std::logic_error(
+                "TrajectoryPoint::getKappaKinematic: kappa_kinematic is not "
+                "set!!!");
+        }
+        return kappa_kinematic_;
+    }
+    // 设置运动学曲率
+    void setKappaKinematic(double kappa_kinematic) {
+        kappa_kinematic_ = kappa_kinematic;
+    }
     // 纵向速度是否已设置
     bool hasV() const { return !std::isnan(v_); }
     // 获取纵向速度 (m/s)，未设置时抛出
@@ -97,6 +114,9 @@ class TrajectoryPoint : public Pose {
         if (hasKappa()) {
             oss << ", \"kappa\": " << kappa_;
         }
+        if (hasKappaKinematic()) {
+            oss << ", \"kappa_kinematic\": " << kappa_kinematic_;
+        }
         if (hasV()) {
             oss << ", \"v\": " << v_;
         }
@@ -117,8 +137,12 @@ class TrajectoryPoint : public Pose {
     }
 
    protected:
-    // 有向曲率 (1/m)，未设置时为NaN
+    // 有向几何曲率 (1/m)，对外统一口径（Δθ/Δs），未设置时为NaN
     double kappa_{std::numeric_limits<double>::quiet_NaN()};
+    // 运动学曲率 tanδ/L (1/m)，未设置时为NaN。与 δ 严格自洽，但物理
+    // 含义取决于 δ 来源：MINCO 等 θ-s 轨迹低 ṡ 区的 δ 经 ε_g 正则化，
+    // 该值不代表真实可达曲率，不应用作超限判据
+    double kappa_kinematic_{std::numeric_limits<double>::quiet_NaN()};
     // 纵向速度 (m/s)，未设置时为NaN
     double v_{std::numeric_limits<double>::quiet_NaN()};
     // 前轮转角 (rad)，未设置时为NaN
