@@ -140,7 +140,7 @@ class TrajectoryPoint : public Pose {
     // 有向几何曲率 (1/m)，对外统一口径（Δθ/Δs），未设置时为NaN
     double kappa_{std::numeric_limits<double>::quiet_NaN()};
     // 运动学曲率 tanδ/L (1/m)，未设置时为NaN。与 δ 严格自洽，但物理
-    // 含义取决于 δ 来源：MINCO 等 θ-s 轨迹低 ṡ 区的 δ 经 ε_g 正则化，
+    // 含义取决于 δ 来源：MINCO_THETA_S 等 θ-s 轨迹低 ṡ 区的 δ 经 ε_g 正则化，
     // 该值不代表真实可达曲率，不应用作超限判据
     double kappa_kinematic_{std::numeric_limits<double>::quiet_NaN()};
     // 纵向速度 (m/s)，未设置时为NaN

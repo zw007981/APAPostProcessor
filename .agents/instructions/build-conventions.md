@@ -37,7 +37,7 @@ description: "CMake 构建脚本约定，源自参考样例提炼，逐条遵循
 
 - **一切对外结论以 Release 为准**：端到端验证、四数据集调参、性能/benchmark 数据、生产运行、曲率等统计口径的判读，统一使用 `build/Release` 产物；引用任何"实测数字"时默认其来自 Release 构建。
 - **Debug 的定位**：仅用于单元测试（ctest）与断点调试，不作为任何效果/性能结论的依据。
-- **数值差异是已知边界**：L-BFGS/iLQR 等迭代求解器对浮点求值路径敏感，同一输入在 Debug 与 Release 下可能得出不同结果（实测案例：MINCO data1 预处理 Debug 失败、Release 收敛，见 [docs/known-limitations.md](../../docs/known-limitations.md)「MINCO data1 预处理在 Debug 构建下失败」条目）。遇到 Debug 独有的失败时，先按该条目核对，不得仅凭 Debug 现象判定回归或改参数。
+- **数值差异是已知边界**：L-BFGS/iLQR 等迭代求解器对浮点求值路径敏感，同一输入在 Debug 与 Release 下可能得出不同结果（实测案例：MINCO_THETA_S data1 预处理 Debug 失败、Release 收敛，见 [docs/known-limitations.md](../../docs/known-limitations.md)「MINCO_THETA_S data1 预处理在 Debug 构建下失败」条目）。遇到 Debug 独有的失败时，先按该条目核对，不得仅凭 Debug 现象判定回归或改参数。
 
 ---
 

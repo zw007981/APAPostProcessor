@@ -15,7 +15,7 @@
 namespace apa_post_processor {
 namespace {
 
-// 公共车辆参数（与 post_processor_minco.t.cpp 的合成场景一致）
+// 公共车辆参数（与 post_processor_minco_theta_s.t.cpp 的合成场景一致）
 VehicleParams MakeVehicleParams() {
     return VehicleParams(/*length=*/4.3, /*width=*/1.8, /*wheelbase=*/2.7,
                          /*max_steer_angle=*/0.6, /*rear_overhang=*/0.8,
@@ -144,7 +144,7 @@ TEST(PostProcessoriLQRTest, DegeneratePathReturnsFailure) {
 }
 
 // ============================================================
-// 测试：iLQR 路径不污染配置、不与 MINCO 路径互相干扰
+// 测试：iLQR 路径不污染配置、不与 MINCO_THETA_S 路径互相干扰
 // ============================================================
 
 // 调用方传入的 iLQRConfig 对象在 optimizeiLQR 后必须保持原值（幅值边界同步
@@ -171,20 +171,21 @@ TEST(PostProcessoriLQRTest, DoesNotMutateiLQRConfig) {
     EXPECT_DOUBLE_EQ(ilqr_config.post_kappa_pad, 1.1);
 }
 
-// 先跑一次 MINCO 路径，再跑 iLQR 路径，最后再跑 MINCO 路径：两次 MINCO 结果必须
-// 完全一致，且 MINCO 配置对象未被触碰。
-TEST(PostProcessoriLQRTest, iLQRPathDoesNotInterfereWithMincoPath) {
+// 先跑一次 MINCO_THETA_S 路径，再跑 iLQR 路径，最后再跑一次
+// MINCO_THETA_S 路径：两次 MINCO_THETA_S 结果必须完全一致，
+// 且 MINCO_THETA_S 配置对象未被触碰。
+TEST(PostProcessoriLQRTest, iLQRPathDoesNotInterfereWithMincoThetaSPath) {
     const auto vehicle_params = MakeVehicleParams();
     const auto footprint = MakeFootprintModel(vehicle_params);
     const auto esdf_map = MakeLargeEmptyEsdfMap();
     const PostProcessor processor(vehicle_params, footprint, esdf_map);
     const auto path = BuildStraightPath(2.0);
-    const auto before = processor.optimizeMinco(path, MincoConfig{});
+    const auto before = processor.optimizeMincoThetaS(path, MincoThetaSConfig{});
     ASSERT_TRUE(before.success) << before.message;
     const auto ilqr_result =
         processor.optimizeiLQR(path, MakeSyntheticiLQRConfig());
     ASSERT_TRUE(ilqr_result.success) << ilqr_result.message;
-    const auto after = processor.optimizeMinco(path, MincoConfig{});
+    const auto after = processor.optimizeMincoThetaS(path, MincoThetaSConfig{});
     ASSERT_TRUE(after.success) << after.message;
     EXPECT_EQ(before.message, after.message);
     EXPECT_EQ(before.final_maneuvers, after.final_maneuvers);

@@ -6,7 +6,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "core/MINCO/block_tridiagonal_solver.h"
+#include "core/MINCO_THETA_S/block_tridiagonal_solver.h"
 
 namespace apa_post_processor {
 namespace {
@@ -75,7 +75,7 @@ BlockMatrix BuildRandomRhs(int num_blocks, std::mt19937* rng) {
 }
 
 // 测试单块退化场景（块三对角退化为单个 6x6 块）。
-// 因为 M=1 的 MINCO 系统就是单块结构，所以该场景必须精确成立。
+// 因为 M=1 的 MINCO_THETA_S 系统就是单块结构，所以该场景必须精确成立。
 TEST(BlockTridiagonalSolverTest, SingleBlockMatchesDenseSolve) {
     std::mt19937 rng(42);
     std::vector<Block> lower, diagonal, upper;

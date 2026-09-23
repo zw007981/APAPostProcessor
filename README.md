@@ -71,18 +71,18 @@ APA路径规划后处理器
 ```json
 {
   "data_file_path": "data/rub_park/data1.json",
-  "config_details_path": "data/minco_config.json"
+  "config_details_path": "data/minco_theta_s_config.json"
 }
 ```
 
 | 字段 | 含义 | 可选值 |
 | --- | --- | --- |
 | `data_file_path` | 输入数据集（车辆参数/栅格地图/初始路径的 protobuf JSON） | `data/rub_park/data1.json`、`data/rub_park/data7.json`、`data/mid_park/data3.json`、`data/long_park/data6.json`（`data/test.json` 为轻量调试数据仅用于单元测试） |
-| `config_details_path` | 算法配置详情 JSON，**按约定每个算法一个** | `data/minco_config.json`（MINCO 路径）、`data/ilqr_config.json`（iLQR 路径）、`data/nmpc_config.json`（NMPC 路径） |
+| `config_details_path` | 算法配置详情 JSON，**按约定每个算法一个** | `data/minco_theta_s_config.json`（MINCO_THETA_S 路径）、`data/ilqr_config.json`（iLQR 路径）、`data/nmpc_config.json`（NMPC 路径） |
 
-切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"minco"`、`"ilqr"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在三种算法下的效果时，依次指向三个算法的配置文件各跑一遍即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
+切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"minco_theta_s"`、`"ilqr"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在三种算法下的效果时，依次指向三个算法的配置文件各跑一遍即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
 
-> **构建口径约定**：本文档数字与对比图均为 **Release 构建**（`build/Release`，`OMP_NUM_THREADS=4`）实测；其中 §2（MINCO）为 2026-09-22 重刷，§3（iLQR）与 §4（NMPC）为 2026-09-21 实测。端到端验证、调参与性能数据一律以 Release 为准（Debug 仅用于单元测试与调试，存在 Debug/Release 数值差异的已知边界，见 [.agents/instructions/build-conventions.md](.agents/instructions/build-conventions.md) 第 6 节）。
+> **构建口径约定**：本文档数字与对比图均为 **Release 构建**（`build/Release`，`OMP_NUM_THREADS=4`）实测；其中 §2（MINCO_THETA_S）为 2026-09-22 重刷，§3（iLQR）与 §4（NMPC）为 2026-09-21 实测。端到端验证、调参与性能数据一律以 Release 为准（Debug 仅用于单元测试与调试，存在 Debug/Release 数值差异的已知边界，见 [.agents/instructions/build-conventions.md](.agents/instructions/build-conventions.md) 第 6 节）。
 
 运行后产物：
 
@@ -100,9 +100,9 @@ bench_apa_post_processor
 
 ---
 
-## 2. MINCO
+## 2. MINCO_THETA_S
 
-详细设计文档见 [docs/MINCO.md](docs/MINCO.md)。基于 MINCO 框架在 θ-s 空间优化混合 A* 初始轨迹，输出平滑无碰撞路径。当前标称段长 0.75 m（标称段时长 1.5 s @ 0.5 m/s，经四数据集 0.4~2.0 s 段时长扫描后选定）。不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/MINCO_THETA_S.md](docs/MINCO_THETA_S.md)。基于 MINCO 框架在 θ-s 空间优化混合 A* 初始轨迹，输出平滑无碰撞路径。当前标称段长 0.75 m（标称段时长 1.5 s @ 0.5 m/s，经四数据集 0.4~2.0 s 段时长扫描后选定）。不同数据集上的优化效果如下表所示：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
@@ -111,23 +111,23 @@ bench_apa_post_processor
 | `data/rub_park/data1.json` | 12.988→10.759m（−17.2%） | 10→4 | 134ms | 收敛 |
 | `data/rub_park/data7.json` | 18.744→16.830m（−10.2%） | 6→4 | 308ms | 收敛 |
 
-各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 MINCO 优化后轨迹，顺序与上表一致）：
+各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 MINCO_THETA_S 优化后轨迹，顺序与上表一致）：
 
 **long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 12.4%：
 
-![minco_data6](fig/minco_data6.png)
+![minco_theta_s_data6](fig/minco_theta_s_data6.png)
 
 **mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→7，长度缩短 6.9%：
 
-![minco_data3](fig/minco_data3.png)
+![minco_theta_s_data3](fig/minco_theta_s_data3.png)
 
 **rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 17.2%：
 
-![minco_data1](fig/minco_data1.png)
+![minco_theta_s_data1](fig/minco_theta_s_data1.png)
 
 **rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 10.2%：
 
-![minco_data7](fig/minco_data7.png)
+![minco_theta_s_data7](fig/minco_theta_s_data7.png)
 
 ---
 

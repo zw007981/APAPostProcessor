@@ -19,9 +19,9 @@ static_assert(!std::is_move_assignable_v<Config>);
 static_assert(std::is_copy_constructible_v<NMPCConfig>);
 static_assert(std::is_copy_assignable_v<NMPCConfig>);
 static_assert(std::is_move_constructible_v<NMPCConfig>);
-static_assert(std::is_copy_constructible_v<MincoConfig>);
-static_assert(std::is_copy_assignable_v<MincoConfig>);
-static_assert(std::is_move_constructible_v<MincoConfig>);
+static_assert(std::is_copy_constructible_v<MincoThetaSConfig>);
+static_assert(std::is_copy_assignable_v<MincoThetaSConfig>);
+static_assert(std::is_move_constructible_v<MincoThetaSConfig>);
 
 // 派生配置对象按值拷贝后字段完整（基类 protected 拷贝不影响派生类使用）
 TEST(ConfigTest, DerivedConfigsRemainCopyable) {
@@ -29,10 +29,10 @@ TEST(ConfigTest, DerivedConfigsRemainCopyable) {
     nmpc_src.max_iter = 7;
     const NMPCConfig nmpc_dst = nmpc_src;
     EXPECT_EQ(nmpc_dst.max_iter, 7);
-    MincoConfig minco_src;
-    minco_src.max_velocity = 1.5;
-    const MincoConfig minco_dst = minco_src;
-    EXPECT_DOUBLE_EQ(minco_dst.max_velocity, 1.5);
+    MincoThetaSConfig minco_theta_s_src;
+    minco_theta_s_src.max_velocity = 1.5;
+    const MincoThetaSConfig minco_theta_s_dst = minco_theta_s_src;
+    EXPECT_DOUBLE_EQ(minco_theta_s_dst.max_velocity, 1.5);
 }
 
 }  // namespace

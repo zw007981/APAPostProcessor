@@ -5,10 +5,10 @@
 // 避免 OpenCV 绘图/写图时间污染求解采样。
 // 除耗时外同时输出质量指标（生产口径摘要行、最小离障碍距离、几何/
 // 运动学曲率峰值），供优化改动前后做"耗时 vs 质量"回归对照。
-// 算法由命令行传入的配置详情 JSON 的 "algorithm" 字段（"minco"/"nmpc"/
+// 算法由命令行传入的配置详情 JSON 的 "algorithm" 字段（"minco_theta_s"/"nmpc"/
 // "ilqr"）路由到对应算法场景，新增算法只需准备对应配置文件，无需新增驱动。
 // 运行：./build/Profile/apa_profile <算法配置详情路径> [每数据集重复次数]
-// 示例：./apa_profile data/minco_config.json 5
+// 示例：./apa_profile data/minco_theta_s_config.json 5
 // 配套脚本 tool/profile.py 一键完成配置/构建/采样/火焰图生成。
 #include <algorithm>
 #include <cmath>
