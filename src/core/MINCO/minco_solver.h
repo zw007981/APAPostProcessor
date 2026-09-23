@@ -138,6 +138,8 @@ struct MincoSolverResult {
 // 外层按终点双指标判据收敛并更新乘子 λ 与惩罚权重 ρ。梯度链路与预处理
 // 器同源：K(T)^{-T} 伴随反传（航点/s_f）+ K(T) 行对 T 的解析依赖（τ），
 // 新增跃度闭式二次型、ESDF 逐节点后缀反传与 PHR-ALM 终端项三个环节。
+// 热路径经预分配工作区复用堆容量（mutable 成员），同一实例的求解/求值
+// 不可并发调用。
 class MincoSolver {
    public:
     // 构造并校验配置：非法配置抛 std::invalid_argument（运动学参数的合法性
@@ -159,17 +161,25 @@ class MincoSolver {
    protected:
     // 辛普森节点数据：世界坐标还原积分在同一组固定节点上的求值结果，
     // 代价函数（梯度反传）与终点指标计算共享，保证"先离散后求导"的
-    // 节点一致性
+    // 节点一致性。物理约束采样并入辛普森偶数节点（配置校验保证
+    // (physics_samples-1) 整除 simpson_subintervals），节点批量采样结果
+    // 同时供物理惩罚与 ESDF 反传消费，不重复求值
     struct SimpsonNodeData {
-        // 每段 simpson_subintervals+1 个节点的 θ 值
-        std::vector<std::vector<double>> node_theta;
-        // 每段 simpson_subintervals+1 个节点的 ṡ 值
-        std::vector<std::vector<double>> node_s_dot;
+        // 扁平节点缓存：第 i 段第 j 节点位于下标 i*node_stride+j
+        int node_stride{0};
+        // 全部段 simpson_subintervals+1 个节点的 0~2 阶批量采样（扁平）
+        std::vector<MincoSegmentSample> node_samples;
         // 每段的辛普森积分位移（世界系）
         std::vector<Eigen::Vector2d> segment_displacements;
-        // 每段 simpson_subintervals+1 个节点的世界坐标（辛普森累计部分和，
-        // 供 ESDF 逐节点求值）
-        std::vector<std::vector<Eigen::Vector2d>> node_positions;
+        // 全部段节点的世界坐标（辛普森累计部分和，扁平，供 ESDF 逐节点
+        // 求值）
+        std::vector<Eigen::Vector2d> node_positions;
+        // 全部段节点朝向角的 cos/sin（扁平，与节点一一对应）：位移积分的
+        // 被积函数、ESDF 惩罚的外圆旋转与梯度反传三处共用同一份，避免同一
+        // θ 重复调用三角函数（同一输入下的 libm 结果逐位相同，缓存不改变
+        // 任何数值）
+        std::vector<double> node_cos;
+        std::vector<double> node_sin;
     };
     // 终点指标：由同一组辛普森节点产出，供外层收敛判定与 λ/ρ 更新
     struct TerminalMetrics {

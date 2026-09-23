@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -33,6 +34,45 @@ void ExpectComponentClose(double expected, double actual, double rel_tol) {
     EXPECT_LE(std::abs(expected - actual),
               rel_tol * std::max(std::abs(actual), 1e-6))
         << "expected=" << expected << " actual=" << actual;
+}
+
+// 用无条件全量查询逐位复算混合代价与梯度：公式与实现完全同构，唯一区别是
+// 距离与梯度一律走 getDistAndGrad（不做门控跳过），用作门控路径的对拍基准
+MincoEsdfPoseCost ComputeWithFullQuery(
+    const ESDFMap& esdf_map,
+    const std::vector<Eigen::Vector2d>& local_centers, double radius, double x,
+    double y, double theta, const MincoConfig& config) {
+    MincoEsdfPoseCost result;
+    const double cos_theta = std::cos(theta);
+    const double sin_theta = std::sin(theta);
+    for (const auto& center : local_centers) {
+        const double lx = center.x();
+        const double ly = center.y();
+        const double cx = x + cos_theta * lx - sin_theta * ly;
+        const double cy = y + sin_theta * lx + cos_theta * ly;
+        const auto [dist, grad] = esdf_map.getDistAndGrad(cx, cy);
+        const double c_safe = radius + config.margin_safe - dist;
+        const double c_comf = radius + config.margin_comf - dist;
+        double factor = 0.0;
+        if (c_safe > 0.0) {
+            result.cost += config.weight_safe * c_safe * c_safe * c_safe;
+            factor += config.weight_safe * 3.0 * c_safe * c_safe;
+        }
+        if (c_comf > 0.0) {
+            result.cost += config.weight_comf * c_comf * c_comf * c_comf;
+            factor += config.weight_comf * 3.0 * c_comf * c_comf;
+        }
+        if (factor <= 0.0) {
+            continue;
+        }
+        const double dcx_dtheta = -sin_theta * lx - cos_theta * ly;
+        const double dcy_dtheta = cos_theta * lx - sin_theta * ly;
+        result.gradient.x() -= factor * grad.x();
+        result.gradient.y() -= factor * grad.y();
+        result.gradient.z() -=
+            factor * (grad.x() * dcx_dtheta + grad.y() * dcy_dtheta);
+    }
+    return result;
 }
 
 // 手推参考结果：混合代价 I_obs 与其对 (x,y,θ) 的梯度
@@ -267,6 +307,54 @@ TEST_F(MincoEsdfPenaltyTest, CustomWeightsAndMarginsMatchHandDerived) {
     ExpectComponentClose(ref.grad_theta, result.gradient.z(), 1e-6);
 }
 
+// 测试惩罚评估与无条件全量查询参考实现逐位一致。
+// 因为 ESDF 查询一旦在数值上出现任何分歧（无论是因为门控跳过梯度还是
+// 插值路径不同），优化器拿到的代价/梯度就会静默改变、收敛轨迹随之偏移；
+// 本用例用与实现同构的参考公式逐位对拍，三类节点均覆盖：门外、仅舒适段、
+// 混合段。
+TEST_F(MincoEsdfPenaltyTest, PenaltyMatchesFullQueryReferenceBitExact) {
+    const auto penalty = MakePenalty();
+    const std::array<std::array<double, 3>, 3> poses = {{
+        {circle_radius_ + 0.5, 2.5, kHalfPi},
+        {circle_radius_ + 0.06, 2.5, kHalfPi},
+        {0.5, 4.0, kHalfPi},
+    }};
+    for (const auto& pose : poses) {
+        const MincoEsdfPoseCost gated =
+            penalty.evaluate(pose[0], pose[1], pose[2]);
+        const MincoEsdfPoseCost full =
+            ComputeWithFullQuery(esdf_map_, circle_centers_, circle_radius_,
+                                 pose[0], pose[1], pose[2], penalty.config());
+        EXPECT_EQ(gated.cost, full.cost);
+        EXPECT_EQ(gated.gradient.x(), full.gradient.x());
+        EXPECT_EQ(gated.gradient.y(), full.gradient.y());
+        EXPECT_EQ(gated.gradient.z(), full.gradient.z());
+    }
+}
+
+// 测试复用 cos/sin 的评估入口与三参入口逐位一致。
+// 因为该重载让调用方（求解器热路径）省掉同一 θ 的重复三角函数调用，一旦
+// 两个入口在圆心旋转或 θ 链式法则上出现任何分歧，优化器拿到的梯度就会
+// 静默改变、收敛轨迹随之偏移，必须逐位钉住。
+TEST_F(MincoEsdfPenaltyTest, PrecomputedTrigEntryMatchesThetaEntryBitExact) {
+    const auto penalty = MakePenalty();
+    const std::array<std::array<double, 3>, 3> poses = {{
+        {circle_radius_ + 0.5, 2.5, kHalfPi},
+        {circle_radius_ + 0.06, 2.5, kHalfPi},
+        {0.5, 4.0, -1.2},
+    }};
+    for (const auto& pose : poses) {
+        const MincoEsdfPoseCost via_theta =
+            penalty.evaluate(pose[0], pose[1], pose[2]);
+        const MincoEsdfPoseCost via_trig = penalty.evaluate(
+            pose[0], pose[1], std::cos(pose[2]), std::sin(pose[2]));
+        EXPECT_EQ(via_theta.cost, via_trig.cost);
+        EXPECT_EQ(via_theta.gradient.x(), via_trig.gradient.x());
+        EXPECT_EQ(via_theta.gradient.y(), via_trig.gradient.y());
+        EXPECT_EQ(via_theta.gradient.z(), via_trig.gradient.z());
+    }
+}
+
 // 测试负角度位姿（θ=-π/4）下代价/梯度与手推一致。
 // 因为负角度的 cos/sin 符号组合（cos>0、sin<0）与既有 [0, π/2] 用例不同，
 // 旋转链式法则 dP_k/dθ=dR/dθ·p_k 的符号处理必须在该符号组合下同样成立。
@@ -401,6 +489,76 @@ TEST_F(MincoEsdfPenaltyTest, OutOfMapCircleYieldsConservativePenalty) {
         config.weight_safe * std::pow(circle_radius_ + config.margin_safe, 3) +
         config.weight_comf * std::pow(circle_radius_ + config.margin_comf, 3);
     EXPECT_GT(result.cost, old_sentinel);
+}
+
+// 测试 evaluate 与「逐圆全量求值」参照路径逐位一致（特征化回归基线）。
+// 参照实现按惩罚公式逐条对应 evaluate 内部的累加表达式，钉住两者逐位
+// 等价；位姿覆盖全不活跃、舒适边界外侧、safe 强区、旋转混合与部分圆
+// 图外恢复场。任何不改变数值语义的内部优化（惰性跳过、批量查询等）
+// 都必须保持本测试逐位通过。
+TEST_F(MincoEsdfPenaltyTest, EvaluateMatchesPerCircleFullEvaluationBitExact) {
+    const MincoConfig config;
+    const auto penalty = MakePenalty(config);
+    const double radius = circle_radius_;
+    const std::vector<std::array<double, 3>> poses = {
+        // 全部圆心远离墙面与边界圈：两个 margin 均不活跃
+        {6.0, 2.5, kHalfPi},
+        // 恰好落在梯度惰性阈值（r+margin_comf）外侧 5cm：梯度被跳过
+        {radius + config.margin_comf + 0.05, 2.5, kHalfPi},
+        // safe 强区：两段惩罚均激活
+        {radius + config.margin_safe - 0.05, 4.0, kHalfPi},
+        // 旋转位姿：后两个圆活跃、前圆不活跃的混合态
+        {1.95, 4.0, std::atan2(0.8, -0.6)},
+        // θ=0：后圆活跃、前圆不活跃
+        {1.2, 4.0, 0.0},
+        // 后圆越出西边界走恢复场（梯度恒计算），中圆活跃、前圆惰性
+        {-0.3, 4.0, 0.0},
+    };
+    for (const auto& pose : poses) {
+        const double px = pose[0];
+        const double py = pose[1];
+        const double pt = pose[2];
+        const double cos_theta = std::cos(pt);
+        const double sin_theta = std::sin(pt);
+        // 参照累加：逐圆全量求值（距离与梯度恒取），累加表达式与惰性化
+        // 前的实现逐条对应
+        MincoEsdfPoseCost expected;
+        for (const auto& center : circle_centers_) {
+            const double lx = center.x();
+            const double ly = center.y();
+            const double cx = px + cos_theta * lx - sin_theta * ly;
+            const double cy = py + sin_theta * lx + cos_theta * ly;
+            const auto [dist, grad] = esdf_map_.getDistAndGrad(cx, cy);
+            const double c_safe = radius + config.margin_safe - dist;
+            const double c_comf = radius + config.margin_comf - dist;
+            double factor = 0.0;
+            if (c_safe > 0.0) {
+                expected.cost += config.weight_safe * c_safe * c_safe * c_safe;
+                factor += config.weight_safe * 3.0 * c_safe * c_safe;
+            }
+            if (c_comf > 0.0) {
+                expected.cost += config.weight_comf * c_comf * c_comf * c_comf;
+                factor += config.weight_comf * 3.0 * c_comf * c_comf;
+            }
+            if (factor <= 0.0) {
+                continue;
+            }
+            const double dcx_dtheta = -sin_theta * lx - cos_theta * ly;
+            const double dcy_dtheta = cos_theta * lx - sin_theta * ly;
+            expected.gradient.x() -= factor * grad.x();
+            expected.gradient.y() -= factor * grad.y();
+            expected.gradient.z() -=
+                factor * (grad.x() * dcx_dtheta + grad.y() * dcy_dtheta);
+        }
+        const auto actual = penalty.evaluate(px, py, pt);
+        EXPECT_DOUBLE_EQ(expected.cost, actual.cost) << "pose x=" << px;
+        EXPECT_DOUBLE_EQ(expected.gradient.x(), actual.gradient.x())
+            << "pose x=" << px;
+        EXPECT_DOUBLE_EQ(expected.gradient.y(), actual.gradient.y())
+            << "pose x=" << px;
+        EXPECT_DOUBLE_EQ(expected.gradient.z(), actual.gradient.z())
+            << "pose x=" << px;
+    }
 }
 
 }  // namespace

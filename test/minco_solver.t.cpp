@@ -100,11 +100,15 @@ MincoConfig MakeKinematicsConfig() {
     return config;
 }
 
-// 跑通 分段器 → 预处理器 的公共前置链路，产出主求解器的合法输入
+// 跑通 分段器 → 预处理器 的公共前置链路，产出主求解器的合法输入。
+// 分段器显式固定标称段长 0.6 m：本套场景是按该分段结构标定的压线用例，
+// 与生产默认段长的调整解耦，避免默认变化使场景几何漂移
 MincoPreprocessorResult RunPreprocessor(
     const Path& path, const Eigen::Vector2d& start_position,
     std::vector<MincoManeuverEstimate>* estimates) {
-    *estimates = MincoManeuverSegmenter(MincoConfig{}).segment(path);
+    MincoConfig segmenter_config;
+    segmenter_config.nominal_segment_length = 0.6;
+    *estimates = MincoManeuverSegmenter(segmenter_config).segment(path);
     const MincoPreprocessor preprocessor(MakeKinematicsConfig());
     const MincoPreprocessorResult result =
         preprocessor.preprocess(*estimates, start_position);
@@ -575,6 +579,15 @@ TEST(MincoSolverTest, InvalidConfigThrows) {
     config = {};
     config.solver_simpson_subintervals = 3;
     EXPECT_THROW(const MincoSolver s(config), std::invalid_argument);
+    // 物理采样并入辛普森节点的合并约束：(num_physics-1) 须整除辛普森子
+    // 区间数——4 点物理采样（间隔 1/3）与 8 个辛普森子区间不兼容
+    config = {};
+    config.solver_physics_samples_per_segment = 4;
+    EXPECT_THROW(const MincoSolver s(config), std::invalid_argument);
+    // 3 点物理采样（间隔 1/2）与 8 个辛普森子区间兼容，允许构造
+    config = {};
+    config.solver_physics_samples_per_segment = 3;
+    EXPECT_NO_THROW(const MincoSolver s(config));
     config = {};
     config.solver_lbfgs_max_iterations = 0;
     EXPECT_THROW(const MincoSolver s(config), std::invalid_argument);

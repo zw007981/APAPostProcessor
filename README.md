@@ -82,7 +82,7 @@ APA路径规划后处理器
 
 切换算法的方法：只需把 `config_details_path` 改成另一个算法的配置文件。主程序启动时会读取该详情 JSON 中的 `"algorithm"` 字段（`"minco"`、`"ilqr"` 或 `"nmpc"`），由 `PlanningScene::LoadFromFile` 工厂运行时路由到对应算法场景——例如对比同一数据集在三种算法下的效果时，依次指向三个算法的配置文件各跑一遍即可，不用改动任何代码。算法详情 JSON 内还可覆盖该算法的通用配置字段。
 
-> **构建口径约定**：本文档 §2~§4 的全部数字与对比图均为 **Release 构建**（`build/Release`，`OMP_NUM_THREADS=4`）2026-09-21 实测重刷。端到端验证、调参与性能数据一律以 Release 为准（Debug 仅用于单元测试与调试，存在 Debug/Release 数值差异的已知边界，见 [.agents/instructions/build-conventions.md](.agents/instructions/build-conventions.md) 第 6 节）。
+> **构建口径约定**：本文档数字与对比图均为 **Release 构建**（`build/Release`，`OMP_NUM_THREADS=4`）实测；其中 §2（MINCO）为 2026-09-22 重刷，§3（iLQR）与 §4（NMPC）为 2026-09-21 实测。端到端验证、调参与性能数据一律以 Release 为准（Debug 仅用于单元测试与调试，存在 Debug/Release 数值差异的已知边界，见 [.agents/instructions/build-conventions.md](.agents/instructions/build-conventions.md) 第 6 节）。
 
 运行后产物：
 
@@ -102,30 +102,30 @@ bench_apa_post_processor
 
 ## 2. MINCO
 
-详细设计文档见 [docs/MINCO.md](docs/MINCO.md)。基于 MINCO 框架在 θ-s 空间优化混合 A* 初始轨迹，输出平滑无碰撞路径。不同数据集上的优化效果如下表所示：
+详细设计文档见 [docs/MINCO.md](docs/MINCO.md)。基于 MINCO 框架在 θ-s 空间优化混合 A* 初始轨迹，输出平滑无碰撞路径。当前标称段长 0.75 m（标称段时长 1.5 s @ 0.5 m/s，经四数据集 0.4~2.0 s 段时长扫描后选定）。不同数据集上的优化效果如下表所示：
 
 | 数据集 | 优化前后长度变化 | maneuver变化 | 耗时 | 收敛状态 |
 | --- | --- | --- | --- | --- |
-| `data/long_park/data6.json` | 36.862→32.475m（−11.9%） | 6→4 | 207ms | 收敛 |
-| `data/mid_park/data3.json` | 24.582→22.114m（−10.0%） | 9→7 | 439ms | 收敛 |
-| `data/rub_park/data1.json` | 12.988→10.967m（−15.6%） | 10→4 | 109ms | 收敛 |
-| `data/rub_park/data7.json` | 18.744→16.580m（−11.5%） | 6→4 | 320ms | 收敛 |
+| `data/long_park/data6.json` | 36.862→32.298m（−12.4%） | 6→4 | 255ms | 收敛 |
+| `data/mid_park/data3.json` | 24.582→22.887m（−6.9%） | 9→7 | 413ms | 收敛 |
+| `data/rub_park/data1.json` | 12.988→10.759m（−17.2%） | 10→4 | 134ms | 收敛 |
+| `data/rub_park/data7.json` | 18.744→16.830m（−10.2%） | 6→4 | 308ms | 收敛 |
 
 各场景优化前后对比（红色为经"最快走完"梯形时间参数化补全的原始路径，绿色为 MINCO 优化后轨迹，顺序与上表一致）：
 
-**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 11.9%：
+**long_park（`data/long_park/data6.json`）**：maneuver段数 6→4，长度缩短 12.4%：
 
 ![minco_data6](fig/minco_data6.png)
 
-**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→7，长度缩短 10.0%：
+**mid_park（`data/mid_park/data3.json`）**：maneuver段数 9→7，长度缩短 6.9%：
 
 ![minco_data3](fig/minco_data3.png)
 
-**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 15.6%：
+**rub_park data1（`data/rub_park/data1.json`）**：maneuver段数 10→4，长度缩短 17.2%：
 
 ![minco_data1](fig/minco_data1.png)
 
-**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 11.5%：
+**rub_park data7（`data/rub_park/data7.json`）**：maneuver段数 6→4，长度缩短 10.2%：
 
 ![minco_data7](fig/minco_data7.png)
 

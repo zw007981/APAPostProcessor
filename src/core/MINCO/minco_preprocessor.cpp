@@ -2,6 +2,7 @@
 
 #include <LBFGS.h>
 
+#include <array>
 #include <cmath>
 #include <stdexcept>
 
@@ -48,12 +49,18 @@ MincoPreprocessor::MincoPreprocessor(const MincoConfig& config)
         !(config_.pre_duration_balance_upper > config_.pre_duration_balance_lower)) {
         throw std::invalid_argument("段时长平衡系数必须满足 0 < ε_low < ε_upp");
     }
-    // 采样配置：梯形至少 2 点；辛普森子区间必须为偶数且至少 2
+    // 采样配置：梯形至少 2 点；辛普森子区间必须为偶数且至少 2；物理采样
+    // 并入辛普森偶数节点要求 (num_physics-1) 整除 num_simpson（默认 5 点
+    // 与 8 子区间满足整除）
     if (config_.pre_physics_samples_per_segment < 2 ||
         config_.pre_simpson_subintervals < 2 ||
-        config_.pre_simpson_subintervals % 2 != 0) {
+        config_.pre_simpson_subintervals % 2 != 0 ||
+        config_.pre_simpson_subintervals %
+                (config_.pre_physics_samples_per_segment - 1) !=
+            0) {
         throw std::invalid_argument(
-            "物理采样数须 >= 2，辛普森子区间须为 >= 2 的偶数");
+            "物理采样数须 >= 2，辛普森子区间须为 >= 2 的偶数且被"
+            "（物理采样数-1）整除");
     }
     if (!(config_.convergence_position_tolerance > 0.0) ||
         !std::isfinite(config_.convergence_position_tolerance)) {
@@ -214,6 +221,11 @@ double MincoPreprocessor::evaluateCostAndGradient(
     Eigen::VectorXd* gradient) const {
     const int num_segments = problem.numSegments();
     const MincoTrajectory trajectory = buildTrajectory(problem, x);
+    // 辛普森节点前向求值先行：0~2 阶批量采样一次产出，物理惩罚（偶数节
+    // 点子集）、换挡点速度惩罚与后缀反传共享同一份节点数据，不重复求值
+    const int num_simpson = config_.pre_simpson_subintervals;
+    const SimpsonNodeData simpson_data = computeSimpsonNodeData(trajectory);
+    const int node_stride = simpson_data.node_stride;
     // ∂J/∂c（θ/s 两个维度，6xM）与 ∂J/∂T（M 维，仅显式部分）的累加器
     MincoTrajectory::CoeffMatrix dJ_dc_theta =
         MincoTrajectory::CoeffMatrix::Zero(MincoTrajectory::COEFFS_PER_SEG,
@@ -222,30 +234,28 @@ double MincoPreprocessor::evaluateCostAndGradient(
         MincoTrajectory::COEFFS_PER_SEG, num_segments);
     Eigen::VectorXd dJ_dT = Eigen::VectorXd::Zero(num_segments);
     double cost = 0.0;
-    // ---- 物理约束惩罚：每段梯形积分，梯度经基函数行回传到多项式系数 ----
+    // ---- 物理约束惩罚：并入辛普森偶数节点的梯形积分，梯度经批量基函数
+    // 行回传到多项式系数（节点采样复用前向求值结果，不再单独求值）----
     const int num_physics = config_.pre_physics_samples_per_segment;
+    const int physics_stride = num_simpson / (num_physics - 1);
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
         for (int j = 0; j < num_physics; ++j) {
-            const double tau = static_cast<double>(j) / (num_physics - 1);
-            const double local_time = tau * duration_i;
+            const int node = j * physics_stride;
+            const double tau = static_cast<double>(node) / num_simpson;
             const double trapezoid =
                 (j == 0 || j == num_physics - 1) ? 0.5 : 1.0;
             // 积分权重 ∝ T（dt = T·dτ）
             const double weight = duration_i * trapezoid / (num_physics - 1);
+            const MincoSegmentSample& node_sample =
+                simpson_data.node_samples[i * node_stride + node];
             ThetaSSample sample;
-            const Eigen::Vector2d eval0 =
-                trajectory.evaluateSegment(i, local_time, 0);
-            const Eigen::Vector2d eval1 =
-                trajectory.evaluateSegment(i, local_time, 1);
-            const Eigen::Vector2d eval2 =
-                trajectory.evaluateSegment(i, local_time, 2);
-            sample.theta = eval0.x();
-            sample.theta_dot = eval1.x();
-            sample.theta_ddot = eval2.x();
-            sample.s = eval0.y();
-            sample.s_dot = eval1.y();
-            sample.s_ddot = eval2.y();
+            sample.theta = node_sample.d0.x();
+            sample.theta_dot = node_sample.d1.x();
+            sample.theta_ddot = node_sample.d2.x();
+            sample.s = node_sample.d0.y();
+            sample.s_dot = node_sample.d1.y();
+            sample.s_ddot = node_sample.d2.y();
             const PhysicalConstraintPenalties penalties =
                 kinematics_.evaluatePenalties(sample);
             const double penalty_value =
@@ -288,11 +298,12 @@ double MincoPreprocessor::evaluateCostAndGradient(
                     penalties.steer_angle.gradient.d_s_ddot +
                 config_.pre_weight_steer_rate *
                     penalties.steer_rate.gradient.d_s_ddot;
-            // ∂D^k/∂c_i = 实时间导数基函数行
-            const auto basis_d1 =
-                MincoTrajectory::DerivativeBasisRow(tau, 1, duration_i);
-            const auto basis_d2 =
-                MincoTrajectory::DerivativeBasisRow(tau, 2, duration_i);
+            // ∂D^k/∂c_i = 实时间导数基函数行（三行共享幂次链一次构造）
+            Eigen::Matrix<double, 1, MincoTrajectory::COEFFS_PER_SEG> basis0;
+            Eigen::Matrix<double, 1, MincoTrajectory::COEFFS_PER_SEG> basis_d1;
+            Eigen::Matrix<double, 1, MincoTrajectory::COEFFS_PER_SEG> basis_d2;
+            MincoTrajectory::DerivativeBasisRows012(tau, duration_i, &basis0,
+                                                    &basis_d1, &basis_d2);
             dJ_dc_theta.col(i) +=
                 weight * (g_theta_dot * basis_d1.transpose() +
                           g_theta_ddot * basis_d2.transpose());
@@ -311,10 +322,8 @@ double MincoPreprocessor::evaluateCostAndGradient(
     // ---- 逐段终点跟踪：辛普森积分还原世界坐标，位置误差梯度按段后缀和 ----
     // 先离散后求导：代价与梯度共用同一组固定求积节点（由
     // computeSimpsonNodeData 统一产出，与结果指标计算共享），保证严格一致
-    const int num_simpson = config_.pre_simpson_subintervals;
     const std::vector<double> simpson_unit_weights =
         SimpsonUnitWeights(num_simpson);
-    const SimpsonNodeData simpson_data = computeSimpsonNodeData(trajectory);
     std::vector<Eigen::Vector2d> end_positions(num_segments);
     Eigen::Vector2d running_position = problem.start_position;
     for (int i = 0; i < num_segments; ++i) {
@@ -335,20 +344,22 @@ double MincoPreprocessor::evaluateCostAndGradient(
             const double tau = static_cast<double>(j) / num_simpson;
             const double weight =
                 duration_i / (3.0 * num_simpson) * simpson_unit_weights[j];
-            const double theta = simpson_data.node_theta[i][j];
-            const double s_dot = simpson_data.node_s_dot[i][j];
+            const double theta = simpson_data.node_samples[i * node_stride + j].d0.x();
+            const double s_dot = simpson_data.node_samples[i * node_stride + j].d1.y();
             const double g_theta = weight * s_dot *
                                    (-std::sin(theta) * suffix_gradient.x() +
                                     std::cos(theta) * suffix_gradient.y());
             const double g_s_dot =
                 weight * (std::cos(theta) * suffix_gradient.x() +
                           std::sin(theta) * suffix_gradient.y());
-            dJ_dc_theta.col(i) += g_theta * MincoTrajectory::DerivativeBasisRow(
-                                                tau, 0, duration_i)
-                                                .transpose();
-            dJ_dc_s.col(i) += g_s_dot * MincoTrajectory::DerivativeBasisRow(
-                                            tau, 1, duration_i)
-                                            .transpose();
+            // 基函数行三行共享幂次链一次构造（0 阶供 θ、1 阶供 ṡ）
+            Eigen::Matrix<double, 1, MincoTrajectory::COEFFS_PER_SEG> basis0;
+            Eigen::Matrix<double, 1, MincoTrajectory::COEFFS_PER_SEG> basis1;
+            Eigen::Matrix<double, 1, MincoTrajectory::COEFFS_PER_SEG> basis2;
+            MincoTrajectory::DerivativeBasisRows012(tau, duration_i, &basis0,
+                                                    &basis1, &basis2);
+            dJ_dc_theta.col(i) += g_theta * basis0.transpose();
+            dJ_dc_s.col(i) += g_s_dot * basis1.transpose();
             // 显式时长梯度恒为 0：辛普森权重 ∝T 与 ṡ∝1/T 精确抵消，
             // θ 节点值在固定系数下与 T 无关
         }
@@ -396,8 +407,9 @@ double MincoPreprocessor::evaluateCostAndGradient(
     // ---- 换挡点 ṡ² 软惩罚（点态，无积分权重）----
     for (const int cusp_index : problem.cusp_segment_indices) {
         const double duration_g = trajectory.duration(cusp_index);
+        // 段末端即辛普森末节点，直接复用前向求值的批量采样
         const double s_dot_end =
-            trajectory.evaluateSegment(cusp_index, duration_g, 1).y();
+            simpson_data.node_samples[cusp_index * node_stride + num_simpson].d1.y();
         cost += config_.pre_weight_gear_cusp * s_dot_end * s_dot_end;
         const double g_s_dot = 2.0 * config_.pre_weight_gear_cusp * s_dot_end;
         dJ_dc_s.col(cusp_index) +=
@@ -410,7 +422,7 @@ double MincoPreprocessor::evaluateCostAndGradient(
     for (const int cusp_index : problem.cusp_segment_indices) {
         const double duration_g = trajectory.duration(cusp_index);
         const double theta_dot_end =
-            trajectory.evaluateSegment(cusp_index, duration_g, 1).x();
+            simpson_data.node_samples[cusp_index * node_stride + num_simpson].d1.x();
         cost += config_.pre_weight_gear_cusp_theta * theta_dot_end * theta_dot_end;
         const double g_theta_dot =
             2.0 * config_.pre_weight_gear_cusp_theta * theta_dot_end;
@@ -420,11 +432,18 @@ double MincoPreprocessor::evaluateCostAndGradient(
         // 点态惩罚的显式时长梯度仅含导数缩放项 g·(-1/T)·θ̇
         dJ_dT(cusp_index) -= g_theta_dot * theta_dot_end / duration_g;
     }
-    // ---- 伴随反传：∂J/∂b = K(T)^{-T}·∂J/∂c，θ/s 两维共享同一分解 ----
+    // ---- 伴随反传：∂J/∂b = K(T)^{-T}·∂J/∂c，θ/s 两维共享同一分解，
+    // 右端项拼接为 6×2M 一次转置求解 ----
+    MincoTrajectory::CoeffMatrix dJ_dc(MincoTrajectory::COEFFS_PER_SEG,
+                                       2 * num_segments);
+    dJ_dc.leftCols(num_segments) = dJ_dc_theta;
+    dJ_dc.rightCols(num_segments) = dJ_dc_s;
+    const MincoTrajectory::CoeffMatrix adjoint =
+        trajectory.solveAdjoint(dJ_dc);
     const MincoTrajectory::CoeffMatrix adjoint_theta =
-        trajectory.solveAdjoint(dJ_dc_theta);
+        adjoint.leftCols(num_segments);
     const MincoTrajectory::CoeffMatrix adjoint_s =
-        trajectory.solveAdjoint(dJ_dc_s);
+        adjoint.rightCols(num_segments);
     gradient->setZero(problem.variableCount());
     // 内部航点 d_m 在 b 中出现两次：段 m 末端位置（第 3 行）与段 m+1 起点
     // 位置（第 2 行）
@@ -440,14 +459,29 @@ double MincoPreprocessor::evaluateCostAndGradient(
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
         double dT = dJ_dT(i);
+        // 本段两端的 1~4 阶 (θ, s) 导数一次取全：1/2 阶直接复用辛普森
+        // 首末节点样本（两端取值与逐阶求值逐位一致），3/4 阶由批量接口
+        // 一次算出，免去每段 8 次逐阶求值
+        const MincoSegmentSample& start_sample =
+            simpson_data.node_samples[i * node_stride];
+        const MincoSegmentSample& end_sample =
+            simpson_data.node_samples[i * node_stride + num_simpson];
+        const MincoSegmentEndOrders34 high_ders =
+            trajectory.evaluateSegmentEndOrders34(i);
+        const std::array<Eigen::Vector2d, 4> start_ders = {
+            start_sample.d1, start_sample.d2, high_ders.start_order3,
+            high_ders.start_order4};
+        const std::array<Eigen::Vector2d, 4> end_ders = {
+            end_sample.d1, end_sample.d2, high_ders.end_order3,
+            high_ders.end_order4};
         // 累加一条 K 行对 T_i 的隐式贡献：row 为块内行号，order 为该行的
-        // 导数阶数 k，tau 为求值点（0=段首，1=段末），sign 为行符号，
-        // block_row 为块行下标（对应伴随矩阵的列）
-        auto accumulate_k_term = [&](int row, int order, double tau,
+        // 导数阶数 k，at_end 为求值点（false=段首、true=段末），sign 为行
+        // 符号，block_row 为块行下标（对应伴随矩阵的列）
+        auto accumulate_k_term = [&](int row, int order, bool at_end,
                                      double sign, int block_row) {
-            const double local_time = tau * duration_i;
-            const Eigen::Vector2d eval =
-                trajectory.evaluateSegment(i, local_time, order);
+            const Eigen::Vector2d& eval =
+                at_end ? end_ders[static_cast<std::size_t>(order - 1)]
+                       : start_ders[static_cast<std::size_t>(order - 1)];
             const double value_theta = sign * eval.x();
             const double value_s = sign * eval.y();
             dT += (static_cast<double>(order) / duration_i) *
@@ -456,23 +490,23 @@ double MincoPreprocessor::evaluateCostAndGradient(
         };
         if (i == 0) {
             // 块行 0：起点速度/加速度行（k=1,2，正号）
-            accumulate_k_term(1, 1, 0.0, 1.0, 0);
-            accumulate_k_term(2, 2, 0.0, 1.0, 0);
+            accumulate_k_term(1, 1, false, 1.0, 0);
+            accumulate_k_term(2, 2, false, 1.0, 0);
         } else {
             // 块行 i（i>0）第 0/1 行：本段起点 3/4 阶导数（负号）
-            accumulate_k_term(0, 3, 0.0, -1.0, i);
-            accumulate_k_term(1, 4, 0.0, -1.0, i);
+            accumulate_k_term(0, 3, false, -1.0, i);
+            accumulate_k_term(1, 4, false, -1.0, i);
             // 上块（块行 i-1 第 4/5 行）：本段起点 1/2 阶导数（负号）
-            accumulate_k_term(4, 1, 0.0, -1.0, i - 1);
-            accumulate_k_term(5, 2, 0.0, -1.0, i - 1);
+            accumulate_k_term(4, 1, false, -1.0, i - 1);
+            accumulate_k_term(5, 2, false, -1.0, i - 1);
         }
         // 块行 i 第 4/5 行：本段末端 1/2 阶导数（正号）
-        accumulate_k_term(4, 1, 1.0, 1.0, i);
-        accumulate_k_term(5, 2, 1.0, 1.0, i);
+        accumulate_k_term(4, 1, true, 1.0, i);
+        accumulate_k_term(5, 2, true, 1.0, i);
         if (i + 1 < num_segments) {
             // 下块（块行 i+1 第 0/1 行）：本段末端 3/4 阶导数（正号）
-            accumulate_k_term(0, 3, 1.0, 1.0, i + 1);
-            accumulate_k_term(1, 4, 1.0, 1.0, i + 1);
+            accumulate_k_term(0, 3, true, 1.0, i + 1);
+            accumulate_k_term(1, 4, true, 1.0, i + 1);
         }
         (*gradient)[2 * (num_segments - 1) + i] =
             dT * MincoTrajectory::TauToDurationDerivative(
@@ -524,27 +558,28 @@ MincoPreprocessor::SimpsonNodeData MincoPreprocessor::computeSimpsonNodeData(
     const int num_simpson = config_.pre_simpson_subintervals;
     const std::vector<double> simpson_unit_weights =
         SimpsonUnitWeights(num_simpson);
+    const int node_stride = num_simpson + 1;
     SimpsonNodeData data;
-    data.node_theta.resize(num_segments);
-    data.node_s_dot.resize(num_segments);
+    data.node_stride = node_stride;
+    data.node_samples.resize(static_cast<std::size_t>(num_segments) *
+                             node_stride);
     data.segment_displacements.assign(num_segments, Eigen::Vector2d::Zero());
     for (int i = 0; i < num_segments; ++i) {
         const double duration_i = trajectory.duration(i);
-        data.node_theta[i].resize(num_simpson + 1);
-        data.node_s_dot[i].resize(num_simpson + 1);
         for (int j = 0; j <= num_simpson; ++j) {
             const double tau = static_cast<double>(j) / num_simpson;
             const double local_time = tau * duration_i;
-            data.node_theta[i][j] =
-                trajectory.evaluateSegment(i, local_time, 0).x();
-            data.node_s_dot[i][j] =
-                trajectory.evaluateSegment(i, local_time, 1).y();
+            // 0~2 阶批量采样：一次调用同时产出 θ/ṡ（辛普森积分用）与
+            // θ̇/θ̈/s̈（偶数节点的物理约束惩罚用）
+            const MincoSegmentSample sample =
+                trajectory.evaluateSegmentOrders02(i, local_time);
+            data.node_samples[i * node_stride + j] = sample;
             const double weight =
                 duration_i / (3.0 * num_simpson) * simpson_unit_weights[j];
             data.segment_displacements[i] +=
-                weight * data.node_s_dot[i][j] *
-                Eigen::Vector2d(std::cos(data.node_theta[i][j]),
-                                std::sin(data.node_theta[i][j]));
+                weight * sample.d1.y() *
+                Eigen::Vector2d(std::cos(sample.d0.x()),
+                                std::sin(sample.d0.x()));
         }
     }
     return data;

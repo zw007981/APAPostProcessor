@@ -26,15 +26,20 @@ void MincoTrajectory::setTrajectory(
             throw std::invalid_argument("段时长必须全部为正有限值");
         }
     }
-    std::vector<BlockTridiagonalSolver::Block> lower;
-    std::vector<BlockTridiagonalSolver::Block> diagonal;
-    std::vector<BlockTridiagonalSolver::Block> upper;
-    AssembleK(durations, lower, diagonal, upper);
-    solver_.factorize(lower, diagonal, upper);
-    // θ 与 s 两维共享同一 K(T) 分解，仅右端项不同
-    coeffs_theta_ =
-        solver_.solve(AssembleRhs(start.theta, end.theta, waypoints, 0));
-    coeffs_s_ = solver_.solve(AssembleRhs(start.s, end.s, waypoints, 1));
+    // 三条块对角线装配进成员缓冲（clear+reserve 复用既有堆容量，仅首次
+    // 或段数变化时真正分配）
+    AssembleK(durations, k_lower_, k_diagonal_, k_upper_);
+    solver_.factorize(k_lower_, k_diagonal_, k_upper_);
+    // θ 与 s 两维共享同一 K(T) 分解：右端项拼接为 6×2M 一次前解，
+    // 避免两趟独立前向/回代替换的循环开销
+    rhs_merged_.resize(COEFFS_PER_SEG, 2 * num_segments);
+    rhs_merged_.leftCols(num_segments) =
+        AssembleRhs(start.theta, end.theta, waypoints, 0);
+    rhs_merged_.rightCols(num_segments) =
+        AssembleRhs(start.s, end.s, waypoints, 1);
+    const CoeffMatrix coeffs = solver_.solve(rhs_merged_);
+    coeffs_theta_ = coeffs.leftCols(num_segments);
+    coeffs_s_ = coeffs.rightCols(num_segments);
     durations_ = durations;
     cumulative_durations_.assign(num_segments + 1, 0.0);
     for (int i = 0; i < num_segments; ++i) {
@@ -65,6 +70,78 @@ Eigen::Vector2d MincoTrajectory::evaluateSegment(int segment_index,
         clamped_time / segment_duration, order, segment_duration);
     return {basis.dot(coeffs_theta_.col(segment_index)),
             basis.dot(coeffs_s_.col(segment_index))};
+}
+
+MincoSegmentSample MincoTrajectory::evaluateSegmentOrders02(
+    int segment_index, double local_time) const {
+    checkEvaluable(0);
+    if (segment_index < 0 || segment_index >= numSegments()) {
+        throw std::out_of_range("段索引越界");
+    }
+    const double segment_duration = durations_[segment_index];
+    const double clamped_time =
+        std::min(std::max(local_time, 0.0), segment_duration);
+    Eigen::Matrix<double, 1, COEFFS_PER_SEG> row0;
+    Eigen::Matrix<double, 1, COEFFS_PER_SEG> row1;
+    Eigen::Matrix<double, 1, COEFFS_PER_SEG> row2;
+    DerivativeBasisRows012(clamped_time / segment_duration, segment_duration,
+                           &row0, &row1, &row2);
+    MincoSegmentSample sample;
+    sample.d0 = {row0.dot(coeffs_theta_.col(segment_index)),
+                 row0.dot(coeffs_s_.col(segment_index))};
+    sample.d1 = {row1.dot(coeffs_theta_.col(segment_index)),
+                 row1.dot(coeffs_s_.col(segment_index))};
+    sample.d2 = {row2.dot(coeffs_theta_.col(segment_index)),
+                 row2.dot(coeffs_s_.col(segment_index))};
+    return sample;
+}
+
+MincoSegmentEndOrders34 MincoTrajectory::evaluateSegmentEndOrders34(
+    int segment_index) const {
+    checkEvaluable(4);
+    if (segment_index < 0 || segment_index >= numSegments()) {
+        throw std::out_of_range("段索引越界");
+    }
+    const double segment_duration = durations_[segment_index];
+    const auto coeffs_theta = coeffs_theta_.col(segment_index);
+    const auto coeffs_s = coeffs_s_.col(segment_index);
+    MincoSegmentEndOrders34 result;
+    for (int order = 3; order <= 4; ++order) {
+        double falling = 1.0;
+        for (int k = 1; k <= order; ++k) {
+            falling *= static_cast<double>(k);
+        }
+        // T^order 保留 std::pow：乘法形式实测引入 1 ulp 漂移并翻转收敛路径
+        const double duration_pow = std::pow(segment_duration, order);
+        Eigen::Matrix<double, 1, COEFFS_PER_SEG> row_start =
+            Eigen::Matrix<double, 1, COEFFS_PER_SEG>::Zero();
+        Eigen::Matrix<double, 1, COEFFS_PER_SEG> row_end =
+            Eigen::Matrix<double, 1, COEFFS_PER_SEG>::Zero();
+        // tau 幂次链照搬逐阶实现：段首从 1 起每步乘 0（仅 order 位非零），
+        // 段末每步乘 1（恒为 1），故两端的行值与逐阶调用逐位相同
+        double tau_pow_start = 1.0;
+        double tau_pow_end = 1.0;
+        for (int k = order; k < COEFFS_PER_SEG; ++k) {
+            row_start[k] = falling * tau_pow_start / duration_pow;
+            row_end[k] = falling * tau_pow_end / duration_pow;
+            falling *= static_cast<double>(k + 1) /
+                       static_cast<double>(k + 1 - order);
+            tau_pow_start *= 0.0;
+            tau_pow_end *= 1.0;
+        }
+        const Eigen::Vector2d start_value{row_start.dot(coeffs_theta),
+                                          row_start.dot(coeffs_s)};
+        const Eigen::Vector2d end_value{row_end.dot(coeffs_theta),
+                                        row_end.dot(coeffs_s)};
+        if (order == 3) {
+            result.start_order3 = start_value;
+            result.end_order3 = end_value;
+        } else {
+            result.start_order4 = start_value;
+            result.end_order4 = end_value;
+        }
+    }
+    return result;
 }
 
 double MincoTrajectory::duration(int segment_index) const {
@@ -233,6 +310,9 @@ MincoTrajectory::DerivativeBasisRow(double tau_norm, int order,
     }
     // tau^(k-order)，k=order 时为 1
     double tau_pow = 1.0;
+    // T^order 保留 std::pow：K(T) 装配的 3/4 阶导数行对 1 ulp 级差异敏感
+    // （乘法形式实测翻转四数据集收敛路径），热路径的无 pow 批量基行由
+    // DerivativeBasisRows012 承担，本函数只服务冷路径
     const double duration_pow = std::pow(duration, order);
     for (int k = order; k < COEFFS_PER_SEG; ++k) {
         row[k] = falling * tau_pow / duration_pow;
@@ -242,6 +322,39 @@ MincoTrajectory::DerivativeBasisRow(double tau_norm, int order,
         tau_pow *= tau_norm;
     }
     return row;
+}
+
+void MincoTrajectory::DerivativeBasisRows012(
+    double tau_norm, double duration,
+    Eigen::Matrix<double, 1, COEFFS_PER_SEG>* row0,
+    Eigen::Matrix<double, 1, COEFFS_PER_SEG>* row1,
+    Eigen::Matrix<double, 1, COEFFS_PER_SEG>* row2) {
+    // 三行共享同一 tau 幂次连乘链 p_k = tau^k；各阶 falling factorial
+    // 递推（初值与 *= (k+1)/(k+1-order) 更新式）与逐阶 DerivativeBasisRow
+    // 完全一致。T² 取乘法形式（pow(T,2) 对整数指数正确舍入，与 T*T 逐位
+    // 一致）；T⁰=1、T¹=T 不引入任何运算——三行与逐阶调用逐位等价
+    const double duration_sq = duration * duration;
+    double tau_pow_k = 1.0;
+    double tau_pow_km1 = 1.0;
+    double tau_pow_km2 = 1.0;
+    double falling1 = 1.0;
+    double falling2 = 2.0;
+    (*row0)[0] = 1.0;
+    (*row1)[0] = 0.0;
+    (*row2)[0] = 0.0;
+    (*row2)[1] = 0.0;
+    for (int k = 1; k < COEFFS_PER_SEG; ++k) {
+        tau_pow_km2 = tau_pow_km1;
+        tau_pow_km1 = tau_pow_k;
+        tau_pow_k = tau_pow_k * tau_norm;
+        (*row0)[k] = tau_pow_k;
+        (*row1)[k] = falling1 * tau_pow_km1 / duration;
+        falling1 *= static_cast<double>(k + 1) / static_cast<double>(k);
+        if (k >= 2) {
+            (*row2)[k] = falling2 * tau_pow_km2 / duration_sq;
+            falling2 *= static_cast<double>(k + 1) / static_cast<double>(k - 1);
+        }
+    }
 }
 
 int MincoTrajectory::locateSegment(double t) const {

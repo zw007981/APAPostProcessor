@@ -2,6 +2,10 @@
 
 #include <Eigen/Core>
 #include <Eigen/LU>
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstring>
 #include <random>
 #include <vector>
 
@@ -116,5 +120,71 @@ BENCHMARK(BM_MincoBlockThomasSolve)->Arg(10)->Arg(100)->Arg(1000)->Arg(10000);
 BENCHMARK(BM_MincoDenseReferenceSolve)->Arg(10)->Arg(100);
 BENCHMARK(BM_MincoTrajectorySetTrajectory)->Arg(10)->Arg(100)->Arg(1000);
 
+// 构造固定参数、固定规模的基准轨迹：段时长与航点在计时循环外一次生成，
+// 供段内求值类基准共用（求解热路径每轮都会重建轨迹，故这是真实形态）
+MincoTrajectory BuildEvalBenchmarkTrajectory(int num_segments) {
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<double> dist(0.5, 2.0);
+    std::vector<double> durations;
+    durations.reserve(num_segments);
+    std::vector<Eigen::Vector2d> waypoints;
+    waypoints.reserve(num_segments - 1);
+    for (int i = 0; i < num_segments; ++i) {
+        durations.push_back(dist(rng));
+    }
+    for (int i = 0; i + 1 < num_segments; ++i) {
+        waypoints.emplace_back(0.1 * i, 0.6 * i);
+    }
+    const MincoBoundaryCondition2d start{{0.0, 0.1, 0.0}, {0.0, 0.5, 0.0}};
+    const MincoBoundaryCondition2d end{{1.0, 0.0, 0.0}, {10.0, 0.0, 0.0}};
+    MincoTrajectory trajectory;
+    trajectory.setTrajectory(start, end, waypoints, durations);
+    return trajectory;
+}
+
+// 段端点 1~4 阶导数：逐阶调用形态（∂J/∂T 装配改造前的写法，每段 8 次
+// evaluateSegment），作为批量接口的对照基线
+void BM_MincoSegmentEndDersPerCall(benchmark::State& state) {
+    const int num_segments = static_cast<int>(state.range(0));
+    const MincoTrajectory trajectory =
+        BuildEvalBenchmarkTrajectory(num_segments);
+    for (auto _ : state) {
+        double acc = 0.0;
+        for (int i = 0; i < num_segments; ++i) {
+            const double duration_i = trajectory.duration(i);
+            for (int order = 1; order <= 4; ++order) {
+                acc += trajectory.evaluateSegment(i, 0.0, order).x();
+                acc += trajectory.evaluateSegment(i, duration_i, order).y();
+            }
+        }
+        benchmark::DoNotOptimize(acc);
+    }
+    state.SetItemsProcessed(state.iterations() * num_segments * 8);
+}
+
+// 段端点 3/4 阶导数批量接口 + 端点 1/2 阶复用节点样本：改造后的实际形态
+// （每段一次批量调用替掉 4 次逐阶调用，1/2 阶不再求值）
+void BM_MincoSegmentEndDersBatch(benchmark::State& state) {
+    const int num_segments = static_cast<int>(state.range(0));
+    const MincoTrajectory trajectory =
+        BuildEvalBenchmarkTrajectory(num_segments);
+    std::vector<MincoSegmentEndOrders34> ders(
+        static_cast<std::size_t>(num_segments));
+    for (auto _ : state) {
+        double acc = 0.0;
+        for (int i = 0; i < num_segments; ++i) {
+            ders[static_cast<std::size_t>(i)] =
+                trajectory.evaluateSegmentEndOrders34(i);
+        }
+        for (const auto& item : ders) {
+            acc += item.start_order3.x() + item.end_order4.y();
+        }
+        benchmark::DoNotOptimize(acc);
+    }
+    state.SetItemsProcessed(state.iterations() * num_segments * 4);
+}
+
+BENCHMARK(BM_MincoSegmentEndDersPerCall)->Arg(10)->Arg(30)->Arg(60);
+BENCHMARK(BM_MincoSegmentEndDersBatch)->Arg(10)->Arg(30)->Arg(60);
 }  // namespace
 }  // namespace apa_post_processor

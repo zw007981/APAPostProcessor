@@ -33,6 +33,11 @@ class MincoEsdfPenalty {
                    const MincoConfig& config);
     // 主入口：给定车辆位姿 (x,y,θ)，返回 I_obs 与其对 (x,y,θ) 的解析梯度
     MincoEsdfPoseCost evaluate(double x, double y, double theta) const;
+    // 主入口重载：调用方已算好该位姿的 cos(θ)/sin(θ) 时复用，免去同一 θ
+    // 的重复三角函数调用；传入值必须与该位姿的 θ 严格对应（外圆旋转与
+    // 链式法则梯度均由它们决定），数值上等价于三参版本
+    MincoEsdfPoseCost evaluate(double x, double y, double cos_theta,
+                               double sin_theta) const;
     // 当前配置（只读）
     const MincoConfig& config() const { return config_; }
 

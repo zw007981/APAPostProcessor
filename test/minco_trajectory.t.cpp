@@ -186,6 +186,163 @@ TEST(MincoTrajectoryTest, DerivativeBasisRowOrderZeroMatchesMonomialBasis) {
     }
 }
 
+// 测试批量 0~2 阶求值与逐阶 evaluateSegment 调用逐位一致。
+// 因为批量接口是求解器热路径上三次单阶调用的合并替代，返回值必须逐位
+// 等价才能保证代价/梯度装配不变；采样点覆盖段端点、内部点与辛普森/
+// 物理合并采样的全部节点位置。
+TEST(MincoTrajectoryTest, EvaluateSegmentOrders02MatchesPerOrderCalls) {
+    MincoBoundaryCondition2d start, end;
+    std::vector<Eigen::Vector2d> waypoints;
+    std::vector<double> durations;
+    BuildMultiSegmentInput(&start, &end, &waypoints, &durations);
+    MincoTrajectory trajectory;
+    trajectory.setTrajectory(start, end, waypoints, durations);
+    for (int i = 0; i < trajectory.numSegments(); ++i) {
+        for (const double tau : {0.0, 0.125, 0.25, 0.5, 0.625, 0.875, 1.0}) {
+            const double local_time = tau * durations[i];
+            const MincoSegmentSample sample =
+                trajectory.evaluateSegmentOrders02(i, local_time);
+            const Eigen::Vector2d d0 =
+                trajectory.evaluateSegment(i, local_time, 0);
+            const Eigen::Vector2d d1 =
+                trajectory.evaluateSegment(i, local_time, 1);
+            const Eigen::Vector2d d2 =
+                trajectory.evaluateSegment(i, local_time, 2);
+            EXPECT_DOUBLE_EQ(sample.d0.x(), d0.x());
+            EXPECT_DOUBLE_EQ(sample.d0.y(), d0.y());
+            EXPECT_DOUBLE_EQ(sample.d1.x(), d1.x());
+            EXPECT_DOUBLE_EQ(sample.d1.y(), d1.y());
+            EXPECT_DOUBLE_EQ(sample.d2.x(), d2.x());
+            EXPECT_DOUBLE_EQ(sample.d2.y(), d2.y());
+        }
+    }
+    // 端点数值级微小越界：与单阶查询同样的截断容忍语义
+    EXPECT_NO_THROW(trajectory.evaluateSegmentOrders02(0, -1e-12));
+    EXPECT_NO_THROW(trajectory.evaluateSegmentOrders02(
+        0, durations[0] + 1e-12));
+}
+
+// 测试 0/1/2 阶基函数行批量构造与逐阶 DerivativeBasisRow 逐位一致。
+// 因为梯度装配将改为批量行构造以共享幂次链，三行必须与单行版本逐位
+// 等价，否则代价梯度发生不可控漂移。
+TEST(MincoTrajectoryTest, DerivativeBasisRows012MatchPerOrderRows) {
+    for (const double tau : {0.0, 0.13, 0.25, 0.5, 0.9, 1.0}) {
+        for (const double duration : {0.6, 1.2, 3.0}) {
+            Eigen::Matrix<double, 1, 6> row0;
+            Eigen::Matrix<double, 1, 6> row1;
+            Eigen::Matrix<double, 1, 6> row2;
+            MincoTrajectory::DerivativeBasisRows012(tau, duration, &row0, &row1,
+                                                    &row2);
+            const auto expect0 =
+                MincoTrajectory::DerivativeBasisRow(tau, 0, duration);
+            const auto expect1 =
+                MincoTrajectory::DerivativeBasisRow(tau, 1, duration);
+            const auto expect2 =
+                MincoTrajectory::DerivativeBasisRow(tau, 2, duration);
+            for (int k = 0; k < 6; ++k) {
+                EXPECT_DOUBLE_EQ(row0[k], expect0[k]);
+                EXPECT_DOUBLE_EQ(row1[k], expect1[k]);
+                EXPECT_DOUBLE_EQ(row2[k], expect2[k]);
+            }
+        }
+    }
+}
+
+// 测试批量求值接口的非法输入拒绝行为。
+// 与单阶查询同一约定：未初始化抛 logic_error，段索引越界抛 out_of_range。
+TEST(MincoTrajectoryTest, EvaluateSegmentOrders02RejectsInvalidInput) {
+    MincoTrajectory trajectory;
+    EXPECT_THROW(trajectory.evaluateSegmentOrders02(0, 0.0),
+                 std::logic_error);
+    const MincoBoundaryCondition2d start{{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}};
+    const MincoBoundaryCondition2d end{{1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    trajectory.setTrajectory(start, end, {}, {2.0});
+    EXPECT_THROW(trajectory.evaluateSegmentOrders02(1, 0.0),
+                 std::out_of_range);
+    EXPECT_THROW(trajectory.evaluateSegmentOrders02(-1, 0.0),
+                 std::out_of_range);
+}
+
+// 测试段两端 3/4 阶导数批量接口与逐阶调用逐位一致。
+// 因为 ∂J/∂T 装配原本把同一段两端的 3/4 阶导数逐阶求值 4 次，批量接口
+// 合并后必须给出完全相同的位模式，否则时间变量梯度发生不可控漂移；用例
+// 覆盖全部段（各段时长不同，覆盖 T<1 与 T>1 两侧的幂次路径）。
+TEST(MincoTrajectoryTest, SegmentEndOrders34MatchesPerOrderCalls) {
+    MincoBoundaryCondition2d start, end;
+    std::vector<Eigen::Vector2d> waypoints;
+    std::vector<double> durations;
+    BuildMultiSegmentInput(&start, &end, &waypoints, &durations);
+    MincoTrajectory trajectory;
+    trajectory.setTrajectory(start, end, waypoints, durations);
+    for (int i = 0; i < trajectory.numSegments(); ++i) {
+        const double duration = durations[i];
+        const MincoSegmentEndOrders34 ders =
+            trajectory.evaluateSegmentEndOrders34(i);
+        const Eigen::Vector2d start3 = trajectory.evaluateSegment(i, 0.0, 3);
+        const Eigen::Vector2d start4 = trajectory.evaluateSegment(i, 0.0, 4);
+        const Eigen::Vector2d end3 =
+            trajectory.evaluateSegment(i, duration, 3);
+        const Eigen::Vector2d end4 =
+            trajectory.evaluateSegment(i, duration, 4);
+        EXPECT_EQ(ders.start_order3.x(), start3.x());
+        EXPECT_EQ(ders.start_order3.y(), start3.y());
+        EXPECT_EQ(ders.start_order4.x(), start4.x());
+        EXPECT_EQ(ders.start_order4.y(), start4.y());
+        EXPECT_EQ(ders.end_order3.x(), end3.x());
+        EXPECT_EQ(ders.end_order3.y(), end3.y());
+        EXPECT_EQ(ders.end_order4.x(), end4.x());
+        EXPECT_EQ(ders.end_order4.y(), end4.y());
+    }
+}
+
+// 测试段两端批量接口的非法输入拒绝行为。
+// 与其余求值入口同一约定：未初始化抛 logic_error，段索引越界抛
+// out_of_range。
+TEST(MincoTrajectoryTest, SegmentEndOrders34RejectsInvalidInput) {
+    MincoTrajectory trajectory;
+    EXPECT_THROW(trajectory.evaluateSegmentEndOrders34(0), std::logic_error);
+    const MincoBoundaryCondition2d start{{0.0, 0.0, 0.0}, {0.0, 0.0, 0.0}};
+    const MincoBoundaryCondition2d end{{1.0, 0.0, 0.0}, {1.0, 0.0, 0.0}};
+    trajectory.setTrajectory(start, end, {}, {2.0});
+    EXPECT_THROW(trajectory.evaluateSegmentEndOrders34(1),
+                 std::out_of_range);
+    EXPECT_THROW(trajectory.evaluateSegmentEndOrders34(-1),
+                 std::out_of_range);
+}
+
+// 测试辛普森首末节点样本在段两端的 1/2 阶导数与逐阶调用逐位一致。
+// 因为 ∂J/∂T 装配改为直接复用节点样本的端点 1/2 阶导数，该复用成立的
+// 前提正是两条求值路径在 tau=0 与 tau=1 处给出完全相同的位模式。
+TEST(MincoTrajectoryTest, EndpointNodeSamplesMatchPerOrderCalls) {
+    MincoBoundaryCondition2d start, end;
+    std::vector<Eigen::Vector2d> waypoints;
+    std::vector<double> durations;
+    BuildMultiSegmentInput(&start, &end, &waypoints, &durations);
+    MincoTrajectory trajectory;
+    trajectory.setTrajectory(start, end, waypoints, durations);
+    for (int i = 0; i < trajectory.numSegments(); ++i) {
+        const double duration = durations[i];
+        const MincoSegmentSample at_start =
+            trajectory.evaluateSegmentOrders02(i, 0.0);
+        const MincoSegmentSample at_end =
+            trajectory.evaluateSegmentOrders02(i, duration);
+        const Eigen::Vector2d start1 = trajectory.evaluateSegment(i, 0.0, 1);
+        const Eigen::Vector2d start2 = trajectory.evaluateSegment(i, 0.0, 2);
+        const Eigen::Vector2d end1 =
+            trajectory.evaluateSegment(i, duration, 1);
+        const Eigen::Vector2d end2 =
+            trajectory.evaluateSegment(i, duration, 2);
+        EXPECT_EQ(at_start.d1.x(), start1.x());
+        EXPECT_EQ(at_start.d1.y(), start1.y());
+        EXPECT_EQ(at_start.d2.x(), start2.x());
+        EXPECT_EQ(at_start.d2.y(), start2.y());
+        EXPECT_EQ(at_end.d1.x(), end1.x());
+        EXPECT_EQ(at_end.d1.y(), end1.y());
+        EXPECT_EQ(at_end.d2.x(), end2.x());
+        EXPECT_EQ(at_end.d2.y(), end2.y());
+    }
+}
+
 // 测试终点弧长 s_f 的伴随梯度与中心差分一致。
 // 因为 s_f 只通过 b 间接影响系数，所以 K(T)^{-T} 伴随给出的解析梯度必须
 // 与"改动 s_f 重建轨迹"的数值梯度吻合。

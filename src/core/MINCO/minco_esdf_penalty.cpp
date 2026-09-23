@@ -38,9 +38,13 @@ MincoEsdfPenalty::MincoEsdfPenalty(const ESDFMap& esdf_map,
 
 MincoEsdfPoseCost MincoEsdfPenalty::evaluate(double x, double y,
                                          double theta) const {
+    return evaluate(x, y, std::cos(theta), std::sin(theta));
+}
+
+MincoEsdfPoseCost MincoEsdfPenalty::evaluate(double x, double y,
+                                         double cos_theta,
+                                         double sin_theta) const {
     MincoEsdfPoseCost result;
-    const double cos_theta = std::cos(theta);
-    const double sin_theta = std::sin(theta);
     for (const auto& local_center : circle_local_centers_) {
         accumulateCircle(local_center, cos_theta, sin_theta, x, y, result);
     }

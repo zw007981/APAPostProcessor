@@ -552,43 +552,6 @@ TEST(ApaILQRSolverTest, RealDatasetStageOneSmoke) {
 
 }  // namespace
 
-// 临时探针（调试用，随诊断结束移除）：data3 阶段一在不同 η_κ 盒下的内层逐迭代轨迹
-TEST(ApaILQRSolverTest, ProbeKappaRound0Iterations) {
-    ::apa::post_processor::OptimizeRequest request;
-    ASSERT_EQ(
-        DataLoader::LoadProtoFromJsonFile("data/mid_park/data3.json", request),
-        LoadResult::SUCCESS);
-    const auto vehicle_params = VehicleParams::FromProto(request.vehicle());
-    const Path init_path = Path::FromProto(request.initial_path());
-    const GridMap grid_map = GridMap::FromProto(request.environment());
-    const ESDFMap esdf_map(grid_map);
-    const VehicleFootprintModel footprint_model(vehicle_params, 233, 2, 2);
-    const iLQREsdfConstraint esdf_constraint(esdf_map, footprint_model);
-    const iLQRReference reference =
-        iLQRReferenceBuilder(iLQRConfig{}, vehicle_params)
-            .build(init_path);
-    for (const double eta_box : {1.0, 0.26}) {
-        iLQRConfig config;
-        config.inner_steer_accel_max = eta_box;
-        const BicycleDynamics dynamics(vehicle_params.wheelbase);
-        const iLQRCostEvaluator cost_evaluator(config, &esdf_constraint);
-        ApaILQRSolver solver(config, &dynamics, &cost_evaluator);
-        const auto result = solver.solveStageOne(reference);
-        std::printf("=== eta_box=%.2f status=%d outer=%d\n", eta_box,
-                    static_cast<int>(result.report.status),
-                    result.report.outer_iterations);
-        int shown = 0;
-        for (const auto& rec : solver.innerSolver().history()) {
-            if (shown++ < 14) {
-                std::printf("iter=%d cost=%.4f merit=%.4f defect=%.4e "
-                            "alpha=%.3e bp=%d\n",
-                            rec.iteration, rec.cost, rec.merit,
-                            rec.defect_norm, rec.alpha, rec.backward_passes);
-            }
-        }
-    }
-}
-
 // 测试升级机制耗尽判据：只有「内层已达不动点 + 所有仍违反组的 μ 钉在
 // 上限且本轮提出升级」才判耗尽；任一组仍有升级空间或内层未收敛都不得
 // 提前退出（防止误杀正在靠 μ/λ 升级逼近的解）

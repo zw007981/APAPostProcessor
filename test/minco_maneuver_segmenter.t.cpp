@@ -10,7 +10,7 @@
 namespace apa_post_processor {
 namespace {
 
-// 测试配置：d_seg=0.6、标称速度 0.5 m/s、标称转向角速度 0.3 rad/s、时长下限
+// 测试配置：d_seg=0.75、标称速度 0.5 m/s、标称转向角速度 0.3 rad/s、时长下限
 // 0.5 s；结构性用例显式关闭微段融合（fuse_arc_threshold=0），避免默认融合
 // 阈值干扰方向切分/弧长累积等结构断言（融合行为由专门用例覆盖）
 MincoConfig MakeConfig() {
@@ -67,14 +67,14 @@ TEST(MincoManeuverSegmenterTest,
     EXPECT_NEAR(estimates[0].segments[0].arc_length, 0.5, 1e-9);
     EXPECT_NEAR(estimates[0].segments[1].arc_length, 1.0, 1e-9);
     EXPECT_NEAR(estimates[0].segments[1].desired_position.x(), 1.0, 1e-9);
-    // 第二段（后退）：L=0.7，M=2，K=7，段终点 x=0.65/0.3，弧长负向累积
+    // 第二段（后退）：L=0.7，M=ceil(0.7/0.75)=1，K=14，段终点 x=0.3，弧长
+    // 负向累积
     EXPECT_NEAR(estimates[1].start_arc_length, 1.0, 1e-9);
-    ASSERT_EQ(estimates[1].segments.size(), 2);
-    EXPECT_NEAR(estimates[1].segments[0].arc_length, 0.65, 1e-9);
-    EXPECT_NEAR(estimates[1].segments[1].arc_length, 0.3, 1e-9);
-    EXPECT_NEAR(estimates[1].segments[1].desired_position.x(), 0.3, 1e-9);
-    EXPECT_LT(estimates[1].segments[1].arc_length,
-              estimates[1].segments[0].arc_length);
+    ASSERT_EQ(estimates[1].segments.size(), 1);
+    EXPECT_NEAR(estimates[1].segments[0].arc_length, 0.3, 1e-9);
+    EXPECT_NEAR(estimates[1].segments[0].desired_position.x(), 0.3, 1e-9);
+    EXPECT_LT(estimates[1].segments[0].arc_length,
+              estimates[1].start_arc_length);
     // 第三段（前进）：L=0.5，M=1，段终点 x=0.8
     EXPECT_NEAR(estimates[2].start_arc_length, 0.3, 1e-9);
     ASSERT_EQ(estimates[2].segments.size(), 1);

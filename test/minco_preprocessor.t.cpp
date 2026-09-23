@@ -72,7 +72,7 @@ TEST(MincoPreprocessorTest, StraightSingleManeuverConverges) {
         preprocessor.preprocess(estimates, {0.0, 0.0});
     EXPECT_TRUE(result.optimizer_converged);
     EXPECT_TRUE(result.success);
-    ASSERT_EQ(result.segment_end_positions.size(), 4U);
+    ASSERT_EQ(result.segment_end_positions.size(), 3U);
     EXPECT_LT(result.max_endpoint_error, 0.1);
     EXPECT_NEAR(result.segment_end_positions.back().x(), 2.0, 0.1);
     EXPECT_NEAR(result.segment_end_positions.back().y(), 0.0, 0.1);
@@ -83,7 +83,7 @@ TEST(MincoPreprocessorTest, StraightSingleManeuverConverges) {
     EXPECT_NEAR(end_rate.y(), 0.0, 1e-9);
     // 无换挡点，段时长均为正且与初值同量级
     EXPECT_EQ(result.max_cusp_speed, 0.0);
-    ASSERT_EQ(result.durations.size(), 4U);
+    ASSERT_EQ(result.durations.size(), 3U);
     for (const double duration : result.durations) {
         EXPECT_GT(duration, 0.0);
         EXPECT_LT(duration, 10.0);
@@ -284,6 +284,15 @@ TEST(MincoPreprocessorTest, InvalidConfigThrows) {
     config = {};
     config.pre_physics_samples_per_segment = 1;
     EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
+    // 物理采样并入辛普森节点的合并约束：(num_physics-1) 须整除辛普森子
+    // 区间数——4 点物理采样（间隔 1/3）与 8 个辛普森子区间不兼容
+    config = {};
+    config.pre_physics_samples_per_segment = 4;
+    EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);
+    // 3 点物理采样（间隔 1/2）与 8 个辛普森子区间兼容，允许构造
+    config = {};
+    config.pre_physics_samples_per_segment = 3;
+    EXPECT_NO_THROW(const MincoPreprocessor p(config));
     config = {};
     config.pre_lbfgs_max_iterations = 0;
     EXPECT_THROW(const MincoPreprocessor p(config), std::invalid_argument);

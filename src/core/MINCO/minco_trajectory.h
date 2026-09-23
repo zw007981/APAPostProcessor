@@ -17,6 +17,30 @@ struct MincoBoundaryCondition2d {
     MincoBoundaryCondition theta;
     MincoBoundaryCondition s;
 };
+// 单点 0~2 阶批量求值结果（实时间导数；x 分量为 θ 维、y 分量为 s 维）。
+// 供物理约束装配等热路径一次取全三阶导数，替代三次单阶 evaluateSegment
+// 调用（三行基函数共享幂次链，逐位等价有单测钉住）
+struct MincoSegmentSample {
+    // 0 阶值（位置量）：(θ, s)
+    Eigen::Vector2d d0{0.0, 0.0};
+    // 1 阶值（速度量）：(θ̇, ṡ)
+    Eigen::Vector2d d1{0.0, 0.0};
+    // 2 阶值（加速度量）：(θ̈, s̈)
+    Eigen::Vector2d d2{0.0, 0.0};
+};
+// 段两端 3/4 阶实时间导数（θ 与 s）。1/2 阶导数在段两端恰为辛普森首末
+// 节点样本（调用方直接复用节点样本即可），故本接口只补高阶：一次调用
+// 共享 T³/T⁴ 与 falling factorial 递推，替代 4 次逐阶 evaluateSegment
+struct MincoSegmentEndOrders34 {
+    // 段首（tau=0）3 阶实时间导数 (d³θ/dt³, d³s/dt³)
+    Eigen::Vector2d start_order3{0.0, 0.0};
+    // 段首 4 阶实时间导数 (d⁴θ/dt⁴, d⁴s/dt⁴)
+    Eigen::Vector2d start_order4{0.0, 0.0};
+    // 段末（tau=1）3 阶实时间导数
+    Eigen::Vector2d end_order3{0.0, 0.0};
+    // 段末 4 阶实时间导数
+    Eigen::Vector2d end_order4{0.0, 0.0};
+};
 // MINCO 分段多项式轨迹：θ(t) 与 s(t) 各为 M 段 5 阶多项式（每段 6 个归一化
 // 系数）。本类封装 K(T)c=b 的装配与块三对角求解、按任意时刻求值及各阶实
 // 时间导数、终点弧长 s_f 的 K(T)^{-T} 伴随梯度、以及时间重参数化
@@ -51,6 +75,17 @@ class MincoTrajectory {
     // 处 θ/s 的 order 阶实时间导数
     Eigen::Vector2d evaluateSegment(int segment_index, double local_time,
                                     int order) const;
+    // 求值指定段内局部时刻处 θ/s 的 0/1/2 阶实时间导数（批量版
+    //  evaluateSegment：三行基函数共享 tau/T 幂次链一次构造，值与逐阶调用
+    // 逐位一致）；段索引越界抛 std::out_of_range，未初始化抛
+    // std::logic_error
+    MincoSegmentSample evaluateSegmentOrders02(int segment_index,
+                                               double local_time) const;
+    // 段两端的 3/4 阶实时间导数批量求值（段首 tau=0 与段末 tau=1 各一份），
+    // 与逐阶 evaluateSegment 调用逐位一致（有单测钉住）；段索引越界抛
+    // std::out_of_range，未初始化抛 std::logic_error
+    MincoSegmentEndOrders34 evaluateSegmentEndOrders34(
+        int segment_index) const;
     // 段数 M；未调用 setTrajectory 时为 0
     int numSegments() const { return static_cast<int>(durations_.size()); }
     // 第 i 段时长；越界抛 std::out_of_range
@@ -73,6 +108,15 @@ class MincoTrajectory {
     // 公开 buildKnotVector/computeBasisAtU 同理）
     static Eigen::Matrix<double, 1, COEFFS_PER_SEG> DerivativeBasisRow(
         double tau_norm, int order, double duration);
+    // 一次构造 0/1/2 阶实时间导数基函数行（三行共享 tau 幂次连乘链，T² 取
+    // 乘法形式，与逐阶 DerivativeBasisRow 调用逐位一致——有单测钉住）。
+    // 供物理约束/ESDF 惩罚的系数梯度装配消除同节点重复构造；输出行指针
+    // 必须非空
+    static void DerivativeBasisRows012(
+        double tau_norm, double duration,
+        Eigen::Matrix<double, 1, COEFFS_PER_SEG>* row0,
+        Eigen::Matrix<double, 1, COEFFS_PER_SEG>* row1,
+        Eigen::Matrix<double, 1, COEFFS_PER_SEG>* row2);
     // 时间重参数化分段光滑双射 T=T(τ)（T=1 处一阶连续可导）
     static double TauToDuration(double tau);
     // 双射逆映射 τ=τ(T)，要求 T>0，否则抛 std::invalid_argument
@@ -108,5 +152,15 @@ class MincoTrajectory {
     CoeffMatrix coeffs_s_;
     // 保留 K(T) 的块 LU 消元结果，供 s_f 伴随梯度与通用伴随求解复用
     BlockTridiagonalSolver solver_;
+    // K(T) 装配的中间块（三条块对角线）：置为成员以跨 setTrajectory
+    // 调用复用堆容量（求解热路径上每次 L-BFGS 求值都会触发一次重建），
+    // 每次装配前由 AssembleK 清空重填，不携带跨调用状态
+    std::vector<BlockTridiagonalSolver::Block> k_lower_;
+    // 同上：主对角块
+    std::vector<BlockTridiagonalSolver::Block> k_diagonal_;
+    // 同上：上对角块
+    std::vector<BlockTridiagonalSolver::Block> k_upper_;
+    // θ/s 合并右端项装配缓冲（6×2M），同样跨调用复用堆容量
+    CoeffMatrix rhs_merged_;
 };
 }  // namespace apa_post_processor

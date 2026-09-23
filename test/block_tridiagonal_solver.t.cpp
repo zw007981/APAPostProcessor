@@ -201,6 +201,58 @@ TEST(BlockTridiagonalSolverTest, FactorizationReuseServesMultipleRhs) {
         1e-9);
 }
 
+// 测试多组右端项拼接一次前解与逐组单独求解逐位一致。
+// 因为 θ 与 s 两维共享同一 K(T) 分解，拼接为 6×2M 的一次前解必须与
+// 分组单独求解产生逐位相同的结果（每组连续 numBlocks 列独立求解、
+// 组间无耦合）。
+TEST(BlockTridiagonalSolverTest, MultiRhsGroupSolveMatchesSeparateSolves) {
+    std::mt19937 rng(41);
+    std::vector<Block> lower, diagonal, upper;
+    BuildRandomSystem(4, &rng, &lower, &diagonal, &upper);
+    const BlockMatrix rhs_a = BuildRandomRhs(4, &rng);
+    const BlockMatrix rhs_b = BuildRandomRhs(4, &rng);
+    BlockTridiagonalSolver solver;
+    solver.factorize(lower, diagonal, upper);
+
+    BlockMatrix merged(BLOCK_SIZE, 2 * 4);
+    merged.leftCols(4) = rhs_a;
+    merged.rightCols(4) = rhs_b;
+    const BlockMatrix x = solver.solve(merged);
+    const BlockMatrix x_a = solver.solve(rhs_a);
+    const BlockMatrix x_b = solver.solve(rhs_b);
+    for (int i = 0; i < x_a.size(); ++i) {
+        EXPECT_DOUBLE_EQ(x.leftCols(4)(i), x_a(i)) << "merged lhs mismatch";
+        EXPECT_DOUBLE_EQ(x.rightCols(4)(i), x_b(i)) << "merged rhs mismatch";
+    }
+    // 转置求解同样支持多组右端项拼接
+    const BlockMatrix xt = solver.solveTranspose(merged);
+    const BlockMatrix xt_a = solver.solveTranspose(rhs_a);
+    const BlockMatrix xt_b = solver.solveTranspose(rhs_b);
+    for (int i = 0; i < xt_a.size(); ++i) {
+        EXPECT_DOUBLE_EQ(xt.leftCols(4)(i), xt_a(i))
+            << "merged transpose lhs mismatch";
+        EXPECT_DOUBLE_EQ(xt.rightCols(4)(i), xt_b(i))
+            << "merged transpose rhs mismatch";
+    }
+}
+
+// 测试右端项列数不是分解块数整数倍时的拒绝行为。
+// 因为多组右端项的语义要求每组恰好 numBlocks 列，列数错位属于调用方
+// 逻辑错误，必须抛出异常而非静默按错位的组求解。
+TEST(BlockTridiagonalSolverTest, RejectsNonMultipleRhsColumns) {
+    std::mt19937 rng(43);
+    std::vector<Block> lower, diagonal, upper;
+    BuildRandomSystem(3, &rng, &lower, &diagonal, &upper);
+    BlockTridiagonalSolver solver;
+    solver.factorize(lower, diagonal, upper);
+    const BlockMatrix bad_rhs = BlockMatrix::Zero(BLOCK_SIZE, 4);
+    EXPECT_THROW(solver.solve(bad_rhs), std::invalid_argument);
+    EXPECT_THROW(solver.solveTranspose(bad_rhs), std::invalid_argument);
+    const BlockMatrix empty_rhs = BlockMatrix::Zero(BLOCK_SIZE, 0);
+    EXPECT_THROW(solver.solve(empty_rhs), std::invalid_argument);
+    EXPECT_THROW(solver.solveTranspose(empty_rhs), std::invalid_argument);
+}
+
 // 测试输入尺寸不合法的拒绝行为。
 // 因为装配错误属于调用方逻辑错误，所以必须抛出异常而非静默纠错。
 TEST(BlockTridiagonalSolverTest, RejectsMismatchedSizes) {

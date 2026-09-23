@@ -32,8 +32,9 @@ struct MincoConfig : public Config {
     double weight_comf = 20.0;
 
     // ===== 前端解析与降采样（MincoManeuverSegmenter）=====
-    // 标称段长 d_seg (m)
-    double nominal_segment_length = 0.6;
+    // 标称段长 d_seg (m)：0.75 m（标称段时长 1.5 s @ nominal_speed）为四
+    // 数据集扫描（0.4~2.0 s）后的均衡点——收敛性/κ/耗时全面不劣于 0.6 m
+    double nominal_segment_length = 0.75;
     // 标称行驶速度 (m/s)，用于段时长初值估计
     double nominal_speed = 0.5;
     // 标称转向角速度 (rad/s)，用于原地转向段的时长初值估计
